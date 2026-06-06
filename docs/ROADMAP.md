@@ -11,15 +11,19 @@ end-to-end with `quiver`).
 - `runtime/skia_shim.c` C-shim placeholder.
 - Design docs.
 
-## Milestone 1 — minimal canvas FFI (counter-app slice)
+## Milestone 1 — minimal canvas FFI (counter-app slice) ✅ (software backend)
 
-Bind the smallest Skia/SDL surface that lets `quiver` render and run a counter:
+The smallest canvas surface that lets `quiver` render and run a counter,
+implemented over the deterministic software raster backend (the exact
+`ruxen_canvas_*` ABI the GPU backend will use):
 
-1. SDL window → Skia surface on its GL/Metal context (`Window.open`).
+1. `Window.open` → framebuffer-backed window (headless; SDL window + GL/
+   Metal surface slot in behind the same ABI later). ✅
 2. Canvas FFI: `begin_frame` / `end_frame`, `clear(color)`, `draw_rect`,
-   `draw_text` (one font).
-3. Event stream: pointer down/up, resize, close.
-4. A pin test per newly-bound Skia method.
+   `draw_text` (one embedded 5x7 font) + `measure_text` + `read_pixel`. ✅
+3. Event stream: pointer move/down/up, key, resize, close — over a C ring
+   buffer with `push_event`/`poll_event`. ✅
+4. A pin test per newly-bound method (46 tests across `tests/`). ✅
 
 **Explicitly out of this slice:** mobile/web, the full canvas surface
 (paths/images/clips), text shaping/i18n beyond one basic font, packaging.

@@ -36,10 +36,16 @@ vendored library — only the *binding surface* is incremental. See
 
 ## Status
 
-**Scaffold.** API skeleton + docs are in place; the SDL/Skia FFI is not yet
-wired. The first milestone is the desktop counter app's minimal canvas FFI
-(`begin_frame`/`end_frame`/`clear`/`draw_rect`/`draw_text`). See
-[`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Milestone 1 implemented** over a deterministic **software raster backend**
+(`runtime/skia_shim.c`): `Window.open`, the `Event` stream, and a `Canvas`
+with `begin_frame`/`end_frame`, `clear`, `draw_rect` (src-over blending +
+clipping), `draw_text`/`measure_text` (embedded 5x7 bitmap font), and a
+`read_pixel` pin-test hook — 46 pin tests, one file per bound capability.
+
+The software backend implements the exact `ruxen_canvas_*` ABI the GPU
+backend will use, so vendored Skia + SDL slot in behind the same signatures
+without touching the Ruxen side (build/link decision tracked in
+[`docs/ROADMAP.md`](docs/ROADMAP.md)).
 
 ## Docs
 
