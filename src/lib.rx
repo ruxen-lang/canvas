@@ -120,6 +120,8 @@ class RawHost
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
     def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end
 end
@@ -187,10 +189,21 @@ class Canvas
     self.status_to_result(code, "draw_rect")
   end
 
-  ## Draw a single line of text at a baseline origin (one font, for the
-  ## first vertical slice; full Skia paragraph/HarfBuzz shaping comes later).
+  ## Draw a single line of text with (x, y) as the BASELINE origin: glyphs
+  ## occupy the 7 pixel rows above y. One embedded 5x7 bitmap font for the
+  ## first vertical slice; Skia paragraph/HarfBuzz shaping comes later.
   def var draw_text(text: String, x: Float32, y: Float32, color: Color) -> Result[nil, String]
-    Err(String.from(&"canvas: draw_text not implemented yet (scaffold)"))
+    let code = self.raw.draw_text_raw(
+      &text, x as Float, y as Float,
+      color.r as Int, color.g as Int, color.b as Int, color.a as Int)
+    self.status_to_result(code, "draw_text")
+  end
+
+  ## Width in pixels `text` would occupy when drawn (single line). The
+  ## character count crosses the FFI, not the string — the font metric
+  ## stays defined in the shim.
+  def measure_text(text: &String) -> Int
+    self.raw.measure_text_n_raw(text.size)
   end
 
   private
