@@ -1,0 +1,68 @@
+# Pin tests for the canvas surface lifecycle: create / size / read_pixel
+# (ruxen_canvas_host_new / _width / _height / _read_pixel / _drop).
+
+Tester.describe("Canvas surface") do |t: &var Tester|
+  t.it("creates an offscreen canvas with the requested size") do
+    let c = match Canvas.create(8, 6)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create(8, 6) failed")
+    end
+    t.expect(c.width).to_eq(8)
+    t.expect(c.height).to_eq(6)
+  end
+
+  t.it("rejects zero or negative dimensions") do
+    var bad = false
+    match Canvas.create(0, 6)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+
+    match Canvas.create(8, -1)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("rejects dimensions over the engine maximum") do
+    var bad = false
+    match Canvas.create(16385, 6)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("starts fully transparent") do
+    let c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create(4, 4) failed")
+    end
+    t.expect(c.read_pixel(0, 0)).to_eq(0)
+    t.expect(c.read_pixel(3, 3)).to_eq(0)
+  end
+
+  t.it("read_pixel returns -1 out of bounds") do
+    let c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create(4, 4) failed")
+    end
+    t.expect(c.read_pixel(4, 0)).to_eq(-1)
+    t.expect(c.read_pixel(0, 4)).to_eq(-1)
+    t.expect(c.read_pixel(-1, 0)).to_eq(-1)
+  end
+
+  t.it("teardown is deterministic (create and drop many)") do
+    var i = 0
+    while i < 100
+      let c = match Canvas.create(64, 64)
+        Ok(v)  -> v
+        Err(_) -> panic!("Canvas.create(64, 64) failed")
+      end
+      t.expect(c.width).to_eq(64)
+      i += 1
+    end
+  end
+end

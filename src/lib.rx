@@ -81,11 +81,71 @@ class Window
   end
 end
 
+## Predicates over values shared with the C shim — keep in sync with
+## runtime/skia_shim.c. (Top-level `let` constants are not supported in
+## library files, and zero-arg module functions currently miscompile, so
+## these are one-arg predicate functions.)
+module Rxc
+  ## True when (width, height) is a framebuffer size the engine accepts.
+  ## 16384 is the per-axis maximum (matches the C shim).
+  def valid_dimensions(width: Int, height: Int) -> Bool
+    width > 0 && height > 0 && width <= 16384 && height <= 16384
+  end
+end
+
+## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
+## `Window`; this class is the step-2 `lib` declaration of the
+## incremental-FFI discipline (docs/FFI.md) and offers no safety checks of
+## its own.
+class RawHost
+  lib "runtime/skia_shim.c"
+    def self.new as "ruxen_canvas_host_new"(width: Int, height: Int) -> RawHost
+    def width as "ruxen_canvas_host_width"(self) -> Int
+    def height as "ruxen_canvas_host_height"(self) -> Int
+    def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
+    def drop as "ruxen_canvas_host_drop"(self) -> nil
+  end
+end
+
 ## The drawing surface for a single frame. Methods mirror Skia's `SkCanvas`.
 ##
 ## The exposed subset grows over time; see `docs/FFI.md` for the 4-step
 ## process to bind a new Skia call. Every newly-bound method gets a pin test.
+##
+## A `Canvas` owns its framebuffer; dropping it tears the C-side host down
+## deterministically (no GC). Offscreen canvases (from `Canvas.create`) are
+## first-class — they are what the pin tests draw on.
 class Canvas
+  raw: RawHost
+
+  def init(@raw: RawHost)
+  end
+
+  ## Create an offscreen canvas with the given pixel size.
+  def self.create(width: Int, height: Int) -> Result[Canvas, String]
+    if !Rxc.valid_dimensions(width, height)
+      return Err(String.from("canvas: invalid canvas size #{width}x#{height}"))
+    end
+    Ok(Canvas.new(RawHost.new(width, height)))
+  end
+
+  ## Width of the framebuffer in pixels.
+  def width -> Int
+    self.raw.width
+  end
+
+  ## Height of the framebuffer in pixels.
+  def height -> Int
+    self.raw.height
+  end
+
+  ## Read one pixel back as packed `0xAARRGGBB` (see `Color.to_argb`).
+  ## Returns -1 when (x, y) is out of bounds. This is the observation hook
+  ## the pin tests use; it is not part of the upward L2 surface.
+  def read_pixel(x: Int, y: Int) -> Int
+    self.raw.read_pixel(x, y)
+  end
+
   ## Begin a frame; must be paired with `end_frame`.
   def var begin_frame -> Result[nil, String]
     Err(String.from(&"canvas: begin_frame not implemented yet (scaffold)"))
