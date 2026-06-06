@@ -91,6 +91,19 @@ module Rxc
   def valid_dimensions(width: Int, height: Int) -> Bool
     width > 0 && height > 0 && width <= 16384 && height <= 16384
   end
+
+  # status-code predicates (RXC_OK / RXC_ERR_* in the shim)
+  def is_ok(code: Int) -> Bool
+    code == 0
+  end
+
+  def is_no_frame(code: Int) -> Bool
+    code == 2
+  end
+
+  def is_in_frame(code: Int) -> Bool
+    code == 3
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -103,6 +116,9 @@ class RawHost
     def width as "ruxen_canvas_host_width"(self) -> Int
     def height as "ruxen_canvas_host_height"(self) -> Int
     def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
+    def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
+    def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
+    def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end
 end
@@ -148,17 +164,18 @@ class Canvas
 
   ## Begin a frame; must be paired with `end_frame`.
   def var begin_frame -> Result[nil, String]
-    Err(String.from(&"canvas: begin_frame not implemented yet (scaffold)"))
+    self.status_to_result(self.raw.begin_frame_raw, "begin_frame")
   end
 
-  ## Present the frame to the window's surface.
+  ## Present the frame to the surface.
   def var end_frame -> Result[nil, String]
-    Err(String.from(&"canvas: end_frame not implemented yet (scaffold)"))
+    self.status_to_result(self.raw.end_frame_raw, "end_frame")
   end
 
-  ## Clear the whole surface to a solid color.
+  ## Clear the whole surface to a solid color (no blending).
   def var clear(color: Color) -> Result[nil, String]
-    Err(String.from(&"canvas: clear not implemented yet (scaffold)"))
+    let code = self.raw.clear_raw(color.r as Int, color.g as Int, color.b as Int, color.a as Int)
+    self.status_to_result(code, "clear")
   end
 
   ## Fill a rectangle.
@@ -170,6 +187,22 @@ class Canvas
   ## first vertical slice; full Skia paragraph/HarfBuzz shaping comes later).
   def var draw_text(text: String, x: Float32, y: Float32, color: Color) -> Result[nil, String]
     Err(String.from(&"canvas: draw_text not implemented yet (scaffold)"))
+  end
+
+  private
+
+  ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
+  ## a descriptive `Err` — a not-yet-valid call is never a silent no-op.
+  def status_to_result(code: Int, what: &str) -> Result[nil, String]
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_no_frame(code)
+      Err(String.from("canvas: #{what} called outside begin_frame/end_frame"))
+    elsif Rxc.is_in_frame(code)
+      Err(String.from("canvas: #{what} called while a frame is already open"))
+    else
+      Err(String.from("canvas: #{what} failed: invalid arguments"))
+    end
   end
 end
 

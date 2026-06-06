@@ -1,0 +1,153 @@
+# Pin tests for frame discipline + clear
+# (ruxen_canvas_begin_frame / _end_frame / _clear).
+
+Tester.describe("Canvas frame discipline") do |t: &var Tester|
+  t.it("begin_frame then end_frame succeeds") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+  end
+
+  t.it("drawing outside a frame is an explicit error, never a no-op") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    var failed = false
+    match c.clear(Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> failed = false
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+    # and the framebuffer is untouched
+    t.expect(c.read_pixel(0, 0)).to_eq(0)
+  end
+
+  t.it("begin_frame twice is an error") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("first begin_frame failed")
+    end
+    var failed = false
+    match c.begin_frame
+      Ok(_)  -> failed = false
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+  end
+
+  t.it("end_frame without begin_frame is an error") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    var failed = false
+    match c.end_frame
+      Ok(_)  -> failed = false
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+  end
+
+  t.it("a frame can be reopened after end_frame") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    var round = 0
+    while round < 2
+      match c.begin_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("begin_frame failed on a reopened frame")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed on a reopened frame")
+      end
+      round += 1
+    end
+  end
+end
+
+Tester.describe("Canvas.clear") do |t: &var Tester|
+  t.it("clears every pixel to the color") do
+    var c = match Canvas.create(3, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.new(10u8, 20u8, 30u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let color: Color = Color.new(10u8, 20u8, 30u8, 255u8)
+    let expected = color.to_argb as Int
+    t.expect(c.read_pixel(0, 0)).to_eq(expected)
+    t.expect(c.read_pixel(2, 1)).to_eq(expected)
+  end
+
+  t.it("clear replaces, it does not blend") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("first clear failed")
+    end
+    match c.clear(Color.new(0u8, 0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("second clear failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    t.expect(c.read_pixel(0, 0)).to_eq(0)
+  end
+
+  t.it("pixels survive past end_frame for readback") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black: Color = Color.rgb(0u8, 0u8, 0u8)
+    t.expect(c.read_pixel(1, 1)).to_eq(black.to_argb as Int)
+  end
+end

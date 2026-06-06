@@ -26,6 +26,8 @@
 
 #define RXC_OK            0
 #define RXC_ERR_BAD_ARGS  1  /* invalid dimensions / null handle / bad channel */
+#define RXC_ERR_NO_FRAME  2  /* draw call outside begin_frame/end_frame */
+#define RXC_ERR_IN_FRAME  3  /* begin_frame while a frame is already open */
 
 /* ---- the host object ---- */
 
@@ -33,6 +35,7 @@ typedef struct {
     int32_t   width;
     int32_t   height;
     uint32_t *pixels;      /* width*height, 0xAARRGGBB, non-premultiplied */
+    int32_t   in_frame;    /* begin_frame/end_frame discipline flag */
 } RxHost;
 
 /* ---- lifecycle ---- */
@@ -83,4 +86,48 @@ int64_t ruxen_canvas_read_pixel(int64_t self, int64_t x, int64_t y) {
         return -1;
     }
     return (int64_t)h->pixels[y * h->width + x];
+}
+
+/* ---- frame discipline ---- */
+
+int64_t ruxen_canvas_begin_frame(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->in_frame) return RXC_ERR_IN_FRAME;
+    h->in_frame = 1;
+    return RXC_OK;
+}
+
+/* Present the frame. The software backend has nothing to flip; the GPU
+ * backend will swap buffers here. */
+int64_t ruxen_canvas_end_frame(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    h->in_frame = 0;
+    return RXC_OK;
+}
+
+/* ---- drawing ---- */
+
+static int rxc_check_color(int64_t r, int64_t g, int64_t b, int64_t a) {
+    return r >= 0 && r <= 255 && g >= 0 && g <= 255 &&
+           b >= 0 && b <= 255 && a >= 0 && a <= 255;
+}
+
+static uint32_t rxc_pack(int64_t r, int64_t g, int64_t b, int64_t a) {
+    return ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+           ((uint32_t)g << 8)  |  (uint32_t)b;
+}
+
+/* Clear the whole surface to a solid color (replaces, no blending —
+ * matching SkCanvas::clear semantics). */
+int64_t ruxen_canvas_clear(int64_t self, int64_t r, int64_t g, int64_t b, int64_t a) {
+    RxHost *h = (RxHost *)self;
+    if (!h || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    uint32_t px = rxc_pack(r, g, b, a);
+    int64_t n = (int64_t)h->width * h->height;
+    for (int64_t i = 0; i < n; i++) h->pixels[i] = px;
+    return RXC_OK;
 }
