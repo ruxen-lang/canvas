@@ -69,18 +69,6 @@ struct Rect
   end
 end
 
-## A native OS window backed by an SDL context and a Skia surface.
-##
-## A `Window` owns its surface; dropping it tears down the Skia surface and
-## the SDL window deterministically (no GC) — the no-jank story of the stack.
-class Window
-  ## Open a new window with the given title and logical size.
-  ## TODO(L1): SDL_CreateWindow + Skia surface over the GL/Metal context.
-  def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
-    Err(String.from(&"canvas: Window.open is not implemented yet (scaffold)"))
-  end
-end
-
 ## Predicates over values shared with the C shim — keep in sync with
 ## runtime/skia_shim.c. (Top-level `let` constants are not supported in
 ## library files, and zero-arg module functions currently miscompile, so
@@ -239,4 +227,29 @@ enum Event
   Resize(Int, Int)
   ## The application/window was asked to close.
   CloseRequested
+end
+
+## A window backed by a canvas.
+##
+## On this backend the window is headless (a framebuffer target); the SDL
+## window + GL/Metal surface slot in behind the same ABI later. A `Window`
+## owns its `Canvas`; dropping it tears everything down deterministically
+## (no GC) — the no-jank story of the stack.
+class Window
+  canvas: Canvas
+  title: String
+  width: Int
+  height: Int
+
+  def init(@canvas: Canvas, @title: String, @width: Int, @height: Int)
+  end
+
+  ## Open a new window with the given title and logical size.
+  def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
+    if !Rxc.valid_dimensions(width, height)
+      return Err(String.from("canvas: invalid window size #{width}x#{height}"))
+    end
+    let canvas = Canvas.create(width, height)?
+    Ok(Window.new(canvas, title, width, height))
+  end
 end
