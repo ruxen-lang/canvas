@@ -1,0 +1,89 @@
+## canvas — L1 engine for the Ruxen GUI stack.
+##
+## Cross-platform windowing, input, and a Skia-backed 2D canvas, exposed
+## *upward only* to the L2 framework (`quiver`). This is the ONLY layer of
+## the GUI stack permitted to use `unsafe` / C FFI / platform-specific code
+## (see `docs/ARCHITECTURE.md`).
+##
+## Status: SCAFFOLD. The bodies below are placeholders. The Skia/SDL FFI
+## surface is grown method-by-method following the incremental-FFI
+## discipline in `docs/FFI.md`; the L2 `Canvas` API is designed against the
+## full intended surface from day one while L1 fills in coverage over time.
+
+## A non-premultiplied 8-bit-per-channel RGBA color.
+struct Color
+  r: UInt8
+  g: UInt8
+  b: UInt8
+  a: UInt8
+end
+
+## An axis-aligned rectangle in device-independent pixels.
+struct Rect
+  x: Float32
+  y: Float32
+  width: Float32
+  height: Float32
+end
+
+## A native OS window backed by an SDL context and a Skia surface.
+##
+## A `Window` owns its surface; dropping it tears down the Skia surface and
+## the SDL window deterministically (no GC) — the no-jank story of the stack.
+class Window
+  ## Open a new window with the given title and logical size.
+  ## TODO(L1): SDL_CreateWindow + Skia surface over the GL/Metal context.
+  def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
+    Err(String.from(&"canvas: Window.open is not implemented yet (scaffold)"))
+  end
+end
+
+## The drawing surface for a single frame. Methods mirror Skia's `SkCanvas`.
+##
+## The exposed subset grows over time; see `docs/FFI.md` for the 4-step
+## process to bind a new Skia call. Every newly-bound method gets a pin test.
+class Canvas
+  ## Begin a frame; must be paired with `end_frame`.
+  def var begin_frame -> Result[nil, String]
+    Err(String.from(&"canvas: begin_frame not implemented yet (scaffold)"))
+  end
+
+  ## Present the frame to the window's surface.
+  def var end_frame -> Result[nil, String]
+    Err(String.from(&"canvas: end_frame not implemented yet (scaffold)"))
+  end
+
+  ## Clear the whole surface to a solid color.
+  def var clear(color: Color) -> Result[nil, String]
+    Err(String.from(&"canvas: clear not implemented yet (scaffold)"))
+  end
+
+  ## Fill a rectangle.
+  def var draw_rect(rect: Rect, color: Color) -> Result[nil, String]
+    Err(String.from(&"canvas: draw_rect not implemented yet (scaffold)"))
+  end
+
+  ## Draw a single line of text at a baseline origin (one font, for the
+  ## first vertical slice; full Skia paragraph/HarfBuzz shaping comes later).
+  def var draw_text(text: String, x: Float32, y: Float32, color: Color) -> Result[nil, String]
+    Err(String.from(&"canvas: draw_text not implemented yet (scaffold)"))
+  end
+end
+
+## A single input or lifecycle event delivered by the engine's event stream.
+##
+## L1 exposes a stream of these upward; L2 dispatches them to widget handlers.
+enum Event
+  ## The pointer moved to (x, y) in logical pixels.
+  PointerMove(Float32, Float32)
+  ## A pointer button was pressed at (x, y).
+  PointerDown(Float32, Float32)
+  ## A pointer button was released at (x, y).
+  PointerUp(Float32, Float32)
+  ## A key was pressed (platform keycode).
+  KeyDown(Int)
+  ## The window was resized to (width, height).
+  Resize(Int, Int)
+  ## The application/window was asked to close.
+  CloseRequested
+end
