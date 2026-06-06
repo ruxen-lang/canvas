@@ -1,14 +1,14 @@
 /*
  * rx_canvas_internal.h — shared internals of the canvas C shim.
  *
- * Two translation units include this:
- *   skia_shim.c   — the deterministic software raster backend (no platform
- *                   code; presents/pumps through the hooks below).
- *   sdl_window.c  — the live-window platform layer (SDL3 via dlopen); it
- *                   attaches to a host by filling in the hooks.
+ * skia_shim.c (the deterministic software raster backend) includes this.
+ * runtime/sdl_window.c (the live-window presenter) deliberately does NOT —
+ * it reads only the leading width/height/pixels fields through its own
+ * layout-prefix view, so the two translation units stay decoupled. If the
+ * leading field order of RxHost changes, update RxHostPrefix there.
  *
- * Everything here is internal to the shim pair — the Ruxen side only ever
- * sees the flat ruxen_canvas_* functions (docs/FFI.md).
+ * Everything here is internal to the shim — the Ruxen side only ever sees
+ * the flat ruxen_canvas_* functions (docs/FFI.md).
  */
 #ifndef RX_CANVAS_INTERNAL_H
 #define RX_CANVAS_INTERNAL_H
@@ -40,7 +40,10 @@ typedef struct {
  *
  * NOT thread-safe: an RxHost has exactly one owner (the Ruxen Canvas /
  * Window) and all calls — in particular poll_event followed by the
- * pending-payload accessors — must come from one thread. */
+ * pending-payload accessors — must come from one thread.
+ *
+ * width/height/pixels MUST stay the leading fields in this order — they
+ * are sdl_window.c's RxHostPrefix view. */
 typedef struct RxHost {
     int32_t   width;
     int32_t   height;
@@ -52,16 +55,6 @@ typedef struct RxHost {
     int32_t   ev_head;
     int32_t   ev_count;
     RxEvent   pending;     /* the event most recently popped by poll */
-
-    /* platform-window attachment (all 0/NULL on the headless path).
-     * skia_shim.c calls the hooks; sdl_window.c fills them in. */
-    int32_t   windowed;
-    void     *plat_window;
-    void     *plat_renderer;
-    void     *plat_texture;
-    int       (*present)(struct RxHost *);  /* end_frame -> screen; 0 = ok */
-    void      (*pump)(struct RxHost *);     /* drain platform events into the ring */
-    void      (*close)(struct RxHost *);    /* tear the platform window down */
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */

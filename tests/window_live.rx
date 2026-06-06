@@ -1,0 +1,77 @@
+# Pin tests for the live-window path (runtime/sdl_window.c). Adaptive:
+# with a display + SDL2 runtime the shown branch runs (one small window
+# appears briefly); otherwise the unavailable branch proves clean failure.
+
+Tester.describe("Window.show — live path") do |t: &var Tester|
+  t.it("show either puts a window up or fails cleanly, drawing works either way") do
+    var w = match Window.open(String.from("canvas pin test"), 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+
+    match w.canvas.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match w.canvas.clear(Color.rgb(10u8, 20u8, 30u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match w.canvas.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    match w.show
+      Ok(_) -> {
+        # the real-window branch
+        t.expect(w.windowed).to_eq(true)
+        t.expect(Window.shown?).to_eq(true)
+        match w.present
+          Ok(_)  -> nil
+          Err(_) -> panic!("present failed on a shown window")
+        end
+        t.expect(w.pump >= 0).to_eq(true)
+        w.hide
+        t.expect(Window.shown?).to_eq(false)
+        t.expect(w.windowed).to_eq(false)
+      }
+      Err(_) -> {
+        # the no-display branch
+        t.expect(w.windowed).to_eq(false)
+        t.expect(Window.shown?).to_eq(false)
+      }
+    end
+
+    # both branches: the framebuffer is observable
+    let bg: Color = Color.rgb(10u8, 20u8, 30u8)
+    t.expect(w.canvas.read_pixel(0, 0)).to_eq(bg.to_argb as Int)
+  end
+
+  t.it("show is idempotent once shown") do
+    var w = match Window.open(String.from("idem"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    match w.show
+      Ok(_) -> {
+        match w.show
+          Ok(_)  -> nil
+          Err(_) -> panic!("second show must be Ok")
+        end
+        w.hide
+      }
+      Err(_) -> nil
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("sleep_ms returns (frame pacing primitive)") do
+    let w = match Window.open(String.from("h"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    w.sleep_ms(1)
+    t.expect(true).to_eq(true)
+  end
+end

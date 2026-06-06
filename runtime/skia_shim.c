@@ -11,17 +11,23 @@
  * runtime. All pointers cross the ABI as machine-word integers (int64_t);
  * `void` returns map to no return value (see docs/FFI.md).
  *
- * Backend: a deterministic software raster target (the "headless" backend).
- * It implements the exact ABI the GPU backend will use, so Skia/SDL can be
- * slotted in behind these signatures later (prebuilt-vs-source is still an
- * open decision — docs/ROADMAP.md) without touching the Ruxen side. It is
- * also what the pin tests run against: every bound call is verified by
- * reading pixels back from the framebuffer.
+ * Backend: a deterministic software raster target. It implements the exact
+ * ABI the GPU backend will use, so Skia can be slotted in behind these
+ * signatures later (prebuilt-vs-source is still an open decision —
+ * docs/ROADMAP.md) without touching the Ruxen side. It is also what the
+ * pin tests run against: every bound call is verified by reading pixels
+ * back from the framebuffer.
+ *
+ * This file contains NO platform code. Live windowing lives in
+ * runtime/sdl_window.c, which attaches to a host through the present/pump/
+ * close hooks declared in rx_canvas_internal.h.
  */
 
 #include <stdint.h>
 #include <stdlib.h>
-#include <string.h>
+#include <time.h>
+
+#include "rx_canvas_internal.h"
 
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
@@ -41,127 +47,9 @@ static int rxc_finite_pixels(double v) {
     return v > -1.0e9 && v < 1.0e9;
 }
 
-/* ---- status codes shared with src/lib.rx (keep in sync!) ---- */
 
-#define RXC_OK            0
-#define RXC_ERR_BAD_ARGS  1  /* invalid dimensions / null handle / bad channel */
-#define RXC_ERR_NO_FRAME  2  /* draw call outside begin_frame/end_frame */
-#define RXC_ERR_IN_FRAME  3  /* begin_frame while a frame is already open */
-#define RXC_ERR_QUEUE_FULL 4 /* event ring buffer is full */
-#define RXC_ERR_PRESENT    5 /* presenting the frame to the window failed */
-
-/* ---- the host object ---- */
-
-#define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 5   /* CloseRequested — keep in sync with Event in src/lib.rx */
-
-typedef struct {
-    int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
-    double  a;      /* x / keycode / width  (event-kind dependent) */
-    double  b;      /* y / unused  / height (event-kind dependent) */
-} RxEvent;
-
-/* NOT thread-safe: an RxHost has exactly one owner (the Ruxen Canvas /
- * Window) and all calls — in particular poll_event followed by the
- * pending-payload accessors — must come from one thread. */
-typedef struct {
-    int32_t   width;
-    int32_t   height;
-    uint32_t *pixels;      /* width*height, 0xAARRGGBB, non-premultiplied */
-    int32_t   in_frame;    /* begin_frame/end_frame discipline flag */
-
-    /* event ring buffer (filled by the platform pump or by tests) */
-    RxEvent   events[RXC_EVENT_CAP];
-    int32_t   ev_head;
-    int32_t   ev_count;
-    RxEvent   pending;     /* the event most recently popped by poll */
-
-    /* live-window presentation (NULL/0 on the headless path) */
-    void     *sdl_window;
-    void     *sdl_renderer;
-    void     *sdl_texture;
-    int32_t   windowed;
-} RxHost;
-
-/* ---- SDL3 dynamic presentation backend ----
- *
- * Loaded at runtime with dlopen("libSDL3.so.0") so the package needs no
- * SDL development files and keeps zero link-time dependencies. When the
- * library or a display is unavailable, window_open reports failure and the
- * caller falls back to the headless framebuffer — same drawing ABI either
- * way. Constants below were validated empirically against SDL 3 (probe in
- * the repo history): INIT_VIDEO, ARGB8888, STREAMING, RESIZABLE, the
- * event-type values, and the f32 x/y payload offsets. */
-
-#include <dlfcn.h>
-
-#define RX_SDL_INIT_VIDEO      0x20u
-#define RX_SDL_ARGB8888        0x16362004u
-#define RX_SDL_TEX_STREAMING   1
-#define RX_SDL_WIN_RESIZABLE   0x20u
-#define RX_SDL_EVENT_QUIT          0x100u
-#define RX_SDL_EVENT_KEY_DOWN      0x300u
-#define RX_SDL_EVENT_MOUSE_MOTION  0x400u
-#define RX_SDL_EVENT_MOUSE_DOWN    0x401u
-#define RX_SDL_EVENT_MOUSE_UP      0x402u
-#define RX_SDL_EVENT_WINDOW_FIRST  0x200u
-#define RX_SDL_EVENT_WINDOW_LAST   0x2FFu
-
-typedef struct {
-    int  (*init)(uint32_t);
-    void *(*create_window)(const char *, int, int, uint64_t);
-    void *(*create_renderer)(void *, const char *);
-    void *(*create_texture)(void *, uint32_t, int, int, int);
-    int  (*update_texture)(void *, const void *, const void *, int);
-    int  (*render_clear)(void *);
-    int  (*render_texture)(void *, void *, const void *, const void *);
-    void (*render_present)(void *);
-    int  (*poll_event)(void *);
-    int  (*get_window_size)(void *, int *, int *);
-    void (*destroy_texture)(void *);
-    void (*destroy_renderer)(void *);
-    void (*destroy_window)(void *);
-} RxSdl;
-
-static RxSdl rx_sdl;
-static int rx_sdl_state = 0;   /* 0 = untried, 1 = loaded+inited, -1 = unavailable */
-
-static int rx_sdl_ready(void) {
-    if (rx_sdl_state != 0) return rx_sdl_state == 1;
-    rx_sdl_state = -1;
-    void *lib = dlopen("libSDL3.so.0", RTLD_NOW);
-    if (!lib) return 0;
-    rx_sdl.init            = (int (*)(uint32_t))dlsym(lib, "SDL_Init");
-    rx_sdl.create_window   = (void *(*)(const char *, int, int, uint64_t))dlsym(lib, "SDL_CreateWindow");
-    rx_sdl.create_renderer = (void *(*)(void *, const char *))dlsym(lib, "SDL_CreateRenderer");
-    rx_sdl.create_texture  = (void *(*)(void *, uint32_t, int, int, int))dlsym(lib, "SDL_CreateTexture");
-    rx_sdl.update_texture  = (int (*)(void *, const void *, const void *, int))dlsym(lib, "SDL_UpdateTexture");
-    rx_sdl.render_clear    = (int (*)(void *))dlsym(lib, "SDL_RenderClear");
-    rx_sdl.render_texture  = (int (*)(void *, void *, const void *, const void *))dlsym(lib, "SDL_RenderTexture");
-    rx_sdl.render_present  = (void (*)(void *))dlsym(lib, "SDL_RenderPresent");
-    rx_sdl.poll_event      = (int (*)(void *))dlsym(lib, "SDL_PollEvent");
-    rx_sdl.get_window_size = (int (*)(void *, int *, int *))dlsym(lib, "SDL_GetWindowSize");
-    rx_sdl.destroy_texture = (void (*)(void *))dlsym(lib, "SDL_DestroyTexture");
-    rx_sdl.destroy_renderer = (void (*)(void *))dlsym(lib, "SDL_DestroyRenderer");
-    rx_sdl.destroy_window  = (void (*)(void *))dlsym(lib, "SDL_DestroyWindow");
-    if (!rx_sdl.init || !rx_sdl.create_window || !rx_sdl.create_renderer ||
-        !rx_sdl.create_texture || !rx_sdl.update_texture || !rx_sdl.render_clear ||
-        !rx_sdl.render_texture || !rx_sdl.render_present || !rx_sdl.poll_event ||
-        !rx_sdl.get_window_size || !rx_sdl.destroy_texture ||
-        !rx_sdl.destroy_renderer || !rx_sdl.destroy_window) {
-        return 0;
-    }
-    if (!rx_sdl.init(RX_SDL_INIT_VIDEO)) return 0;
-    rx_sdl_state = 1;
-    return 1;
-}
 
 /* ---- lifecycle ---- */
-
-/* forward declarations (window_open tears down via drop; the SDL pump
- * feeds the ring via push_event) */
-void ruxen_canvas_host_drop(int64_t self);
-int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b);
 
 /* Create a host with a width*height framebuffer, initially fully
  * transparent. Returns the handle as int64_t, or 0 on bad dimensions /
@@ -189,54 +77,11 @@ int64_t ruxen_canvas_host_is_null(int64_t self) {
     return self == 0 ? 1 : 0;
 }
 
-/* Open a host with a LIVE OS window over it (SDL3 via dlopen). Returns 0
- * when SDL or a display is unavailable, or on bad dimensions — the caller
- * falls back to the headless path. The framebuffer is identical to the
- * headless one; end_frame additionally presents it to the window. */
-int64_t ruxen_canvas_window_open(int64_t title, int64_t width, int64_t height) {
-    const char *t = (const char *)title;
-    if (!t) return 0;
-    int64_t handle = ruxen_canvas_host_new(width, height);
-    if (!handle) return 0;
-    RxHost *h = (RxHost *)handle;
-    if (!rx_sdl_ready()) {
-        ruxen_canvas_host_drop(handle);
-        return 0;
-    }
-    h->sdl_window = rx_sdl.create_window(t, (int)width, (int)height, RX_SDL_WIN_RESIZABLE);
-    if (h->sdl_window) {
-        h->sdl_renderer = rx_sdl.create_renderer(h->sdl_window, NULL);
-    }
-    if (h->sdl_renderer) {
-        h->sdl_texture = rx_sdl.create_texture(h->sdl_renderer, RX_SDL_ARGB8888,
-                                               RX_SDL_TEX_STREAMING, (int)width, (int)height);
-    }
-    if (!h->sdl_texture) {
-        if (h->sdl_renderer) rx_sdl.destroy_renderer(h->sdl_renderer);
-        if (h->sdl_window)   rx_sdl.destroy_window(h->sdl_window);
-        ruxen_canvas_host_drop(handle);
-        return 0;
-    }
-    h->windowed = 1;
-    return handle;
-}
-
-/* True when this host presents to a live OS window (vs headless). */
-int64_t ruxen_canvas_host_is_windowed(int64_t self) {
-    RxHost *h = (RxHost *)self;
-    return (h && h->windowed) ? 1 : 0;
-}
-
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
  * no GC. */
 void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
-    if (h->windowed) {
-        if (h->sdl_texture)  rx_sdl.destroy_texture(h->sdl_texture);
-        if (h->sdl_renderer) rx_sdl.destroy_renderer(h->sdl_renderer);
-        if (h->sdl_window)   rx_sdl.destroy_window(h->sdl_window);
-    }
     free(h->pixels);
     free(h);
 }
@@ -271,23 +116,14 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     return RXC_OK;
 }
 
-/* Present the frame: headless hosts have nothing to flip; windowed hosts
- * upload the framebuffer to the SDL texture and present it. */
+/* End the frame. The software backend has nothing to flip; presenting to
+ * a live window is the explicit ruxen_canvas_window_present call in
+ * runtime/sdl_window.c (the Ruxen Window.end_frame does both). */
 int64_t ruxen_canvas_end_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     h->in_frame = 0;
-    if (h->windowed) {
-        if (!rx_sdl.update_texture(h->sdl_texture, NULL, h->pixels, h->width * 4)) {
-            return RXC_ERR_PRESENT;
-        }
-        rx_sdl.render_clear(h->sdl_renderer);
-        if (!rx_sdl.render_texture(h->sdl_renderer, h->sdl_texture, NULL, NULL)) {
-            return RXC_ERR_PRESENT;
-        }
-        rx_sdl.render_present(h->sdl_renderer);
-    }
     return RXC_OK;
 }
 
@@ -534,7 +370,7 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
 }
 
 /* ---- event queue ---- */
-/* The platform pump (SDL later; tests today) pushes events in; the Ruxen
+/* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the
  * `pending` slot and returns its kind (-1 when the queue is empty); the
  * payload accessors then read from `pending`. */
@@ -551,64 +387,9 @@ int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) 
     return RXC_OK;
 }
 
-/* Translate pending SDL events into the ring. Event-struct payload
- * offsets (x: +28, y: +32 as f32; keycode: +28 as u32) were verified
- * empirically against SDL 3. Window events are detected by type range and
- * checked against the actual window size, so individual window-event
- * constants don't need to be hardcoded. */
-static void rx_pump_sdl(RxHost *h) {
-    if (!h->windowed) return;
-    unsigned char ev[256];
-    while (rx_sdl.poll_event(ev)) {
-        uint32_t type;
-        memcpy(&type, ev, sizeof type);
-        if (type == RX_SDL_EVENT_QUIT) {
-            ruxen_canvas_push_event((int64_t)h, 5, 0, 0);              /* CloseRequested */
-        } else if (type == RX_SDL_EVENT_KEY_DOWN) {
-            uint32_t key;
-            memcpy(&key, ev + 28, sizeof key);
-            ruxen_canvas_push_event((int64_t)h, 3, (double)key, 0);    /* KeyDown */
-        } else if (type == RX_SDL_EVENT_MOUSE_MOTION ||
-                   type == RX_SDL_EVENT_MOUSE_DOWN ||
-                   type == RX_SDL_EVENT_MOUSE_UP) {
-            float x, y;
-            memcpy(&x, ev + 28, sizeof x);
-            memcpy(&y, ev + 32, sizeof y);
-            int64_t kind = type == RX_SDL_EVENT_MOUSE_MOTION ? 0
-                         : type == RX_SDL_EVENT_MOUSE_DOWN   ? 1 : 2;
-            ruxen_canvas_push_event((int64_t)h, kind, (double)x, (double)y);
-        } else if (type >= RX_SDL_EVENT_WINDOW_FIRST && type <= RX_SDL_EVENT_WINDOW_LAST) {
-            int ww = 0, hh = 0;
-            rx_sdl.get_window_size(h->sdl_window, &ww, &hh);
-            if (ww > 0 && hh > 0 && (ww != h->width || hh != h->height)) {
-                /* resize: fresh transparent framebuffer + texture; the
-                 * Resize event tells L2 to repaint */
-                uint32_t *np = (uint32_t *)calloc((size_t)ww * hh, sizeof(uint32_t));
-                void *nt = rx_sdl.create_texture(h->sdl_renderer, RX_SDL_ARGB8888,
-                                                 RX_SDL_TEX_STREAMING, ww, hh);
-                if (np && nt) {
-                    free(h->pixels);
-                    rx_sdl.destroy_texture(h->sdl_texture);
-                    h->pixels = np;
-                    h->sdl_texture = nt;
-                    h->width = ww;
-                    h->height = hh;
-                    ruxen_canvas_push_event((int64_t)h, 4, (double)ww, (double)hh);
-                } else {
-                    free(np);
-                    if (nt) rx_sdl.destroy_texture(nt);
-                }
-            }
-        }
-        /* other event types: not part of the L1 surface yet */
-    }
-}
-
 int64_t ruxen_canvas_poll_event(int64_t self) {
     RxHost *h = (RxHost *)self;
-    if (!h) return -1;
-    rx_pump_sdl(h);
-    if (h->ev_count == 0) return -1;
+    if (!h || h->ev_count == 0) return -1;
     h->pending = h->events[h->ev_head];
     h->ev_head = (h->ev_head + 1) % RXC_EVENT_CAP;
     h->ev_count--;
@@ -642,4 +423,18 @@ int64_t ruxen_canvas_event_ai(int64_t self) {
 int64_t ruxen_canvas_event_bi(int64_t self) {
     RxHost *h = (RxHost *)self;
     return h ? (int64_t)h->pending.b : 0;
+}
+
+/* ---- frame pacing ---- */
+
+/* Sleep for ms milliseconds (render-loop pacing for L2/apps). The handle
+ * is accepted-and-ignored so the binding follows the uniform self-first
+ * method ABI. */
+void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
+    (void)self;
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 }

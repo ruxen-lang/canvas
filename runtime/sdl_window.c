@@ -92,6 +92,7 @@ static void *s_ren = NULL;
 static void *s_tex = NULL;
 static int   s_tex_w = 0;
 static int   s_tex_h = 0;
+static int   s_scale = 1;   /* window = framebuffer * scale; pump divides */
 
 static void *sym(const char *name) { return dlsym(s_lib, name); }
 
@@ -120,18 +121,21 @@ static int load_sdl(void) {
     return 1;
 }
 
-/* Create the OS window sized to the host's framebuffer. */
-int64_t ruxen_canvas_window_show(int64_t self, int64_t title) {
+/* Create the OS window at scale x the host framebuffer (the renderer
+ * stretches the texture; the pump divides pointer coords back down, so
+ * the app always works in framebuffer coordinates). */
+int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     const char *t = (const char *)title;
-    if (!h || !t) return RXC_ERR_BAD_ARGS;
+    if (!h || !t || scale < 1 || scale > 8) return RXC_ERR_BAD_ARGS;
     if (s_win) return RXC_OK; /* already shown */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
 
+    s_scale = (int)scale;
     s_win = s_CreateWindow(t,
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width, h->height, SDL_WINDOW_SHOWN);
+                           h->width * s_scale, h->height * s_scale, SDL_WINDOW_SHOWN);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_ren = s_CreateRenderer(s_win, -1, 0);
     if (!s_ren) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_NO_SDL; }
@@ -180,17 +184,20 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
         switch (type) {
         case SDL_MOUSEMOTION_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_MOVE, (double)xi, (double)yi);
+            ruxen_canvas_push_event(self, RX_EV_POINTER_MOVE,
+                                    (double)(xi / s_scale), (double)(yi / s_scale));
             forwarded++;
             break;
         case SDL_MOUSEBUTTONDOWN_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN, (double)xi, (double)yi);
+            ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
+                                    (double)(xi / s_scale), (double)(yi / s_scale));
             forwarded++;
             break;
         case SDL_MOUSEBUTTONUP_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_UP, (double)xi, (double)yi);
+            ruxen_canvas_push_event(self, RX_EV_POINTER_UP,
+                                    (double)(xi / s_scale), (double)(yi / s_scale));
             forwarded++;
             break;
         case SDL_KEYDOWN_EV:
@@ -215,5 +222,6 @@ int64_t ruxen_canvas_window_destroy(void) {
     if (s_ren) { s_DestroyRenderer(s_ren); s_ren = NULL; }
     if (s_win) { s_DestroyWindow(s_win); s_win = NULL; }
     s_tex_w = s_tex_h = 0;
+    s_scale = 1;
     return RXC_OK;
 }
