@@ -1,0 +1,54 @@
+# Pin the OS-window surface in its HEADLESS state (no SDL window is opened
+# in tests): every entry point must fail soft / no-op, never crash.
+Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester|
+  t.it("shown? is false before any show") do
+    BoolMatcher.new(Window.shown?).to_be_falsy
+  end
+
+  t.it("present before show errors (never crashes)") do
+    var w = match Window.open(String.from("t"), 16, 16)
+      Ok(win) -> win
+      Err(_)  -> panic!("open failed")
+    end
+    let r = match w.present
+      Ok(_)  -> 0
+      Err(_) -> 1
+    end
+    t.expect(r).to_eq(1)
+  end
+
+  t.it("pump before show forwards zero events") do
+    var w = match Window.open(String.from("t"), 16, 16)
+      Ok(win) -> win
+      Err(_)  -> panic!("open failed")
+    end
+    t.expect(w.pump).to_eq(0)
+  end
+
+  t.it("hide is idempotent without a window") do
+    var w = match Window.open(String.from("t"), 16, 16)
+      Ok(win) -> win
+      Err(_)  -> panic!("open failed")
+    end
+    w.hide
+    w.hide
+    BoolMatcher.new(Window.shown?).to_be_falsy
+  end
+
+  t.it("headless event flow still works alongside the window surface") do
+    var w = match Window.open(String.from("t"), 16, 16)
+      Ok(win) -> win
+      Err(_)  -> panic!("open failed")
+    end
+    match w.push_event(Event.PointerDown(3, 4))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push failed")
+    end
+    let got = match w.poll_event
+      Some(Event.PointerDown(x, y)) -> x * 100 + y
+      Some(_) -> -1
+      nil     -> -2
+    end
+    t.expect(got).to_eq(304)
+  end
+end

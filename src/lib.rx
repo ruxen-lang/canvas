@@ -116,6 +116,10 @@ module Rxc
   def is_bad_args(code: Int) -> Bool
     code == 1
   end
+
+  def is_no_sdl(code: Int) -> Bool
+    code == 6
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -141,6 +145,14 @@ class RawHost
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
     def drop as "ruxen_canvas_host_drop"(self) -> nil
+  end
+
+  lib "runtime/sdl_window.c"
+    def window_show as "ruxen_canvas_window_show"(self, title: &String) -> Int
+    def window_present as "ruxen_canvas_window_present"(self) -> Int
+    def window_pump as "ruxen_canvas_window_pump"(self) -> Int
+    def self.window_is_shown as "ruxen_canvas_window_is_shown" -> Int
+    def self.window_destroy as "ruxen_canvas_window_destroy" -> Int
   end
 end
 
@@ -301,6 +313,50 @@ class Window
     end
     let canvas = Canvas.create(width, height)?
     Ok(Window.new(canvas, title, width, height))
+  end
+
+  ## Put a REAL OS window on screen presenting this window's framebuffer.
+  ## Implemented by dlopen-ing the SDL2 runtime library — no SDL headers or
+  ## link-time dependency; on a machine without SDL2 (or without a display)
+  ## this returns Err and the window keeps working headless.
+  def var show -> Result[nil, String]
+    let code = self.canvas.raw.window_show(&self.title)
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_no_sdl(code)
+      Err(String.from("canvas: SDL2 unavailable (no libSDL2-2.0.so.0, video init failed, or no display)"))
+    else
+      Err(String.from("canvas: show failed: invalid window"))
+    end
+  end
+
+  ## True when an OS window is currently up.
+  def shown? -> Bool
+    RawHost.window_is_shown == 1
+  end
+
+  ## Blit the framebuffer to the OS window (call after `end_frame`).
+  def var present -> Result[nil, String]
+    let code = self.canvas.raw.window_present
+    if Rxc.is_ok(code)
+      Ok(nil)
+    else
+      Err(String.from("canvas: present failed (window not shown or size mismatch)"))
+    end
+  end
+
+  ## Drain OS input (mouse/keyboard/close) into this window's event
+  ## stream — the SAME stream `push_event` feeds, so dispatch code is
+  ## identical headless vs windowed. Returns the number of events
+  ## forwarded; 0 when no window is up or nothing is pending.
+  def var pump -> Int
+    self.canvas.raw.window_pump
+  end
+
+  ## Tear the OS window down (idempotent; the framebuffer survives).
+  def var hide -> nil
+    RawHost.window_destroy
+    nil
   end
 
   ## Pop the next pending event, or `nil` when the queue is empty.
