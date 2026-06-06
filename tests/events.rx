@@ -1,0 +1,173 @@
+# Pin tests for the event stream: push_event / poll_event round-trips
+# every Event variant through the C ring buffer.
+
+Tester.describe("Window events") do |t: &var Tester|
+  t.it("polling an empty queue returns nil") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    var empty = false
+    match w.poll_event
+      Some(_) -> empty = false
+      nil     -> empty = true
+    end
+    t.expect(empty).to_eq(true)
+  end
+
+  t.it("round-trips PointerMove with coordinates") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.PointerMove(3, 4))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerMove(x, y)) -> ok = x == 3 && y == 4
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("round-trips PointerDown and PointerUp") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.PointerDown(1, 2))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    match w.push_event(Event.PointerUp(3, 4))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+
+    var down_ok = false
+    match w.poll_event
+      Some(Event.PointerDown(x, y)) -> down_ok = x == 1 && y == 2
+      _ -> down_ok = false
+    end
+    t.expect(down_ok).to_eq(true)
+
+    var up_ok = false
+    match w.poll_event
+      Some(Event.PointerUp(x, y)) -> up_ok = x == 3 && y == 4
+      _ -> up_ok = false
+    end
+    t.expect(up_ok).to_eq(true)
+  end
+
+  t.it("round-trips KeyDown with the keycode") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.KeyDown(42))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.KeyDown(k)) -> ok = k == 42
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("round-trips Resize with the new size") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.Resize(800, 600))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.Resize(width, height)) -> ok = width == 800 && height == 600
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("round-trips CloseRequested") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.CloseRequested)
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.CloseRequested) -> ok = true
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("delivers events in FIFO order and drains") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.KeyDown(1))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    match w.push_event(Event.KeyDown(2))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    match w.push_event(Event.KeyDown(3))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+
+    var sum = 0
+    var n = 0
+    while let Some(e) = w.poll_event
+      match e
+        Event.KeyDown(k) -> sum += k
+        _ -> sum += 0
+      end
+      n += 1
+    end
+    t.expect(n).to_eq(3)
+    t.expect(sum).to_eq(6)
+
+    var drained = false
+    match w.poll_event
+      Some(_) -> drained = false
+      nil     -> drained = true
+    end
+    t.expect(drained).to_eq(true)
+  end
+
+  t.it("a full queue reports an explicit error") do
+    var w = match Window.open(String.from("e"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    var i = 0
+    while i < 256
+      match w.push_event(Event.KeyDown(i))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+      i += 1
+    end
+    var full = false
+    match w.push_event(Event.KeyDown(999))
+      Ok(_)  -> full = false
+      Err(_) -> full = true
+    end
+    t.expect(full).to_eq(true)
+  end
+end

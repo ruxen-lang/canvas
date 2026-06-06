@@ -39,14 +39,29 @@ static int rxc_is_nan(double v) {
 #define RXC_ERR_BAD_ARGS  1  /* invalid dimensions / null handle / bad channel */
 #define RXC_ERR_NO_FRAME  2  /* draw call outside begin_frame/end_frame */
 #define RXC_ERR_IN_FRAME  3  /* begin_frame while a frame is already open */
+#define RXC_ERR_QUEUE_FULL 4 /* event ring buffer is full */
 
 /* ---- the host object ---- */
+
+#define RXC_EVENT_CAP 256
+
+typedef struct {
+    int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
+    double  a;      /* x / keycode / width  (event-kind dependent) */
+    double  b;      /* y / unused  / height (event-kind dependent) */
+} RxEvent;
 
 typedef struct {
     int32_t   width;
     int32_t   height;
     uint32_t *pixels;      /* width*height, 0xAARRGGBB, non-premultiplied */
     int32_t   in_frame;    /* begin_frame/end_frame discipline flag */
+
+    /* event ring buffer (filled by the platform pump or by tests) */
+    RxEvent   events[RXC_EVENT_CAP];
+    int32_t   ev_head;
+    int32_t   ev_count;
+    RxEvent   pending;     /* the event most recently popped by poll */
 } RxHost;
 
 /* ---- lifecycle ---- */
@@ -354,4 +369,60 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
         }
     }
     return RXC_OK;
+}
+
+/* ---- event queue ---- */
+/* The platform pump (SDL later; tests today) pushes events in; the Ruxen
+ * side polls them out one at a time. poll pops the next event into the
+ * `pending` slot and returns its kind (-1 when the queue is empty); the
+ * payload accessors then read from `pending`. */
+
+int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) {
+    RxHost *h = (RxHost *)self;
+    if (!h || kind < 0 || kind > 5) return RXC_ERR_BAD_ARGS;
+    if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
+    int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    h->events[tail].kind = (int32_t)kind;
+    h->events[tail].a = a;
+    h->events[tail].b = b;
+    h->ev_count++;
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_poll_event(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h || h->ev_count == 0) return -1;
+    h->pending = h->events[h->ev_head];
+    h->ev_head = (h->ev_head + 1) % RXC_EVENT_CAP;
+    h->ev_count--;
+    return h->pending.kind;
+}
+
+double ruxen_canvas_event_a(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? h->pending.a : 0.0;
+}
+
+double ruxen_canvas_event_b(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? h->pending.b : 0.0;
+}
+
+/* Integer-typed companions: the Ruxen side currently can't lower Int<->
+ * Float casts inside class methods, so the conversions happen here. The
+ * double-typed entry points above remain the canonical ABI for the
+ * eventual Float32 event payloads. */
+
+int64_t ruxen_canvas_push_event_i(int64_t self, int64_t kind, int64_t a, int64_t b) {
+    return ruxen_canvas_push_event(self, kind, (double)a, (double)b);
+}
+
+int64_t ruxen_canvas_event_ai(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? (int64_t)h->pending.a : 0;
+}
+
+int64_t ruxen_canvas_event_bi(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? (int64_t)h->pending.b : 0;
 }

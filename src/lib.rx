@@ -92,6 +92,10 @@ module Rxc
   def is_in_frame(code: Int) -> Bool
     code == 3
   end
+
+  def is_queue_full(code: Int) -> Bool
+    code == 4
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -110,6 +114,10 @@ class RawHost
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
+    def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
+    def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
+    def event_ai as "ruxen_canvas_event_ai"(self) -> Int
+    def event_bi as "ruxen_canvas_event_bi"(self) -> Int
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end
 end
@@ -214,13 +222,18 @@ end
 ## A single input or lifecycle event delivered by the engine's event stream.
 ##
 ## L1 exposes a stream of these upward; L2 dispatches them to widget handlers.
+##
+## Pointer coordinates are whole logical pixels for the first vertical
+## slice (TODO: return to Float32 payloads once enum float payloads
+## compile correctly); the C-side event payloads are already doubles, so
+## the FFI surface won't change.
 enum Event
   ## The pointer moved to (x, y) in logical pixels.
-  PointerMove(Float32, Float32)
+  PointerMove(Int, Int)
   ## A pointer button was pressed at (x, y).
-  PointerDown(Float32, Float32)
+  PointerDown(Int, Int)
   ## A pointer button was released at (x, y).
-  PointerUp(Float32, Float32)
+  PointerUp(Int, Int)
   ## A key was pressed (platform keycode).
   KeyDown(Int)
   ## The window was resized to (width, height).
@@ -251,5 +264,50 @@ class Window
     end
     let canvas = Canvas.create(width, height)?
     Ok(Window.new(canvas, title, width, height))
+  end
+
+  ## Pop the next pending event, or `nil` when the queue is empty.
+  ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
+  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested.
+  def var poll_event -> Event?
+    let kind = self.canvas.raw.poll_event_raw
+    if kind < 0
+      return nil
+    end
+    let ia = self.canvas.raw.event_ai
+    let ib = self.canvas.raw.event_bi
+    let ev: Event = if kind == 0
+      Event.PointerMove(ia, ib)
+    elsif kind == 1
+      Event.PointerDown(ia, ib)
+    elsif kind == 2
+      Event.PointerUp(ia, ib)
+    elsif kind == 3
+      Event.KeyDown(ia)
+    elsif kind == 4
+      Event.Resize(ia, ib)
+    else
+      Event.CloseRequested
+    end
+    ev
+  end
+  ## Inject an event into the queue. This is the hook the platform pump
+  ## (SDL later) and the pin tests use to feed the stream.
+  def var push_event(event: Event) -> Result[nil, String]
+    let code = match event
+      Event.PointerMove(x, y) -> self.canvas.raw.push_event_i_raw(0, x, y)
+      Event.PointerDown(x, y) -> self.canvas.raw.push_event_i_raw(1, x, y)
+      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_i_raw(2, x, y)
+      Event.KeyDown(k)        -> self.canvas.raw.push_event_i_raw(3, k, 0)
+      Event.Resize(w, h)      -> self.canvas.raw.push_event_i_raw(4, w, h)
+      Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
+    end
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err(String.from("canvas: push_event failed: event queue is full"))
+    else
+      Err(String.from("canvas: push_event failed: invalid arguments"))
+    end
   end
 end
