@@ -1,0 +1,138 @@
+# Pin tests for the live-window path (runtime/sdl_window.c). Adaptive:
+# with a display + SDL2 runtime the shown branch runs (small windows
+# appear briefly); otherwise the unavailable branch proves clean failure.
+#
+# NOTE: no `{ }` match arms anywhere — those are closure literals, not
+# blocks, and never execute. Branching uses flags + `if` instead.
+
+Tester.describe("Window.show — live path") do |t: &var Tester|
+  t.it("show either puts a window up or fails cleanly, drawing works either way") do
+    var w = match Window.open(String.from("canvas pin test"), 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+
+    match w.canvas.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match w.canvas.clear(Color.rgb(10u8, 20u8, 30u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match w.canvas.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+
+    if shown
+      # the real-window branch
+      t.expect(w.windowed).to_eq(true)
+      t.expect(Window.shown?).to_eq(true)
+      match w.present
+        Ok(_)  -> nil
+        Err(_) -> panic!("present failed on a shown window")
+      end
+      t.expect(w.pump >= 0).to_eq(true)
+      w.hide
+      t.expect(Window.shown?).to_eq(false)
+      t.expect(w.windowed).to_eq(false)
+    else
+      # the no-display branch
+      t.expect(w.windowed).to_eq(false)
+      t.expect(Window.shown?).to_eq(false)
+    end
+
+    # both branches: the framebuffer is observable
+    let bg: Color = Color.rgb(10u8, 20u8, 30u8)
+    t.expect(w.canvas.read_pixel(0, 0)).to_eq(bg.to_argb as Int)
+  end
+
+  t.it("show is idempotent once shown") do
+    var w = match Window.open(String.from("idem"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if shown
+      match w.show
+        Ok(_)  -> nil
+        Err(_) -> panic!("second show must be Ok")
+      end
+      w.hide
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("show after hide opens a fresh window") do
+    var w = match Window.open(String.from("reshow"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if shown
+      w.hide
+      t.expect(Window.shown?).to_eq(false)
+      match w.show
+        Ok(_)  -> nil
+        Err(_) -> panic!("re-show after hide must succeed")
+      end
+      t.expect(Window.shown?).to_eq(true)
+      w.hide
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("a second window cannot steal the shown window") do
+    var a = match Window.open(String.from("first"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    var b = match Window.open(String.from("second"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    let shown = match a.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if shown
+      # b is a different host: its show must error, not silently adopt
+      var stole = false
+      match b.show
+        Ok(_)  -> stole = true
+        Err(_) -> stole = false
+      end
+      t.expect(stole).to_eq(false)
+      # and b cannot present onto a's window
+      var presented = false
+      match b.present
+        Ok(_)  -> presented = true
+        Err(_) -> presented = false
+      end
+      t.expect(presented).to_eq(false)
+      a.hide
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("sleep_ms returns (frame pacing primitive)") do
+    let w = match Window.open(String.from("h"), 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    w.sleep_ms(1)
+    t.expect(true).to_eq(true)
+  end
+end

@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
+  window on screen (SDL2 runtime via dlopen — no dev packages, zero
+  link-time deps), `present` blits the canvas after `end_frame`, the pump
+  feeds real mouse/keyboard/close input into the same `Event` stream tests
+  inject into, `hide` tears down, `Window.shown?` queries, `sleep_ms`
+  paces render loops. `Window.open` stays headless until `show` — tests
+  and CI never pop windows. One window per process for this slice.
+- `examples/counter.rx` — interactive clickable counter driving the full
+  open/show/poll/draw/present loop.
 - **Milestone 1 — the minimal canvas slice**, implemented over a
   deterministic software raster backend in `runtime/skia_shim.c` that
   implements the exact `ruxen_canvas_*` ABI the GPU (Skia/SDL) backend will

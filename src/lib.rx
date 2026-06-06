@@ -116,6 +116,10 @@ module Rxc
   def is_bad_args(code: Int) -> Bool
     code == 1
   end
+
+  def is_no_sdl(code: Int) -> Bool
+    code == 6
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -140,7 +144,16 @@ class RawHost
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
+    def sleep_ms_raw as "ruxen_canvas_sleep_ms"(self, ms: Int) -> nil
     def drop as "ruxen_canvas_host_drop"(self) -> nil
+  end
+
+  lib "runtime/sdl_window.c"
+    def window_show as "ruxen_canvas_window_show"(self, title: &String, scale: Int) -> Int
+    def window_present as "ruxen_canvas_window_present"(self) -> Int
+    def window_pump as "ruxen_canvas_window_pump"(self) -> Int
+    def self.window_is_shown as "ruxen_canvas_window_is_shown" -> Int
+    def self.window_destroy as "ruxen_canvas_window_destroy" -> Int
   end
 end
 
@@ -233,6 +246,22 @@ class Canvas
     self.raw.text_height_raw
   end
 
+  ## INTERNAL (used by Window.open): attach the live OS window. Mirrors
+  ## draw_text's exact FFI calling shape — an owned String parameter
+  ## borrowed at the call — which is the one &String form that lowers
+  ## correctly today.
+  def var show_window(title: String) -> Int
+    self.raw.window_show(&title, 0)
+  end
+
+  ## INTERNAL (used by Window.show_scaled): like show_window with an
+  ## explicit integer scale (1-8; 0 = auto). The OS window opens at
+  ## scale x the framebuffer; pointer coordinates are mapped back, so
+  ## apps always work in framebuffer coordinates.
+  def var show_window_scaled(title: String, scale: Int) -> Int
+    self.raw.window_show(&title, scale)
+  end
+
   private
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
@@ -290,23 +319,104 @@ class Window
   title: String
   width: Int
   height: Int
+  windowed: Bool
 
-  def init(@canvas: Canvas, @title: String, @width: Int, @height: Int)
+  def init(@canvas: Canvas, @title: String, @width: Int, @height: Int, @windowed: Bool)
   end
 
-  ## Open a new window with the given title and logical size.
+  ## Open a window with the given title and logical size. The window is
+  ## HEADLESS until `show` is called — drawing, events, and pixel readback
+  ## work identically before and after; `show` only adds an OS window that
+  ## `present` blits to. Tests and CI never call `show`.
   def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
     if !Rxc.valid_dimensions(width, height)
       return Err(String.from("canvas: invalid window size #{width}x#{height}"))
     end
     let canvas = Canvas.create(width, height)?
-    Ok(Window.new(canvas, title, width, height))
+    Ok(Window.new(canvas, title, width, height, false))
+  end
+
+  ## True when some window in this process is currently on screen.
+  def self.shown? -> Bool
+    RawHost.window_is_shown == 1
+  end
+
+  ## Put a real OS window on screen for this canvas (SDL2 runtime via
+  ## dlopen — see runtime/sdl_window.c). Err when no display / no SDL is
+  ## available; everything keeps working headless in that case.
+  def var show -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window(t)
+    if code == 0
+      self.windowed = true
+      Ok(nil)
+    else
+      Err(String.from("canvas: show failed with status #{code}"))
+    end
+  end
+
+  ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window
+  ## opens at scale x the framebuffer size and pointer coordinates are
+  ## mapped back, so the app still works in framebuffer coordinates.
+  def var show_scaled(scale: Int) -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    # interpolation copy: `self.title.clone` mis-reads the field through
+    # self (compiler bug family); building a fresh String works
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window_scaled(t, scale)
+    if code == 0
+      self.windowed = true
+      Ok(nil)
+    else
+      # 6 = SDL unavailable / no display, 1 = bad args (see sdl_window.c)
+      Err(String.from("canvas: show failed with status #{code}"))
+    end
+  end
+
+  ## Blit the canvas to the OS window (call after `end_frame`). Errs when
+  ## the window is not shown.
+  def var present -> Result[nil, String]
+    let code = self.canvas.raw.window_present
+    if code == 0
+      Ok(nil)
+    else
+      Err(String.from("canvas: present failed with status #{code}"))
+    end
+  end
+
+  ## Drain pending OS input into the event queue without popping any;
+  ## returns the number of events forwarded (0 when no window is shown).
+  ## `poll_event` pumps implicitly.
+  def var pump -> Int
+    self.canvas.raw.window_pump
+  end
+
+  ## Take the OS window off screen (idempotent; the canvas stays fully
+  ## usable headless). Call when handling `Event.CloseRequested`.
+  def var hide -> nil
+    if self.windowed
+      let _ = RawHost.window_destroy
+      self.windowed = false
+    end
+  end
+
+  ## Sleep for `ms` milliseconds — render-loop frame pacing.
+  def sleep_ms(ms: Int) -> nil
+    self.canvas.raw.sleep_ms_raw(ms)
   end
 
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
   ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested.
   def var poll_event -> Event?
+    if self.windowed
+      let _ = self.canvas.raw.window_pump
+    end
     let kind = self.canvas.raw.poll_event_raw
     if kind < 0
       return nil

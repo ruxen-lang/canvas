@@ -11,16 +11,23 @@
  * runtime. All pointers cross the ABI as machine-word integers (int64_t);
  * `void` returns map to no return value (see docs/FFI.md).
  *
- * Backend: a deterministic software raster target (the "headless" backend).
- * It implements the exact ABI the GPU backend will use, so Skia/SDL can be
- * slotted in behind these signatures later (prebuilt-vs-source is still an
- * open decision — docs/ROADMAP.md) without touching the Ruxen side. It is
- * also what the pin tests run against: every bound call is verified by
- * reading pixels back from the framebuffer.
+ * Backend: a deterministic software raster target. It implements the exact
+ * ABI the GPU backend will use, so Skia can be slotted in behind these
+ * signatures later (prebuilt-vs-source is still an open decision —
+ * docs/ROADMAP.md) without touching the Ruxen side. It is also what the
+ * pin tests run against: every bound call is verified by reading pixels
+ * back from the framebuffer.
+ *
+ * This file contains NO platform code. Live windowing lives in
+ * runtime/sdl_window.c, which attaches to a host through the present/pump/
+ * close hooks declared in rx_canvas_internal.h.
  */
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <time.h>
+
+#include "rx_canvas_internal.h"
 
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
@@ -40,40 +47,7 @@ static int rxc_finite_pixels(double v) {
     return v > -1.0e9 && v < 1.0e9;
 }
 
-/* ---- status codes shared with src/lib.rx (keep in sync!) ---- */
 
-#define RXC_OK            0
-#define RXC_ERR_BAD_ARGS  1  /* invalid dimensions / null handle / bad channel */
-#define RXC_ERR_NO_FRAME  2  /* draw call outside begin_frame/end_frame */
-#define RXC_ERR_IN_FRAME  3  /* begin_frame while a frame is already open */
-#define RXC_ERR_QUEUE_FULL 4 /* event ring buffer is full */
-
-/* ---- the host object ---- */
-
-#define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 5   /* CloseRequested — keep in sync with Event in src/lib.rx */
-
-typedef struct {
-    int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
-    double  a;      /* x / keycode / width  (event-kind dependent) */
-    double  b;      /* y / unused  / height (event-kind dependent) */
-} RxEvent;
-
-/* NOT thread-safe: an RxHost has exactly one owner (the Ruxen Canvas /
- * Window) and all calls — in particular poll_event followed by the
- * pending-payload accessors — must come from one thread. */
-typedef struct {
-    int32_t   width;
-    int32_t   height;
-    uint32_t *pixels;      /* width*height, 0xAARRGGBB, non-premultiplied */
-    int32_t   in_frame;    /* begin_frame/end_frame discipline flag */
-
-    /* event ring buffer (filled by the platform pump or by tests) */
-    RxEvent   events[RXC_EVENT_CAP];
-    int32_t   ev_head;
-    int32_t   ev_count;
-    RxEvent   pending;     /* the event most recently popped by poll */
-} RxHost;
 
 /* ---- lifecycle ---- */
 
@@ -105,9 +79,14 @@ int64_t ruxen_canvas_host_is_null(int64_t self) {
 
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
  * no GC. */
+/* defined in runtime/sdl_window.c — tears the OS window down when its
+ * owning host is dropped (both files always compile together) */
+void ruxen_canvas_window_note_host_dropped(int64_t self);
+
 void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
+    ruxen_canvas_window_note_host_dropped(self);
     free(h->pixels);
     free(h);
 }
@@ -142,8 +121,9 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     return RXC_OK;
 }
 
-/* Present the frame. The software backend has nothing to flip; the GPU
- * backend will swap buffers here. */
+/* End the frame. The software backend has nothing to flip; presenting to
+ * a live window is the explicit ruxen_canvas_window_present call in
+ * runtime/sdl_window.c (the Ruxen Window.end_frame does both). */
 int64_t ruxen_canvas_end_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
@@ -395,7 +375,7 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
 }
 
 /* ---- event queue ---- */
-/* The platform pump (SDL later; tests today) pushes events in; the Ruxen
+/* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the
  * `pending` slot and returns its kind (-1 when the queue is empty); the
  * payload accessors then read from `pending`. */
@@ -448,4 +428,18 @@ int64_t ruxen_canvas_event_ai(int64_t self) {
 int64_t ruxen_canvas_event_bi(int64_t self) {
     RxHost *h = (RxHost *)self;
     return h ? (int64_t)h->pending.b : 0;
+}
+
+/* ---- frame pacing ---- */
+
+/* Sleep for ms milliseconds (render-loop pacing for L2/apps). The handle
+ * is accepted-and-ignored so the binding follows the uniform self-first
+ * method ABI. */
+void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
+    (void)self;
+    if (ms <= 0) return;
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 }
