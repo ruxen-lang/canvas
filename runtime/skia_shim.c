@@ -33,6 +33,13 @@ static int rxc_is_nan(double v) {
     return v != v;
 }
 
+/* Geometry must be finite and within sane pixel range before it can be
+ * floored: casting NaN/Inf/huge doubles to int64 is undefined behavior.
+ * NaN fails both comparisons, so this rejects NaN too. */
+static int rxc_finite_pixels(double v) {
+    return v > -1.0e9 && v < 1.0e9;
+}
+
 /* ---- status codes shared with src/lib.rx (keep in sync!) ---- */
 
 #define RXC_OK            0
@@ -44,6 +51,7 @@ static int rxc_is_nan(double v) {
 /* ---- the host object ---- */
 
 #define RXC_EVENT_CAP 256
+#define RXC_EVENT_KIND_MAX 5   /* CloseRequested — keep in sync with Event in src/lib.rx */
 
 typedef struct {
     int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
@@ -51,6 +59,9 @@ typedef struct {
     double  b;      /* y / unused  / height (event-kind dependent) */
 } RxEvent;
 
+/* NOT thread-safe: an RxHost has exactly one owner (the Ruxen Canvas /
+ * Window) and all calls — in particular poll_event followed by the
+ * pending-payload accessors — must come from one thread. */
 typedef struct {
     int32_t   width;
     int32_t   height;
@@ -83,6 +94,13 @@ int64_t ruxen_canvas_host_new(int64_t width, int64_t height) {
         return 0;
     }
     return (int64_t)h;
+}
+
+/* True when the handle is null — lets the Ruxen side turn an allocation
+ * failure in ruxen_canvas_host_new into a proper Err instead of a zombie
+ * object. */
+int64_t ruxen_canvas_host_is_null(int64_t self) {
+    return self == 0 ? 1 : 0;
 }
 
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
@@ -188,8 +206,12 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
     RxHost *h = (RxHost *)self;
     if (!h || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
     if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;     /* empty: nothing to draw */
-    if (rxc_is_nan(x) || rxc_is_nan(y)) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt)) {
+        return RXC_ERR_BAD_ARGS;
+    }
 
     int64_t x0 = rxc_floor_to_i64(x);
     int64_t y0 = rxc_floor_to_i64(y);
@@ -328,7 +350,8 @@ int64_t ruxen_canvas_measure_text_n(int64_t self, int64_t n) {
 }
 
 /* The font's line height (ascent above the baseline), in pixels. */
-int64_t ruxen_canvas_text_height(void) {
+int64_t ruxen_canvas_text_height(int64_t self) {
+    (void)self;
     return RXC_GLYPH_H;
 }
 
@@ -341,7 +364,7 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
     const char *s = (const char *)text;
     if (!h || !s || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
-    if (rxc_is_nan(x) || rxc_is_nan(y)) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
 
     uint32_t src = rxc_pack(r, g, b, a);
     int64_t pen_x = rxc_floor_to_i64(x);
@@ -379,7 +402,7 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
 
 int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) {
     RxHost *h = (RxHost *)self;
-    if (!h || kind < 0 || kind > 5) return RXC_ERR_BAD_ARGS;
+    if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
     if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
     int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
     h->events[tail].kind = (int32_t)kind;

@@ -146,3 +146,59 @@ Tester.describe("Canvas.draw_rect") do |t: &var Tester|
     t.expect(failed).to_eq(true)
   end
 end
+
+Tester.describe("Canvas.draw_rect geometry edge cases") do |t: &var Tester|
+  t.it("rejects non-finite geometry instead of flooring it") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    # 3.0e38f32 is finite f32 but far beyond any pixel range
+    var failed = false
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 3.0e38f32, 2.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> failed = false
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+  end
+
+  t.it("fractional geometry fills the documented half-open floor box") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    # x=1.3 w=1.7 -> [floor(1.3), floor(3.0)) = pixels 1,2; pixel 3 untouched
+    match c.draw_rect(Rect.new(1.3f32, 1.3f32, 1.7f32, 1.7f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let white_c: Color = Color.rgb(255u8, 255u8, 255u8)
+    let white = white_c.to_argb as Int
+    let black_c: Color = Color.rgb(0u8, 0u8, 0u8)
+    let black = black_c.to_argb as Int
+    t.expect(c.read_pixel(1, 1)).to_eq(white)
+    t.expect(c.read_pixel(2, 2)).to_eq(white)
+    t.expect(c.read_pixel(3, 1)).to_eq(black)
+    t.expect(c.read_pixel(1, 3)).to_eq(black)
+  end
+end

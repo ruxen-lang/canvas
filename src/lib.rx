@@ -96,6 +96,10 @@ module Rxc
   def is_queue_full(code: Int) -> Bool
     code == 4
   end
+
+  def is_bad_args(code: Int) -> Bool
+    code == 1
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -107,6 +111,7 @@ class RawHost
     def self.new as "ruxen_canvas_host_new"(width: Int, height: Int) -> RawHost
     def width as "ruxen_canvas_host_width"(self) -> Int
     def height as "ruxen_canvas_host_height"(self) -> Int
+    def is_null as "ruxen_canvas_host_is_null"(self) -> Bool
     def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
     def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
@@ -114,6 +119,7 @@ class RawHost
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
+    def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
@@ -141,7 +147,11 @@ class Canvas
     if !Rxc.valid_dimensions(width, height)
       return Err(String.from("canvas: invalid canvas size #{width}x#{height}"))
     end
-    Ok(Canvas.new(RawHost.new(width, height)))
+    let raw = RawHost.new(width, height)
+    if raw.is_null
+      return Err(String.from("canvas: framebuffer allocation failed (#{width}x#{height})"))
+    end
+    Ok(Canvas.new(raw))
   end
 
   ## Width of the framebuffer in pixels.
@@ -202,6 +212,11 @@ class Canvas
     self.raw.measure_text_n_raw(text.size)
   end
 
+  ## The font's line height (ascent above the baseline), in pixels.
+  def text_height -> Int
+    self.raw.text_height_raw
+  end
+
   private
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
@@ -213,8 +228,10 @@ class Canvas
       Err(String.from("canvas: #{what} called outside begin_frame/end_frame"))
     elsif Rxc.is_in_frame(code)
       Err(String.from("canvas: #{what} called while a frame is already open"))
-    else
+    elsif Rxc.is_bad_args(code)
       Err(String.from("canvas: #{what} failed: invalid arguments"))
+    else
+      Err(String.from("canvas: #{what} failed with unknown status #{code}"))
     end
   end
 end
@@ -248,6 +265,10 @@ end
 ## window + GL/Metal surface slot in behind the same ABI later. A `Window`
 ## owns its `Canvas`; dropping it tears everything down deterministically
 ## (no GC) — the no-jank story of the stack.
+##
+## NOT thread-safe: a Window (and its Canvas) has a single owner, and
+## `poll_event` must not race another call — the popped event's payload
+## is read back through separate accessor calls.
 class Window
   canvas: Canvas
   title: String

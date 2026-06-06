@@ -148,3 +148,13 @@ Tester.describe("Canvas.measure_text") do |t: &var Tester|
     t.expect(c.measure_text(&two)).to_eq(11)
   end
 end
+
+Tester.describe("Canvas.text_height") do |t: &var Tester|
+  t.it("reports the font line height") do
+    let c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    t.expect(c.text_height).to_eq(7)
+  end
+end
