@@ -1,0 +1,61 @@
+# Pin tests for the L1 value types: `Color` and `Rect`.
+
+Tester.describe("Color") do |t: &var Tester|
+  t.it("constructs from rgba fields") do
+    let c: Color = Color.new(10u8, 20u8, 30u8, 255u8)
+    t.expect(c.r).to_eq(10u8)
+    t.expect(c.g).to_eq(20u8)
+    t.expect(c.b).to_eq(30u8)
+    t.expect(c.a).to_eq(255u8)
+  end
+
+  t.it("rgb builds an opaque color") do
+    let c: Color = Color.rgb(1u8, 2u8, 3u8)
+    t.expect(c.a).to_eq(255u8)
+    t.expect(c.r).to_eq(1u8)
+  end
+
+  t.it("packs to 0xAARRGGBB") do
+    let c: Color = Color.new(0x11u8, 0x22u8, 0x33u8, 0xFFu8)
+    t.expect(c.to_argb).to_eq(0xFF112233u32)
+  end
+
+end
+
+Tester.describe("Rect") do |t: &var Tester|
+  t.it("exposes right and bottom edges") do
+    let r: Rect = Rect.new(10.0f32, 20.0f32, 30.0f32, 40.0f32)
+    t.expect(r.right == 40.0f32).to_eq(true)
+    t.expect(r.bottom == 60.0f32).to_eq(true)
+  end
+
+  t.it("contains points inside, excludes right/bottom edge") do
+    let r: Rect = Rect.new(0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    t.expect(r.contains(5.0f32, 5.0f32)).to_eq(true)
+    t.expect(r.contains(0.0f32, 0.0f32)).to_eq(true)
+    t.expect(r.contains(10.0f32, 5.0f32)).to_eq(false)
+    t.expect(r.contains(5.0f32, 10.0f32)).to_eq(false)
+    t.expect(r.contains(-1.0f32, 5.0f32)).to_eq(false)
+  end
+
+  t.it("detects intersection") do
+    let a: Rect = Rect.new(0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    let b: Rect = Rect.new(5.0f32, 5.0f32, 10.0f32, 10.0f32)
+    let c: Rect = Rect.new(20.0f32, 20.0f32, 5.0f32, 5.0f32)
+    t.expect(a.intersects(&b)).to_eq(true)
+    t.expect(a.intersects(&c)).to_eq(false)
+  end
+
+  t.it("rects that only touch edges do not intersect") do
+    let a: Rect = Rect.new(0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    let b: Rect = Rect.new(10.0f32, 0.0f32, 10.0f32, 10.0f32)
+    t.expect(a.intersects(&b)).to_eq(false)
+  end
+
+  t.it("is_empty for zero or negative extents") do
+    let zero_w: Rect = Rect.new(0.0f32, 0.0f32, 0.0f32, 5.0f32)
+    let normal: Rect = Rect.new(0.0f32, 0.0f32, 5.0f32, 5.0f32)
+    t.expect(zero_w.is_empty).to_eq(true)
+    t.expect(normal.is_empty).to_eq(false)
+  end
+end

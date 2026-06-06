@@ -16,6 +16,21 @@ struct Color
   g: UInt8
   b: UInt8
   a: UInt8
+
+  ## An opaque color from red/green/blue channels.
+  def self.rgb(r: UInt8, g: UInt8, b: UInt8) -> Color
+    Color.new(r, g, b, 255u8)
+  end
+
+  ## Pack into a single `0xAARRGGBB` integer — the layout the framebuffer
+  ## uses, and what `Canvas.read_pixel` returns for pin tests.
+  def to_argb -> UInt32
+    let rr = self.r as UInt32
+    let gg = self.g as UInt32
+    let bb = self.b as UInt32
+    let aa = self.a as UInt32
+    (aa << 24) | (rr << 16) | (gg << 8) | bb
+  end
 end
 
 ## An axis-aligned rectangle in device-independent pixels.
@@ -24,6 +39,34 @@ struct Rect
   y: Float32
   width: Float32
   height: Float32
+
+  ## The x coordinate of the right edge (exclusive).
+  def right -> Float32
+    self.x + self.width
+  end
+
+  ## The y coordinate of the bottom edge (exclusive).
+  def bottom -> Float32
+    self.y + self.height
+  end
+
+  ## True when the rect covers no area.
+  def is_empty -> Bool
+    self.width <= 0.0f32 || self.height <= 0.0f32
+  end
+
+  ## Point containment: left/top edges inclusive, right/bottom exclusive
+  ## (half-open, so adjacent rects never both claim a boundary pixel).
+  def contains(px: Float32, py: Float32) -> Bool
+    px >= self.x && px < self.right && py >= self.y && py < self.bottom
+  end
+
+  ## True when the two rects overlap on a non-zero area.
+  def intersects(other: &Rect) -> Bool
+    !self.is_empty && !other.is_empty &&
+      self.x < other.right && other.x < self.right &&
+      self.y < other.bottom && other.y < self.bottom
+  end
 end
 
 ## A native OS window backed by an SDL context and a Skia surface.
