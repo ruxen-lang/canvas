@@ -32,6 +32,11 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Known deviations (compiler-imposed, tracked for revert)
 - `Event` pointer coordinates are `Int` logical pixels (enum float payloads
   currently miscompile); the C ABI already carries doubles.
-- `Color.white`/`black`/`transparent` named constructors deferred (zero-arg
-  `def self.` methods on structs currently miscompile).
-- `measure_text` crosses the character count (not the string) over the FFI.
+- `measure_text` crosses the character count (not the string) over the FFI
+  (forwarding a borrowed `&String` into an FFI call passes the wrong
+  pointer).
+
+### Fixed
+- `Color.white`/`black`/`transparent` named constructors restored — the
+  zero-arg struct-static and closure-inference compiler bugs they were
+  blocked on are fixed upstream (ruxen `18df435`).

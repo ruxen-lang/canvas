@@ -59,3 +59,17 @@ Tester.describe("Rect") do |t: &var Tester|
     t.expect(normal.is_empty).to_eq(false)
   end
 end
+
+Tester.describe("Color named constructors") do |t: &var Tester|
+  t.it("white, black, and transparent are correct") do
+    t.expect(Color.white.to_argb).to_eq(0xFFFFFFFFu32)
+    t.expect(Color.black.to_argb).to_eq(0xFF000000u32)
+    t.expect(Color.transparent.to_argb).to_eq(0x00000000u32)
+  end
+
+  t.it("infers without annotations in a closure") do
+    let c = Color.rgb(1u8, 2u8, 3u8)
+    t.expect(c.a).to_eq(255u8)
+    t.expect(c.r).to_eq(1u8)
+  end
+end

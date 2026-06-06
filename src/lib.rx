@@ -5,10 +5,11 @@
 ## the GUI stack permitted to use `unsafe` / C FFI / platform-specific code
 ## (see `docs/ARCHITECTURE.md`).
 ##
-## Status: SCAFFOLD. The bodies below are placeholders. The Skia/SDL FFI
-## surface is grown method-by-method following the incremental-FFI
-## discipline in `docs/FFI.md`; the L2 `Canvas` API is designed against the
-## full intended surface from day one while L1 fills in coverage over time.
+## Status: Milestone 1 implemented over the deterministic software raster
+## backend in `runtime/skia_shim.c`. The FFI surface is grown
+## method-by-method following the incremental-FFI discipline in
+## `docs/FFI.md`; the L2 `Canvas` API is designed against the full intended
+## surface from day one while L1 fills in coverage over time.
 
 ## A non-premultiplied 8-bit-per-channel RGBA color.
 struct Color
@@ -20,6 +21,21 @@ struct Color
   ## An opaque color from red/green/blue channels.
   def self.rgb(r: UInt8, g: UInt8, b: UInt8) -> Color
     Color.new(r, g, b, 255u8)
+  end
+
+  ## Fully opaque white.
+  def self.white -> Color
+    Color.rgb(255u8, 255u8, 255u8)
+  end
+
+  ## Fully opaque black.
+  def self.black -> Color
+    Color.rgb(0u8, 0u8, 0u8)
+  end
+
+  ## Fully transparent (all channels zero).
+  def self.transparent -> Color
+    Color.new(0u8, 0u8, 0u8, 0u8)
   end
 
   ## Pack into a single `0xAARRGGBB` integer — the layout the framebuffer
