@@ -38,6 +38,7 @@
 #define RXC_ERR_BAD_ARGS   1
 #define RXC_ERR_PRESENT    5
 #define RXC_ERR_NO_SDL     6  /* libSDL2 unavailable / init failed */
+#define RXC_ERR_BUSY       7  /* another host already owns the window */
 
 /* ---- the slice of RxHost this file needs (layout-prefix of the real
  * struct in skia_shim.c; only width/height/pixels are touched here) ---- */
@@ -93,6 +94,7 @@ static void *s_tex = NULL;
 static int   s_tex_w = 0;
 static int   s_tex_h = 0;
 static int   s_scale = 1;   /* window = framebuffer * scale; pump divides */
+static void *s_owner = NULL; /* the RxHost the window belongs to */
 
 static void *sym(const char *name) { return dlsym(s_lib, name); }
 
@@ -116,6 +118,10 @@ static int load_sdl(void) {
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
         !s_UpdateTexture || !s_RenderClear || !s_RenderCopy || !s_RenderPresent ||
         !s_PollEvent) {
+        /* never leave a half-initialized handle: the s_lib guard above
+         * would otherwise report success with NULL function pointers */
+        dlclose(s_lib);
+        s_lib = NULL;
         return 0;
     }
     return 1;
@@ -129,7 +135,12 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     const char *t = (const char *)title;
     if (scale == 0) scale = 1; /* 0 = auto (callers without a preference) */
     if (!h || !t || scale < 1 || scale > 8) return RXC_ERR_BAD_ARGS;
-    if (s_win) return RXC_OK; /* already shown */
+    if (s_win) {
+        /* idempotent for the owning host; an error for any other host —
+         * one window per process, and silently "succeeding" would leave
+         * the second Window presenting someone else's framebuffer */
+        return s_owner == (void *)h ? RXC_OK : RXC_ERR_BUSY;
+    }
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
 
@@ -149,6 +160,7 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     }
     s_tex_w = h->width;
     s_tex_h = h->height;
+    s_owner = (void *)h;
     return RXC_OK;
 }
 
@@ -162,7 +174,8 @@ int64_t ruxen_canvas_window_is_shown(void) {
 int64_t ruxen_canvas_window_present(int64_t self) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     if (!h || !h->pixels) return RXC_ERR_BAD_ARGS;
-    if (!s_win || h->width != s_tex_w || h->height != s_tex_h) return RXC_ERR_PRESENT;
+    if (!s_win || s_owner != (void *)h ||
+        h->width != s_tex_w || h->height != s_tex_h) return RXC_ERR_PRESENT;
     if (s_UpdateTexture(s_tex, NULL, h->pixels, h->width * 4) != 0) return RXC_ERR_PRESENT;
     if (s_RenderClear(s_ren) != 0) return RXC_ERR_PRESENT;
     if (s_RenderCopy(s_ren, s_tex, NULL, NULL) != 0) return RXC_ERR_PRESENT;
@@ -175,7 +188,7 @@ int64_t ruxen_canvas_window_present(int64_t self) {
  * Unknown SDL event types are skipped. */
 int64_t ruxen_canvas_window_pump(int64_t self) {
     if (!self) return -RXC_ERR_BAD_ARGS;
-    if (!s_win) return 0;
+    if (!s_win || s_owner != (void *)self) return 0;
     int64_t forwarded = 0;
     unsigned char ev[64];
     while (s_PollEvent(ev)) {
@@ -224,5 +237,15 @@ int64_t ruxen_canvas_window_destroy(void) {
     if (s_win) { s_DestroyWindow(s_win); s_win = NULL; }
     s_tex_w = s_tex_h = 0;
     s_scale = 1;
+    s_owner = NULL;
     return RXC_OK;
+}
+
+/* Called by skia_shim.c's host_drop: a host being freed while it owns the
+ * window must take the window down with it, or present/pump would read
+ * freed memory through the stale owner pointer. */
+void ruxen_canvas_window_note_host_dropped(int64_t self) {
+    if (s_owner == (void *)self) {
+        ruxen_canvas_window_destroy();
+    }
 }

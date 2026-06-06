@@ -348,7 +348,8 @@ class Window
     if self.windowed
       return Ok(nil)
     end
-    let code = self.canvas.show_window(self.title.clone)
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window(t)
     if code == 0
       self.windowed = true
       Ok(nil)
@@ -364,7 +365,10 @@ class Window
     if self.windowed
       return Ok(nil)
     end
-    let code = self.canvas.show_window_scaled(self.title.clone, scale)
+    # interpolation copy: `self.title.clone` mis-reads the field through
+    # self (compiler bug family); building a fresh String works
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window_scaled(t, scale)
     if code == 0
       self.windowed = true
       Ok(nil)

@@ -1,6 +1,9 @@
 # Pin tests for the live-window path (runtime/sdl_window.c). Adaptive:
-# with a display + SDL2 runtime the shown branch runs (one small window
-# appears briefly); otherwise the unavailable branch proves clean failure.
+# with a display + SDL2 runtime the shown branch runs (small windows
+# appear briefly); otherwise the unavailable branch proves clean failure.
+#
+# NOTE: no `{ }` match arms anywhere — those are closure literals, not
+# blocks, and never execute. Branching uses flags + `if` instead.
 
 Tester.describe("Window.show — live path") do |t: &var Tester|
   t.it("show either puts a window up or fails cleanly, drawing works either way") do
@@ -22,25 +25,27 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
       Err(_) -> panic!("end_frame failed")
     end
 
-    match w.show
-      Ok(_) -> {
-        # the real-window branch
-        t.expect(w.windowed).to_eq(true)
-        t.expect(Window.shown?).to_eq(true)
-        match w.present
-          Ok(_)  -> nil
-          Err(_) -> panic!("present failed on a shown window")
-        end
-        t.expect(w.pump >= 0).to_eq(true)
-        w.hide
-        t.expect(Window.shown?).to_eq(false)
-        t.expect(w.windowed).to_eq(false)
-      }
-      Err(_) -> {
-        # the no-display branch
-        t.expect(w.windowed).to_eq(false)
-        t.expect(Window.shown?).to_eq(false)
-      }
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+
+    if shown
+      # the real-window branch
+      t.expect(w.windowed).to_eq(true)
+      t.expect(Window.shown?).to_eq(true)
+      match w.present
+        Ok(_)  -> nil
+        Err(_) -> panic!("present failed on a shown window")
+      end
+      t.expect(w.pump >= 0).to_eq(true)
+      w.hide
+      t.expect(Window.shown?).to_eq(false)
+      t.expect(w.windowed).to_eq(false)
+    else
+      # the no-display branch
+      t.expect(w.windowed).to_eq(false)
+      t.expect(Window.shown?).to_eq(false)
     end
 
     # both branches: the framebuffer is observable
@@ -53,21 +58,71 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
-    # NOTE: no brace-block match arms here — `-> { ... }` parses as a
-    # closure and captures go stale (ruxen v1); use flag style instead.
-    let first = match w.show
-      Ok(_)  -> 0
-      Err(_) -> 1
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
     end
-    if first == 0
-      let second = match w.show
-        Ok(_)  -> 0
-        Err(_) -> 1
-      end
-      if second != 0
-        panic!("second show must be Ok")
+    if shown
+      match w.show
+        Ok(_)  -> nil
+        Err(_) -> panic!("second show must be Ok")
       end
       w.hide
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("show after hide opens a fresh window") do
+    var w = match Window.open(String.from("reshow"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    let shown = match w.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if shown
+      w.hide
+      t.expect(Window.shown?).to_eq(false)
+      match w.show
+        Ok(_)  -> nil
+        Err(_) -> panic!("re-show after hide must succeed")
+      end
+      t.expect(Window.shown?).to_eq(true)
+      w.hide
+    end
+    t.expect(Window.shown?).to_eq(false)
+  end
+
+  t.it("a second window cannot steal the shown window") do
+    var a = match Window.open(String.from("first"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    var b = match Window.open(String.from("second"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("open failed")
+    end
+    let shown = match a.show
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if shown
+      # b is a different host: its show must error, not silently adopt
+      var stole = false
+      match b.show
+        Ok(_)  -> stole = true
+        Err(_) -> stole = false
+      end
+      t.expect(stole).to_eq(false)
+      # and b cannot present onto a's window
+      var presented = false
+      match b.present
+        Ok(_)  -> presented = true
+        Err(_) -> presented = false
+      end
+      t.expect(presented).to_eq(false)
+      a.hide
     end
     t.expect(Window.shown?).to_eq(false)
   end

@@ -79,9 +79,14 @@ int64_t ruxen_canvas_host_is_null(int64_t self) {
 
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
  * no GC. */
+/* defined in runtime/sdl_window.c — tears the OS window down when its
+ * owning host is dropped (both files always compile together) */
+void ruxen_canvas_window_note_host_dropped(int64_t self);
+
 void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
+    ruxen_canvas_window_note_host_dropped(self);
     free(h->pixels);
     free(h);
 }

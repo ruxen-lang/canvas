@@ -10,10 +10,7 @@ end
 def main
   var w = match Window.open(String.from("Ruxen Canvas Demo"), 320, 240)
     Ok(v)  -> v
-    Err(e) -> {
-      puts "open failed: #{e}"
-      return
-    }
+    Err(_) -> panic!("Window.open failed")
   end
 
   assert_ok(w.canvas.begin_frame, "begin_frame")
