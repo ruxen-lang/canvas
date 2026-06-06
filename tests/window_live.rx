@@ -53,15 +53,21 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
-    match w.show
-      Ok(_) -> {
-        match w.show
-          Ok(_)  -> nil
-          Err(_) -> panic!("second show must be Ok")
-        end
-        w.hide
-      }
-      Err(_) -> nil
+    # NOTE: no brace-block match arms here — `-> { ... }` parses as a
+    # closure and captures go stale (ruxen v1); use flag style instead.
+    let first = match w.show
+      Ok(_)  -> 0
+      Err(_) -> 1
+    end
+    if first == 0
+      let second = match w.show
+        Ok(_)  -> 0
+        Err(_) -> 1
+      end
+      if second != 0
+        panic!("second show must be Ok")
+      end
+      w.hide
     end
     t.expect(Window.shown?).to_eq(false)
   end

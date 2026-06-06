@@ -1,0 +1,91 @@
+# counter.rx — the canonical interactive demo: a clickable counter in a
+# real OS window, written directly against the L1 canvas API (the same
+# loop quiver will drive for you at L2).
+#
+# Run it as a scratch app depending on canvas (see examples/README.md):
+#   cp examples/counter.rx /tmp/counter_app/src/main.rx
+#   cd /tmp/counter_app && RUXEN_ALLOW_EXTERNAL_PATH=1 ruxen run
+#
+# Click the button (or press any key) to increment. Close the window to
+# exit. Pass a demo frame budget via RUXEN_CANVAS_DEMO_FRAMES to auto-exit.
+
+# 1 when (x, y) lands inside the button, else 0.
+def click_hit(button: &Rect, x: Int, y: Int) -> Int
+  let fx = x as Float32
+  let fy = y as Float32
+  if button.contains(fx, fy)
+    1
+  else
+    0
+  end
+end
+
+def draw_ui(w: &var Window, count: Int) -> Result[nil, String]
+  w.canvas.begin_frame()?
+  w.canvas.clear(Color.new(24u8, 26u8, 33u8, 255u8))?
+  # header
+  w.canvas.draw_rect(Rect.new(0.0f32, 0.0f32, 320.0f32, 36.0f32), Color.new(54u8, 80u8, 160u8, 255u8))?
+  w.canvas.draw_text(String.from("RUXEN COUNTER"), 12.0f32, 23.0f32, Color.white)?
+  # count readout
+  w.canvas.draw_text(String.from("COUNT: #{count}"), 120.0f32, 110.0f32, Color.white)?
+  # button
+  w.canvas.draw_rect(Rect.new(110.0f32, 150.0f32, 100.0f32, 36.0f32), Color.new(54u8, 80u8, 160u8, 255u8))?
+  w.canvas.draw_text(String.from("CLICK ME"), 130.0f32, 173.0f32, Color.white)?
+  w.canvas.end_frame()?
+  Ok(nil)
+end
+
+def main
+  var w = match Window.open(String.from("Ruxen Counter"), 320, 220)
+    Ok(v)  -> v
+    Err(_) -> panic!("Window.open failed")
+  end
+  match w.show
+    Ok(_)  -> puts "window up — click the button, close to exit"
+    Err(e) -> puts "no display (#{e}) — running headless"
+  end
+
+  let button: Rect = Rect.new(110.0f32, 150.0f32, 100.0f32, 36.0f32)
+  var count = 0
+  var running = true
+  var frames = 0
+
+  while running
+    # input
+    while let Some(e) = w.poll_event
+      match e
+        Event.PointerDown(x, y) -> count += click_hit(&button, x, y)
+        Event.KeyDown(_)        -> count += 1
+        Event.CloseRequested    -> running = false
+        _ -> nil
+      end
+    end
+
+    # render + present + pace (~60fps)
+    let drew = draw_ui(&w, count)
+    var frame_ok = true
+    match drew
+      Ok(_)  -> frame_ok = true
+      Err(_) -> frame_ok = false
+    end
+    if frame_ok && w.windowed
+      let presented = w.present
+      match presented
+        Ok(_)  -> nil
+        Err(_) -> frame_ok = false
+      end
+    end
+    if !frame_ok
+      running = false
+    end
+    w.sleep_ms(16)
+
+    frames += 1
+    if !w.windowed && frames > 60
+      running = false   # headless demo: one second then exit
+    end
+  end
+
+  w.hide
+  puts "final count: #{count}"
+end

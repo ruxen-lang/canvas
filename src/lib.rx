@@ -254,6 +254,14 @@ class Canvas
     self.raw.window_show(&title, 0)
   end
 
+  ## INTERNAL (used by Window.show_scaled): like show_window with an
+  ## explicit integer scale (1-8; 0 = auto). The OS window opens at
+  ## scale x the framebuffer; pointer coordinates are mapped back, so
+  ## apps always work in framebuffer coordinates.
+  def var show_window_scaled(title: String, scale: Int) -> Int
+    self.raw.window_show(&title, scale)
+  end
+
   private
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
@@ -345,7 +353,23 @@ class Window
       self.windowed = true
       Ok(nil)
     else
-      # 6 = SDL unavailable / no display, 1 = bad handle (see sdl_window.c)
+      Err(String.from("canvas: show failed with status #{code}"))
+    end
+  end
+
+  ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window
+  ## opens at scale x the framebuffer size and pointer coordinates are
+  ## mapped back, so the app still works in framebuffer coordinates.
+  def var show_scaled(scale: Int) -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    let code = self.canvas.show_window_scaled(self.title.clone, scale)
+    if code == 0
+      self.windowed = true
+      Ok(nil)
+    else
+      # 6 = SDL unavailable / no display, 1 = bad args (see sdl_window.c)
       Err(String.from("canvas: show failed with status #{code}"))
     end
   end

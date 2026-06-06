@@ -127,6 +127,7 @@ static int load_sdl(void) {
 int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     const char *t = (const char *)title;
+    if (scale == 0) scale = 1; /* 0 = auto (callers without a preference) */
     if (!h || !t || scale < 1 || scale > 8) return RXC_ERR_BAD_ARGS;
     if (s_win) return RXC_OK; /* already shown */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
