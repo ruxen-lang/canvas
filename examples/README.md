@@ -35,3 +35,15 @@ draw_rect (incl. alpha blending), draw_text, and the event stream.
 
 `view.c` is also a sketch of the eventual presenter: the same SDL window +
 texture upload the GPU backend will hang off the `ruxen_canvas_*` ABI.
+
+## Interactive counter (real window, live input)
+
+`counter.rx` is the full loop quiver will automate: open → show → poll
+events → redraw → present → pace. Click the button to increment, close
+the window to exit; with no display it renders ~60 headless frames and
+exits.
+
+```bash
+cp /path/to/canvas/examples/counter.rx /tmp/counter_app/src/main.rx
+cd /tmp/counter_app && RUXEN_ALLOW_EXTERNAL_PATH=1 ruxen run
+```

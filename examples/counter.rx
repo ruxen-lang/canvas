@@ -7,13 +7,12 @@
 #   cd /tmp/counter_app && RUXEN_ALLOW_EXTERNAL_PATH=1 ruxen run
 #
 # Click the button (or press any key) to increment. Close the window to
-# exit. Pass a demo frame budget via RUXEN_CANVAS_DEMO_FRAMES to auto-exit.
+# exit. Headless (no display): renders ~60 frames and exits.
 
-# 1 when (x, y) lands inside the button, else 0.
-def click_hit(button: &Rect, x: Int, y: Int) -> Int
-  let fx = x as Float32
-  let fy = y as Float32
-  if button.contains(fx, fy)
+# Integer hit test. Int<->Float casts are not yet supported by codegen, so
+# the button bounds exist twice: f32 literals for drawing, Ints here.
+def hit01(bx: Int, by: Int, bw: Int, bh: Int, x: Int, y: Int) -> Int
+  if x >= bx && x < bx + bw && y >= by && y < by + bh
     1
   else
     0
@@ -28,7 +27,7 @@ def draw_ui(w: &var Window, count: Int) -> Result[nil, String]
   w.canvas.draw_text(String.from("RUXEN COUNTER"), 12.0f32, 23.0f32, Color.white)?
   # count readout
   w.canvas.draw_text(String.from("COUNT: #{count}"), 120.0f32, 110.0f32, Color.white)?
-  # button
+  # button (bounds mirrored in main's hit test)
   w.canvas.draw_rect(Rect.new(110.0f32, 150.0f32, 100.0f32, 36.0f32), Color.new(54u8, 80u8, 160u8, 255u8))?
   w.canvas.draw_text(String.from("CLICK ME"), 130.0f32, 173.0f32, Color.white)?
   w.canvas.end_frame()?
@@ -41,20 +40,19 @@ def main
     Err(_) -> panic!("Window.open failed")
   end
   match w.show
-    Ok(_)  -> puts "window up — click the button, close to exit"
-    Err(e) -> puts "no display (#{e}) — running headless"
+    Ok(_)  -> puts "window up — click the button, close the window to exit"
+    Err(e) -> puts "no display (#{e}) — headless demo run"
   end
 
-  let button: Rect = Rect.new(110.0f32, 150.0f32, 100.0f32, 36.0f32)
   var count = 0
   var running = true
   var frames = 0
 
   while running
-    # input
+    # input (poll_event pumps the OS queue implicitly)
     while let Some(e) = w.poll_event
       match e
-        Event.PointerDown(x, y) -> count += click_hit(&button, x, y)
+        Event.PointerDown(x, y) -> count += hit01(110, 150, 100, 36, x, y)
         Event.KeyDown(_)        -> count += 1
         Event.CloseRequested    -> running = false
         _ -> nil
@@ -82,7 +80,7 @@ def main
 
     frames += 1
     if !w.windowed && frames > 60
-      running = false   # headless demo: one second then exit
+      running = false   # headless demo: ~one second then exit
     end
   end
 
