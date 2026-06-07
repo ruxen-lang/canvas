@@ -1,0 +1,154 @@
+## A window backed by a canvas.
+##
+## On this backend the window is headless (a framebuffer target); the SDL
+## window + GL/Metal surface slot in behind the same ABI later. A `Window`
+## owns its `Canvas`; dropping it tears everything down deterministically
+## (no GC) — the no-jank story of the stack.
+##
+## NOT thread-safe: a Window (and its Canvas) has a single owner, and
+## `poll_event` must not race another call — the popped event's payload
+## is read back through separate accessor calls.
+class Window
+  canvas: Canvas
+  title: String
+  width: Int
+  height: Int
+  windowed: Bool
+
+  def init(@canvas: Canvas, @title: String, @width: Int, @height: Int, @windowed: Bool)
+  end
+
+  ## Open a window with the given title and logical size. The window is
+  ## HEADLESS until `show` is called — drawing, events, and pixel readback
+  ## work identically before and after; `show` only adds an OS window that
+  ## `present` blits to. Tests and CI never call `show`.
+  def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
+    if !Rxc.valid_dimensions(width, height)
+      return Err(String.from("canvas: invalid window size #{width}x#{height}"))
+    end
+    let canvas = Canvas.create(width, height)?
+    Ok(Window.new(canvas, title, width, height, false))
+  end
+
+  ## True when some window in this process is currently on screen.
+  def self.shown? -> Bool
+    RawHost.window_is_shown == 1
+  end
+
+  ## Put a real OS window on screen for this canvas (SDL2 runtime via
+  ## dlopen — see runtime/sdl_window.c). Err when no display / no SDL is
+  ## available; everything keeps working headless in that case.
+  def var show -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window(t)
+    if code == 0
+      self.windowed = true
+      Ok(nil)
+    else
+      Err(String.from("canvas: show failed with status #{code}"))
+    end
+  end
+
+  ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window
+  ## opens at scale x the framebuffer size and pointer coordinates are
+  ## mapped back, so the app still works in framebuffer coordinates.
+  def var show_scaled(scale: Int) -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    # interpolation copy: `self.title.clone` mis-reads the field through
+    # self (compiler bug family); building a fresh String works
+    let t = String.from("#{self.title}")
+    let code = self.canvas.show_window_scaled(t, scale)
+    if code == 0
+      self.windowed = true
+      Ok(nil)
+    else
+      # 6 = SDL unavailable / no display, 1 = bad args (see sdl_window.c)
+      Err(String.from("canvas: show failed with status #{code}"))
+    end
+  end
+
+  ## Blit the canvas to the OS window (call after `end_frame`). Errs when
+  ## the window is not shown.
+  def var present -> Result[nil, String]
+    let code = self.canvas.raw.window_present
+    if code == 0
+      Ok(nil)
+    else
+      Err(String.from("canvas: present failed with status #{code}"))
+    end
+  end
+
+  ## Drain pending OS input into the event queue without popping any;
+  ## returns the number of events forwarded (0 when no window is shown).
+  ## `poll_event` pumps implicitly.
+  def var pump -> Int
+    self.canvas.raw.window_pump
+  end
+
+  ## Take the OS window off screen (idempotent; the canvas stays fully
+  ## usable headless). Call when handling `Event.CloseRequested`.
+  def var hide -> nil
+    if self.windowed
+      let _ = RawHost.window_destroy
+      self.windowed = false
+    end
+  end
+
+  ## Sleep for `ms` milliseconds — render-loop frame pacing.
+  def sleep_ms(ms: Int) -> nil
+    self.canvas.raw.sleep_ms_raw(ms)
+  end
+
+  ## Pop the next pending event, or `nil` when the queue is empty.
+  ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
+  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested.
+  def var poll_event -> Event?
+    if self.windowed
+      let _ = self.canvas.raw.window_pump
+    end
+    let kind = self.canvas.raw.poll_event_raw
+    if kind < 0
+      return nil
+    end
+    let ia = self.canvas.raw.event_ai
+    let ib = self.canvas.raw.event_bi
+    let ev: Event = if kind == 0
+      Event.PointerMove(ia, ib)
+    elsif kind == 1
+      Event.PointerDown(ia, ib)
+    elsif kind == 2
+      Event.PointerUp(ia, ib)
+    elsif kind == 3
+      Event.KeyDown(ia)
+    elsif kind == 4
+      Event.Resize(ia, ib)
+    else
+      Event.CloseRequested
+    end
+    ev
+  end
+  ## Inject an event into the queue. This is the hook the platform pump
+  ## (SDL later) and the pin tests use to feed the stream.
+  def var push_event(event: Event) -> Result[nil, String]
+    let code = match event
+      Event.PointerMove(x, y) -> self.canvas.raw.push_event_i_raw(0, x, y)
+      Event.PointerDown(x, y) -> self.canvas.raw.push_event_i_raw(1, x, y)
+      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_i_raw(2, x, y)
+      Event.KeyDown(k)        -> self.canvas.raw.push_event_i_raw(3, k, 0)
+      Event.Resize(w, h)      -> self.canvas.raw.push_event_i_raw(4, w, h)
+      Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
+    end
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err(String.from("canvas: push_event failed: event queue is full"))
+    else
+      Err(String.from("canvas: push_event failed: invalid arguments"))
+    end
+  end
+end

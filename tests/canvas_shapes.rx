@@ -1,0 +1,167 @@
+# Pin tests for the Skia-native primitives: circle, rounded rect (uniform +
+# per-corner), line. These are Skia-only — with no library they must return a
+# clean Err (RXC_ERR_NO_SKIA), never crash. When Skia is active we assert the
+# rasterized pixels (interior covered, carved/!outside left as background).
+
+Tester.describe("Canvas.draw_circle") do |t: &var Tester|
+  t.it("fills the disc, leaves the corners") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let active = c.skia_active?
+    let res = c.draw_circle(8.0f32, 8.0f32, 6.0f32, Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_circle failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(8, 8)).to_eq(white)   # center filled
+      t.expect(c.read_pixel(0, 0)).to_eq(black)   # corner outside disc
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_round_rect") do |t: &var Tester|
+  t.it("fills with carved corners and straight edges") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let active = c.skia_active?
+    let res = c.draw_round_rect(Rect.new(0.0f32, 0.0f32, 16.0f32, 16.0f32), 6.0f32, Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_round_rect failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(8, 8)).to_eq(white)   # center filled
+      t.expect(c.read_pixel(8, 0)).to_eq(white)   # straight top edge filled
+      t.expect(c.read_pixel(0, 0)).to_eq(black)   # rounded corner carved away
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_rrect per-corner") do |t: &var Tester|
+  t.it("rounds only the requested corner") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let active = c.skia_active?
+    # round only top-left (tl=8), the other three corners sharp
+    let res = c.draw_rrect(Rect.new(0.0f32, 0.0f32, 16.0f32, 16.0f32), 8.0f32, 0.0f32, 0.0f32, 0.0f32, Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_rrect failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(0, 0)).to_eq(black)    # top-left carved (rounded)
+      t.expect(c.read_pixel(15, 15)).to_eq(white)  # bottom-right sharp
+      t.expect(c.read_pixel(15, 0)).to_eq(white)   # top-right sharp
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_line") do |t: &var Tester|
+  t.it("strokes along the segment only") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let active = c.skia_active?
+    let res = c.draw_line(2.0f32, 8.0f32, 14.0f32, 8.0f32, 3.0f32, Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_line failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(8, 8)).to_eq(white)   # on the stroke
+      t.expect(c.read_pixel(8, 1)).to_eq(black)   # far from the stroke
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

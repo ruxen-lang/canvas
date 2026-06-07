@@ -24,10 +24,14 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #include "rx_canvas_internal.h"
+#include "skia/skia_capi.h"
 
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
@@ -47,6 +51,133 @@ static int rxc_finite_pixels(double v) {
     return v > -1.0e9 && v < 1.0e9;
 }
 
+
+/* ---- Skia loader (dlopen, lazy, process-wide singleton) ----
+ *
+ * libSkiaSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here — never
+ * linked (see docs/SKIA.md). rx_skia() resolves the sk_* table on first call;
+ * if the library or any required symbol is missing, ->available stays 0 and
+ * every drawing op falls back to the software raster path below. */
+
+static void *rx_skia_dlopen(void) {
+    /* Search order: explicit override, the fetch-script cache, then the system
+     * loader. dlopen of an absolute path is CWD-independent. */
+    const char *env = getenv("RUXEN_CANVAS_SKIA");
+    if (env && env[0]) {
+        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    char path[4096];
+    const char *cache = getenv("RUXEN_CANVAS_CACHE");
+    if (cache && cache[0]) {
+        snprintf(path, sizeof(path), "%s/libSkiaSharp.so", cache);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libSkiaSharp.so", home);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return dlopen("libSkiaSharp.so", RTLD_NOW | RTLD_LOCAL);
+}
+
+const RxSkia *rx_skia(void) {
+    static RxSkia skia;       /* zero-initialized: available = 0 */
+    static int initialized = 0;
+    if (initialized) return &skia;
+    initialized = 1;
+
+    void *lib = rx_skia_dlopen();
+    if (!lib) return &skia;   /* not available; software fallback */
+
+    /* Two resolution tiers (incremental-FFI discipline, docs/FFI.md):
+     *
+     *  - REQUIRED: the symbols every currently-implemented op needs (surface
+     *    setup + clear + draw_rect). A miss here disables the whole backend so
+     *    we never half-use a mismatched library — ->available stays 0 and we
+     *    fall back to software.
+     *  - OPTIONAL: symbols for capabilities bound in later commits (ovals,
+     *    rounded rects, lines, text). They are resolved into the table when
+     *    present, but a miss does NOT disable the backend; each wrapping method
+     *    must null-check its own pointer before calling and return Err if it is
+     *    absent. This keeps an older/newer library from silently dropping the
+     *    whole backend just because one not-yet-used symbol was renamed. */
+    int ok = 1;
+#define RX_SK_REQUIRED(field, sym)                                  \
+    do {                                                            \
+        *(void **)(&skia.field) = dlsym(lib, sym);                  \
+        if (!skia.field) ok = 0;                                    \
+    } while (0)
+#define RX_SK_OPTIONAL(field, sym)                                  \
+    do { *(void **)(&skia.field) = dlsym(lib, sym); } while (0)
+
+    RX_SK_REQUIRED(surface_new_raster_direct, "sk_surface_new_raster_direct");
+    RX_SK_REQUIRED(surface_get_canvas,        "sk_surface_get_canvas");
+    RX_SK_REQUIRED(surface_unref,             "sk_surface_unref");
+    RX_SK_REQUIRED(canvas_clear,              "sk_canvas_clear");
+    RX_SK_REQUIRED(canvas_draw_rect,          "sk_canvas_draw_rect");
+    RX_SK_REQUIRED(paint_new,                 "sk_paint_new");
+    RX_SK_REQUIRED(paint_delete,              "sk_paint_delete");
+    RX_SK_REQUIRED(paint_set_color,           "sk_paint_set_color");
+    RX_SK_REQUIRED(paint_set_antialias,       "sk_paint_set_antialias");
+    RX_SK_REQUIRED(paint_set_style,           "sk_paint_set_style");
+
+    RX_SK_OPTIONAL(paint_set_stroke_width,    "sk_paint_set_stroke_width");
+    RX_SK_OPTIONAL(canvas_draw_oval,          "sk_canvas_draw_oval");
+    RX_SK_OPTIONAL(canvas_draw_round_rect,    "sk_canvas_draw_round_rect");
+    RX_SK_OPTIONAL(canvas_draw_rrect,         "sk_canvas_draw_rrect");
+    RX_SK_OPTIONAL(canvas_draw_line,          "sk_canvas_draw_line");
+    RX_SK_OPTIONAL(canvas_draw_simple_text,   "sk_canvas_draw_simple_text");
+    RX_SK_OPTIONAL(rrect_new,                 "sk_rrect_new");
+    RX_SK_OPTIONAL(rrect_delete,              "sk_rrect_delete");
+    RX_SK_OPTIONAL(rrect_set_rect_radii,      "sk_rrect_set_rect_radii");
+    RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
+    RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
+    RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
+    RX_SK_OPTIONAL(font_delete,               "sk_font_delete");
+    RX_SK_OPTIONAL(font_measure_text,         "sk_font_measure_text");
+    RX_SK_OPTIONAL(font_get_metrics,          "sk_font_get_metrics");
+#undef RX_SK_REQUIRED
+#undef RX_SK_OPTIONAL
+
+    /* Keep the handle open for the process lifetime (no dlclose): the resolved
+     * pointers must stay valid. */
+    skia.available = ok;
+    return &skia;
+}
+
+/* Lazily create (once per host) a raster-direct Skia surface that wraps the
+ * host's own 0xAARRGGBB framebuffer, and return its canvas — or NULL when Skia
+ * is unavailable / creation failed. The surface is cached on the host and torn
+ * down in host_drop before the pixels are freed. */
+static sk_canvas_t *rx_host_canvas(RxHost *h) {
+    if (!h) return NULL;
+    if (h->sk_canvas) return (sk_canvas_t *)h->sk_canvas;
+    if (h->sk_tried) return NULL;
+    h->sk_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available) return NULL;
+
+    sk_imageinfo_t info;
+    info.colorspace = NULL;
+    info.width      = h->width;
+    info.height     = h->height;
+    info.colorType  = RX_SK_COLORTYPE_BGRA_8888;  /* 0xAARRGGBB on LE == B,G,R,A */
+    info.alphaType  = RX_SK_ALPHA_PREMUL;
+
+    sk_surface_t *surf = sk->surface_new_raster_direct(
+        &info, h->pixels, (size_t)h->width * 4, NULL, NULL, NULL);
+    if (!surf) return NULL;
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) { sk->surface_unref(surf); return NULL; }
+
+    h->sk_surface = surf;
+    h->sk_canvas  = canvas;
+    return canvas;
+}
 
 
 /* ---- lifecycle ---- */
@@ -87,8 +218,36 @@ void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
     ruxen_canvas_window_note_host_dropped(self);
+    /* The Skia surface wraps h->pixels — unref it before freeing the buffer.
+     * (sk_canvas is owned by the surface; no separate release.) */
+    if (h->sk_surface) {
+        const RxSkia *sk = rx_skia();
+        if (sk->available) sk->surface_unref((sk_surface_t *)h->sk_surface);
+        h->sk_surface = NULL;
+        h->sk_canvas  = NULL;
+    }
     free(h->pixels);
     free(h);
+}
+
+/* True (1) when the real Skia library is loaded and its required symbols
+ * resolved; 0 when the shim is on its software-raster fallback. A process-wide
+ * capability probe (does not by itself prove a surface was created — see
+ * ruxen_canvas_skia_active for that). */
+int64_t ruxen_canvas_skia_available(int64_t self) {
+    (void)self;
+    return rx_skia()->available ? 1 : 0;
+}
+
+/* True (1) only when THIS host has a live Skia raster surface — i.e. Skia is
+ * loaded AND sk_surface_new_raster_direct actually succeeded for this buffer,
+ * so draws are genuinely going through Skia (not silently falling back). This
+ * is the unambiguous "Skia is rendering into me" signal the pin tests assert,
+ * forcing the surface to be created if it has not been yet. */
+int64_t ruxen_canvas_skia_active(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    return rx_host_canvas(h) != NULL ? 1 : 0;
 }
 
 int64_t ruxen_canvas_host_width(int64_t self) {
@@ -172,6 +331,15 @@ int64_t ruxen_canvas_clear(int64_t self, int64_t r, int64_t g, int64_t b, int64_
     RxHost *h = (RxHost *)self;
     if (!h || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (canvas) {
+        const RxSkia *sk = rx_skia();
+        sk->canvas_clear(canvas, (sk_color_t)rxc_pack(r, g, b, a));
+        return RXC_OK;
+    }
+
+    /* software fallback */
     uint32_t px = rxc_pack(r, g, b, a);
     int64_t n = (int64_t)h->width * h->height;
     for (int64_t i = 0; i < n; i++) h->pixels[i] = px;
@@ -193,6 +361,21 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
         return RXC_ERR_BAD_ARGS;
     }
 
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (canvas) {
+        const RxSkia *sk = rx_skia();
+        sk_paint_t *paint = sk->paint_new();
+        if (!paint) return RXC_ERR_BAD_ARGS;
+        sk->paint_set_antialias(paint, 0);   /* crisp integer-aligned edges */
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+        sk->canvas_draw_rect(canvas, &rect, paint);   /* Skia clips to surface */
+        sk->paint_delete(paint);
+        return RXC_OK;
+    }
+
+    /* software fallback: half-open floor box [floor(x),floor(x+w)) clipped */
     int64_t x0 = rxc_floor_to_i64(x);
     int64_t y0 = rxc_floor_to_i64(y);
     int64_t x1 = rxc_floor_to_i64(x + w);
@@ -212,126 +395,236 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
     return RXC_OK;
 }
 
-/* ---- text: embedded 5x7 bitmap font ---- */
-/* Classic 5x7 ASCII font (0x20..0x7E), column-major: 5 bytes per glyph,
- * bit 0 of each byte is the top row. Good enough for the counter-app
- * slice; Skia paragraph / HarfBuzz shaping replaces this later. */
+/* ---- Skia-native primitives (no software fallback) ----
+ *
+ * These shapes have no software-raster implementation: when Skia is not loaded
+ * they return RXC_ERR_NO_SKIA so the Ruxen side surfaces a clear Err (never a
+ * silent no-op — docs/FFI.md). Each is antialiased. `stroke_w > 0` strokes an
+ * outline of that width; `stroke_w <= 0` fills. Color arrives packed as
+ * 0xAARRGGBB in the low 32 bits of `argb`. */
 
-#define RXC_GLYPH_W   5
-#define RXC_GLYPH_H   7
-#define RXC_ADVANCE   6  /* glyph width + 1px spacing */
+/* Build a paint for the given packed color and stroke width, or NULL on
+ * allocation failure. Caller owns it (paint_delete). */
+static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w) {
+    sk_paint_t *p = sk->paint_new();
+    if (!p) return NULL;
+    sk->paint_set_antialias(p, 1);
+    if (stroke_w > 0.0) {
+        sk->paint_set_style(p, RX_SK_PAINT_STROKE);
+        if (sk->paint_set_stroke_width) sk->paint_set_stroke_width(p, (float)stroke_w);
+    } else {
+        sk->paint_set_style(p, RX_SK_PAINT_FILL);
+    }
+    sk->paint_set_color(p, (sk_color_t)(uint32_t)argb);
+    return p;
+}
 
-static const uint8_t rxc_font5x7[95][5] = {
-    {0x00,0x00,0x00,0x00,0x00}, /* ' ' */
-    {0x00,0x00,0x5F,0x00,0x00}, /* '!' */
-    {0x00,0x07,0x00,0x07,0x00}, /* '"' */
-    {0x14,0x7F,0x14,0x7F,0x14}, /* '#' */
-    {0x24,0x2A,0x7F,0x2A,0x12}, /* '$' */
-    {0x23,0x13,0x08,0x64,0x62}, /* '%' */
-    {0x36,0x49,0x55,0x22,0x50}, /* '&' */
-    {0x00,0x05,0x03,0x00,0x00}, /* ''' */
-    {0x00,0x1C,0x22,0x41,0x00}, /* '(' */
-    {0x00,0x41,0x22,0x1C,0x00}, /* ')' */
-    {0x14,0x08,0x3E,0x08,0x14}, /* '*' */
-    {0x08,0x08,0x3E,0x08,0x08}, /* '+' */
-    {0x00,0x50,0x30,0x00,0x00}, /* ',' */
-    {0x08,0x08,0x08,0x08,0x08}, /* '-' */
-    {0x00,0x60,0x60,0x00,0x00}, /* '.' */
-    {0x20,0x10,0x08,0x04,0x02}, /* '/' */
-    {0x3E,0x51,0x49,0x45,0x3E}, /* '0' */
-    {0x00,0x42,0x7F,0x40,0x00}, /* '1' */
-    {0x42,0x61,0x51,0x49,0x46}, /* '2' */
-    {0x21,0x41,0x45,0x4B,0x31}, /* '3' */
-    {0x18,0x14,0x12,0x7F,0x10}, /* '4' */
-    {0x27,0x45,0x45,0x45,0x39}, /* '5' */
-    {0x3C,0x4A,0x49,0x49,0x30}, /* '6' */
-    {0x01,0x71,0x09,0x05,0x03}, /* '7' */
-    {0x36,0x49,0x49,0x49,0x36}, /* '8' */
-    {0x06,0x49,0x49,0x29,0x1E}, /* '9' */
-    {0x00,0x36,0x36,0x00,0x00}, /* ':' */
-    {0x00,0x56,0x36,0x00,0x00}, /* ';' */
-    {0x08,0x14,0x22,0x41,0x00}, /* '<' */
-    {0x14,0x14,0x14,0x14,0x14}, /* '=' */
-    {0x00,0x41,0x22,0x14,0x08}, /* '>' */
-    {0x02,0x01,0x51,0x09,0x06}, /* '?' */
-    {0x32,0x49,0x79,0x41,0x3E}, /* '@' */
-    {0x7E,0x11,0x11,0x11,0x7E}, /* 'A' */
-    {0x7F,0x49,0x49,0x49,0x36}, /* 'B' */
-    {0x3E,0x41,0x41,0x41,0x22}, /* 'C' */
-    {0x7F,0x41,0x41,0x22,0x1C}, /* 'D' */
-    {0x7F,0x49,0x49,0x49,0x41}, /* 'E' */
-    {0x7F,0x09,0x09,0x09,0x01}, /* 'F' */
-    {0x3E,0x41,0x49,0x49,0x7A}, /* 'G' */
-    {0x7F,0x08,0x08,0x08,0x7F}, /* 'H' */
-    {0x00,0x41,0x7F,0x41,0x00}, /* 'I' */
-    {0x20,0x40,0x41,0x3F,0x01}, /* 'J' */
-    {0x7F,0x08,0x14,0x22,0x41}, /* 'K' */
-    {0x7F,0x40,0x40,0x40,0x40}, /* 'L' */
-    {0x7F,0x02,0x0C,0x02,0x7F}, /* 'M' */
-    {0x7F,0x04,0x08,0x10,0x7F}, /* 'N' */
-    {0x3E,0x41,0x41,0x41,0x3E}, /* 'O' */
-    {0x7F,0x09,0x09,0x09,0x06}, /* 'P' */
-    {0x3E,0x41,0x51,0x21,0x5E}, /* 'Q' */
-    {0x7F,0x09,0x19,0x29,0x46}, /* 'R' */
-    {0x46,0x49,0x49,0x49,0x31}, /* 'S' */
-    {0x01,0x01,0x7F,0x01,0x01}, /* 'T' */
-    {0x3F,0x40,0x40,0x40,0x3F}, /* 'U' */
-    {0x1F,0x20,0x40,0x20,0x1F}, /* 'V' */
-    {0x3F,0x40,0x38,0x40,0x3F}, /* 'W' */
-    {0x63,0x14,0x08,0x14,0x63}, /* 'X' */
-    {0x07,0x08,0x70,0x08,0x07}, /* 'Y' */
-    {0x61,0x51,0x49,0x45,0x43}, /* 'Z' */
-    {0x00,0x7F,0x41,0x41,0x00}, /* '[' */
-    {0x02,0x04,0x08,0x10,0x20}, /* '\' */
-    {0x00,0x41,0x41,0x7F,0x00}, /* ']' */
-    {0x04,0x02,0x01,0x02,0x04}, /* '^' */
-    {0x40,0x40,0x40,0x40,0x40}, /* '_' */
-    {0x00,0x01,0x02,0x04,0x00}, /* '`' */
-    {0x20,0x54,0x54,0x54,0x78}, /* 'a' */
-    {0x7F,0x48,0x44,0x44,0x38}, /* 'b' */
-    {0x38,0x44,0x44,0x44,0x20}, /* 'c' */
-    {0x38,0x44,0x44,0x48,0x7F}, /* 'd' */
-    {0x38,0x54,0x54,0x54,0x18}, /* 'e' */
-    {0x08,0x7E,0x09,0x01,0x02}, /* 'f' */
-    {0x0C,0x52,0x52,0x52,0x3E}, /* 'g' */
-    {0x7F,0x08,0x04,0x04,0x78}, /* 'h' */
-    {0x00,0x44,0x7D,0x40,0x00}, /* 'i' */
-    {0x20,0x40,0x44,0x3D,0x00}, /* 'j' */
-    {0x7F,0x10,0x28,0x44,0x00}, /* 'k' */
-    {0x00,0x41,0x7F,0x40,0x00}, /* 'l' */
-    {0x7C,0x04,0x18,0x04,0x78}, /* 'm' */
-    {0x7C,0x08,0x04,0x04,0x78}, /* 'n' */
-    {0x38,0x44,0x44,0x44,0x38}, /* 'o' */
-    {0x7C,0x14,0x14,0x14,0x08}, /* 'p' */
-    {0x08,0x14,0x14,0x18,0x7C}, /* 'q' */
-    {0x7C,0x08,0x04,0x04,0x08}, /* 'r' */
-    {0x48,0x54,0x54,0x54,0x20}, /* 's' */
-    {0x04,0x3F,0x44,0x40,0x20}, /* 't' */
-    {0x3C,0x40,0x40,0x20,0x7C}, /* 'u' */
-    {0x1C,0x20,0x40,0x20,0x1C}, /* 'v' */
-    {0x3C,0x40,0x30,0x40,0x3C}, /* 'w' */
-    {0x44,0x28,0x10,0x28,0x44}, /* 'x' */
-    {0x0C,0x50,0x50,0x50,0x3C}, /* 'y' */
-    {0x44,0x64,0x54,0x4C,0x44}, /* 'z' */
-    {0x00,0x08,0x36,0x41,0x00}, /* '{' */
-    {0x00,0x00,0x7F,0x00,0x00}, /* '|' */
-    {0x00,0x41,0x36,0x08,0x00}, /* '}' */
-    {0x10,0x08,0x08,0x10,0x08}, /* '~' */
-};
+/* Common entry guard: validate host + frame, ensure the Skia surface and the
+ * given drawing function pointer are live. Returns the canvas (and the table)
+ * or NULL with *err set. */
+static sk_canvas_t *rx_skia_draw_begin(RxHost *h, const void *fnptr,
+                                       const RxSkia **out_sk, int64_t *err) {
+    if (!h) { *err = RXC_ERR_BAD_ARGS; return NULL; }
+    if (!h->in_frame) { *err = RXC_ERR_NO_FRAME; return NULL; }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas || !fnptr) { *err = RXC_ERR_NO_SKIA; return NULL; }
+    *out_sk = rx_skia();
+    return canvas;
+}
 
-/* Width in pixels of an n-character single line at this font's one size.
- * Each glyph advances RXC_ADVANCE px; no trailing gap. The CHARACTER COUNT
- * crosses the FFI (not the string): the metric stays defined here, and the
- * call uses only integer arguments. */
+/* Filled/stroked circle centered at (cx, cy). */
+int64_t ruxen_canvas_draw_circle(int64_t self, double cx, double cy, double radius,
+                                 double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_oval : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (rxc_is_nan(radius) || !(radius > 0.0)) return RXC_OK;   /* empty */
+    if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) ||
+        !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rect_t bounds = { (float)(cx - radius), (float)(cy - radius),
+                         (float)(cx + radius), (float)(cy + radius) };
+    sk->canvas_draw_oval(canvas, &bounds, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Filled/stroked rounded rectangle with a single uniform corner radius. */
+int64_t ruxen_canvas_draw_round_rect(int64_t self, double x, double y, double w, double hgt,
+                                     double radius, double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_round_rect : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;              /* empty */
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt) ||
+        !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double rad = radius > 0.0 ? radius : 0.0;
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Filled/stroked rounded rectangle with independent corner radii (each a single
+ * symmetric x=y radius): tl, tr, br, bl. Enables one-side-only / pill / tab
+ * shapes. Needs the sk_rrect builder symbols. */
+int64_t ruxen_canvas_draw_rrect_radii(int64_t self, double x, double y, double w, double hgt,
+                                      double tl, double tr, double br, double bl,
+                                      double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_rrect || !sk->rrect_new ||
+        !sk->rrect_set_rect_radii || !sk->rrect_delete) {
+        return RXC_ERR_NO_SKIA;
+    }
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;              /* empty */
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt) ||
+        !rxc_finite_pixels(tl) || !rxc_finite_pixels(tr) ||
+        !rxc_finite_pixels(br) || !rxc_finite_pixels(bl) ||
+        !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    if (tl < 0.0) tl = 0.0;
+    if (tr < 0.0) tr = 0.0;
+    if (br < 0.0) br = 0.0;
+    if (bl < 0.0) bl = 0.0;
+
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rrect_t *rr = sk->rrect_new();
+    if (!rr) { sk->paint_delete(paint); return RXC_ERR_BAD_ARGS; }
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    /* radii order: upper-left, upper-right, lower-right, lower-left */
+    sk_vector_t radii[4] = {
+        { (float)tl, (float)tl }, { (float)tr, (float)tr },
+        { (float)br, (float)br }, { (float)bl, (float)bl },
+    };
+    sk->rrect_set_rect_radii(rr, &rect, radii);
+    sk->canvas_draw_rrect(canvas, rr, paint);
+    sk->rrect_delete(rr);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Stroked line from (x0, y0) to (x1, y1). stroke_w <= 0 draws a 1px hairline. */
+int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, double y1,
+                               double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_line : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (!rxc_finite_pixels(x0) || !rxc_finite_pixels(y0) ||
+        !rxc_finite_pixels(x1) || !rxc_finite_pixels(y1) ||
+        !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double width = stroke_w > 0.0 ? stroke_w : 1.0;
+    sk_paint_t *paint = rx_make_paint(sk, argb, width);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+#include "bitmap_font.h"
+
+/* Pixel size of the default Skia font. The bitmap fallback is a fixed 7px
+ * face; this is chosen close to it so layouts stay sane across backends. */
+#define RXC_SKIA_FONT_PX 13.0f
+
+/* The process-wide default Skia font (system default typeface at a fixed
+ * size), built once on first use. NULL when Skia / the font symbols are
+ * unavailable, in which case callers use the 5x7 bitmap path. */
+static sk_font_t *rx_default_font(void) {
+    static sk_font_t *font = NULL;
+    static int tried = 0;
+    if (tried) return font;
+    tried = 1;
+    const RxSkia *sk = rx_skia();
+    /* Require EVERY text symbol the font path uses (draw + measure + metrics),
+     * so draw_text/measure_text/text_height all make the same backend decision.
+     * If any is missing they fall back to the bitmap together — never Skia-draw
+     * with bitmap-measured advances (which would mis-center labels). */
+    if (!sk->available || !sk->font_new_with_values || !sk->canvas_draw_simple_text ||
+        !sk->font_measure_text || !sk->font_get_metrics) {
+        return NULL;
+    }
+    sk_typeface_t *tf = sk->typeface_create_default ? sk->typeface_create_default() : NULL;
+    sk_font_t *f = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    if (!f) return NULL;
+    /* Guard against an empty-typeface font (some Skia builds give a NULL
+     * typeface zero glyphs — zero-width, no ink). A real face measures 'M' as a
+     * positive advance; if not, drop it so the bitmap path takes over. */
+    float probe = sk->font_measure_text(f, "M", 1, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(probe > 0.0f)) {
+        if (sk->font_delete) sk->font_delete(f);
+        return NULL;
+    }
+    font = f;
+    return font;
+}
+
+/* Width in pixels of `n` characters at the bitmap font's one size. The
+ * character count crosses the FFI; kept for the software path / callers that
+ * only have a count. */
 int64_t ruxen_canvas_measure_text_n(int64_t self, int64_t n) {
     (void)self;
     if (n <= 0) return 0;
     return n * RXC_ADVANCE - 1;
 }
 
-/* The font's line height (ascent above the baseline), in pixels. */
+/* Advance width in pixels of `text` as it would actually be drawn. Uses Skia's
+ * real font metrics when active (so measure matches draw for centering), else
+ * the bitmap advance. `text` is the C string pointer (an &String from Ruxen). */
+int64_t ruxen_canvas_measure_text(int64_t self, int64_t text) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s) return 0;
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (sk->available && font && sk->font_measure_text) {
+        float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
+        if (!(w > 0.0f)) return 0;
+        return (int64_t)(w + 0.5f);
+    }
+    size_t n = strlen(s);
+    return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
+}
+
+/* The font's line height in pixels (ascent above + descent below the
+ * baseline). Skia metrics when active, else the bitmap's 7px. */
 int64_t ruxen_canvas_text_height(int64_t self) {
     (void)self;
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (sk->available && font && sk->font_get_metrics) {
+        sk_fontmetrics_t m;
+        sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
+        float hgt = m.descent - m.ascent;
+        if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
+    }
     return RXC_GLYPH_H;
 }
 
@@ -346,6 +639,24 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
 
+    /* Skia path: a real antialiased font. (x, y) is the baseline origin, the
+     * same convention as the bitmap path below. */
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (canvas && font && sk->canvas_draw_simple_text) {
+        sk_paint_t *paint = sk->paint_new();
+        if (!paint) return RXC_ERR_BAD_ARGS;
+        sk->paint_set_antialias(paint, 1);
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        sk->canvas_draw_simple_text(canvas, s, strlen(s), RX_SK_TEXT_UTF8,
+                                    (float)x, (float)y, font, paint);
+        sk->paint_delete(paint);
+        return RXC_OK;
+    }
+
+    /* software fallback: 5x7 bitmap font */
     uint32_t src = rxc_pack(r, g, b, a);
     int64_t pen_x = rxc_floor_to_i64(x);
     int64_t top   = rxc_floor_to_i64(y) - RXC_GLYPH_H;

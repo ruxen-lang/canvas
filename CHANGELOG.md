@@ -7,6 +7,47 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Skia vendoring infrastructure** — `canvas` will render with real Skia
+  (the prebuilt `libSkiaSharp` that ships behind Avalonia / Uno / .NET MAUI,
+  exposing Skia's flat `sk_*` C API). It is **fetched, not committed, and
+  dlopen'd, not linked**:
+  - `runtime/fetch_skia.sh` — SHA-256-pinned download of
+    `SkiaSharp.NativeAssets.Linux` 3.119.4; verifies both the package and the
+    extracted `.so`; installs to `$HOME/.cache/ruxen-canvas/` (idempotent).
+  - `runtime/skia/skia_capi.h` — the committed minimal C-API surface (opaque
+    types, ABI-pinned enums/structs, function-pointer table). The 11 MB `.so`
+    is never checked in; only this header is.
+  - `docs/SKIA.md` — the vendoring + integration model (Skia rasterizes
+    straight into the existing `0xAARRGGBB` `RxHost.pixels` buffer, so the
+    SDL presenter is untouched), and the 4-step discipline for growing the
+    binding.
+- **Skia raster backend live for `clear` + `draw_rect`** — when libSkiaSharp
+  is present, both now render through a real Skia `sk_surface_new_raster_direct`
+  surface wrapping the host framebuffer (`kBGRA_8888`/premultiplied); when it is
+  absent the deterministic software path still runs, so the build never breaks.
+  `Canvas#skia_available?` reports library load; `Canvas#skia_active?` reports
+  whether *this* canvas is genuinely rendering through Skia. Opaque draws are
+  byte-identical across both backends (pin-tested).
+- **Skia-native shape primitives** (antialiased; the building blocks for quiver
+  widgets) — `Canvas#draw_circle`/`stroke_circle`, `draw_round_rect`/
+  `stroke_round_rect` (uniform corner radius), `draw_rrect`/`stroke_rrect`
+  (independent per-corner radii — one-side-only rounding, pills, tabs), and
+  `draw_line`. Fill and stroke (border) variants throughout. These are
+  Skia-only: with no library loaded they return a clear `Err`
+  (`requires the Skia backend`), never a silent no-op.
+- **Antialiased Skia text** — `draw_text` now renders with a real Skia font
+  (system default typeface) when the backend is active, and `measure_text` /
+  `text_height` report Skia's true metrics so measurement matches drawing (for
+  centering labels). The embedded 5x7 bitmap font remains the software
+  fallback. `measure_text` now takes the actual string (real advance width)
+  rather than a character count. With text on the Skia path, a frame is now
+  rendered entirely by one backend, so there is no premultiplied-vs-straight
+  alpha mismatch between shapes and text.
+
+### Changed
+- `src/lib.rx` split into per-type files (`color`/`rect`/`rxc`/`raw_host`/
+  `canvas`/`event`/`window`.rx); the 5x7 font table moved to
+  `runtime/bitmap_font.h`. No behavior change.
 - **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
   window on screen (SDL2 runtime via dlopen — no dev packages, zero
   link-time deps), `present` blits the canvas after `end_frame`, the pump

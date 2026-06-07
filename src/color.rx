@@ -1,0 +1,37 @@
+## A non-premultiplied 8-bit-per-channel RGBA color.
+struct Color
+  r: UInt8
+  g: UInt8
+  b: UInt8
+  a: UInt8
+
+  ## An opaque color from red/green/blue channels.
+  def self.rgb(r: UInt8, g: UInt8, b: UInt8) -> Color
+    Color.new(r, g, b, 255u8)
+  end
+
+  ## Fully opaque white.
+  def self.white -> Color
+    Color.rgb(255u8, 255u8, 255u8)
+  end
+
+  ## Fully opaque black.
+  def self.black -> Color
+    Color.rgb(0u8, 0u8, 0u8)
+  end
+
+  ## Fully transparent (all channels zero).
+  def self.transparent -> Color
+    Color.new(0u8, 0u8, 0u8, 0u8)
+  end
+
+  ## Pack into a single `0xAARRGGBB` integer — the layout the framebuffer
+  ## uses, and what `Canvas.read_pixel` returns for pin tests.
+  def to_argb -> UInt32
+    let rr = self.r as UInt32
+    let gg = self.g as UInt32
+    let bb = self.b as UInt32
+    let aa = self.a as UInt32
+    (aa << 24) | (rr << 16) | (gg << 8) | bb
+  end
+end

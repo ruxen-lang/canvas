@@ -8,13 +8,15 @@ description = "L1 engine for the Ruxen GUI stack: cross-platform windowing, inpu
 type = "library"
 
 # L1 is the ONLY layer permitted to be unsafe / FFI / platform-specific.
-#   - SDL2/SDL3 : windowing, input, event pump, GL/Metal context (desktop + mobile).
-#   - Skia      : the 2D canvas (Flutter's renderer): GPU rendering plus text
-#                 shaping/i18n via bundled HarfBuzz/FreeType.
-# The full Skia C library is vendored; only a curated subset of methods is
-# exposed via FFI, grown method-by-method (see docs/FFI.md).
+#   - Skia : the 2D canvas (Chrome/Flutter's renderer), via the prebuilt
+#            libSkiaSharp (flat sk_* C API).
+#   - SDL2 : windowing, input, event pump for the live-window presenter.
 #
-# NOTE: link names are placeholders pending the L1 build/link decision
-# (prebuilt-per-platform vs build-from-source) — see docs/ROADMAP.md.
+# DECISION (docs/SKIA.md, docs/ROADMAP.md): both are brought in by FETCH +
+# dlopen, NOT vendor + link. runtime/fetch_skia.sh SHA-pins and downloads
+# libSkiaSharp; the C shim dlopen()s it (and SDL2) at runtime. So there are NO
+# link-time system libraries and NO dev packages — this table is intentionally
+# empty. Only a curated subset of the sk_* API is bound, grown method-by-method
+# (docs/FFI.md).
 [system_libs]
-libs = ["SDL2", "skia"]
+libs = []

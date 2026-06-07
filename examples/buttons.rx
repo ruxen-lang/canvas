@@ -1,0 +1,98 @@
+# Buttons & styling showcase — proves the L1 primitives quiver (L2) will build
+# real widgets from: filled/outlined rounded rectangles, per-corner radii
+# (pills + tabs), circles, lines, and centered antialiased Skia text.
+#
+# Renders an offscreen frame and dumps it as an ASCII PPM (P3) to
+# /tmp/canvas_buttons/out.ppm — convert with e.g. `pnmtopng` or ImageMagick.
+use std.fs.{write}
+
+# A filled rounded-rect button with a horizontally-centered label. measure_text
+# + text_height (real Skia metrics when active) make the centering exact.
+def filled_button(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
+                  label: String, bg: Color, fg: Color, radius: Float32)
+  let _ = c.draw_round_rect(Rect.new(x, y, w, h), radius, bg)
+  center_label(&var c, x, y, w, h, label, fg)
+end
+
+# An outlined (border-only) rounded-rect button.
+def outline_button(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
+                   label: String, border: Color, fg: Color, radius: Float32)
+  let _ = c.stroke_round_rect(Rect.new(x, y, w, h), radius, 2.0f32, border)
+  center_label(&var c, x, y, w, h, label, fg)
+end
+
+def center_label(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
+                 label: String, fg: Color)
+  let tw = c.measure_text(String.from("#{label}")) as Float32
+  let th = c.text_height as Float32
+  let tx = x + (w - tw) / 2.0f32
+  let ty = y + h / 2.0f32 + th / 3.0f32   # baseline a touch below the vertical centre
+  let _ = c.draw_text(String.from("#{label}"), tx, ty, fg)
+end
+
+def main
+  var w = match Window.open(String.from("Ruxen Canvas — Buttons"), 420, 300)
+    Ok(v)  -> v
+    Err(_) -> panic!("Window.open failed")
+  end
+  var c = w.canvas
+
+  let ink: Color = Color.rgb(33u8, 37u8, 43u8)
+  let muted: Color = Color.rgb(120u8, 128u8, 140u8)
+  let white: Color = Color.rgb(255u8, 255u8, 255u8)
+  let blue: Color = Color.rgb(56u8, 110u8, 230u8)
+  let green: Color = Color.rgb(46u8, 178u8, 110u8)
+  let pink: Color = Color.rgb(232u8, 72u8, 130u8)
+
+  let _ = c.begin_frame
+  let _ = c.clear(Color.rgb(245u8, 247u8, 250u8))
+
+  # title
+  let _ = c.draw_text(String.from("Skia buttons & styling"), 24.0f32, 40.0f32, ink)
+  let _ = c.draw_line(24.0f32, 52.0f32, 396.0f32, 52.0f32, 1.0f32, Color.rgb(220u8, 224u8, 230u8))
+
+  # primary (filled, rounded) + secondary (outlined)
+  filled_button(&var c, 24.0f32, 72.0f32, 150.0f32, 44.0f32, String.from("Submit"), blue, white, 10.0f32)
+  outline_button(&var c, 190.0f32, 72.0f32, 150.0f32, 44.0f32, String.from("Cancel"), Color.rgb(205u8, 210u8, 218u8), ink, 10.0f32)
+
+  # pill (per-corner radius = half height) + top-rounded tab (per-corner)
+  filled_button(&var c, 24.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Follow"), pink, white, 20.0f32)
+  let _ = c.draw_rrect(Rect.new(190.0f32, 134.0f32, 150.0f32, 40.0f32), 14.0f32, 14.0f32, 0.0f32, 0.0f32, green)
+  center_label(&var c, 190.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Home tab"), white)
+
+  # circle avatar (fill) + ring (stroke)
+  let _ = c.draw_circle(50.0f32, 224.0f32, 24.0f32, blue)
+  let _ = c.stroke_circle(50.0f32, 224.0f32, 24.0f32, 3.0f32, Color.rgb(255u8, 255u8, 255u8))
+  let _ = c.draw_text(String.from("circle + ring, all antialiased"), 90.0f32, 230.0f32, muted)
+
+  let _ = c.draw_text(String.from("rounded · per-corner · stroke · pills · tabs"), 24.0f32, 280.0f32, muted)
+  let _ = c.end_frame
+
+  if c.skia_active?
+    puts "rendered with the Skia backend (antialiased)"
+  else
+    puts "rendered with the software fallback (run runtime/fetch_skia.sh for Skia)"
+  end
+
+  # dump framebuffer as ASCII PPM (mkdir /tmp/canvas_buttons first)
+  var out = String.from("P3\n420 300\n255\n")
+  var y = 0
+  while y < 300
+    var row = String.from("")
+    var x = 0
+    while x < 420
+      let px = c.read_pixel(x, y)
+      let r = (px >> 16) & 0xFF
+      let g = (px >> 8) & 0xFF
+      let b = px & 0xFF
+      row += "#{r} #{g} #{b}\n"
+      x += 1
+    end
+    out += row
+    y += 1
+  end
+  match write(&String.from("/tmp/canvas_buttons/out.ppm"), &out)
+    Ok(_)  -> puts "wrote /tmp/canvas_buttons/out.ppm"
+    Err(_) -> puts "write failed (does /tmp/canvas_buttons exist?)"
+  end
+end

@@ -36,6 +36,34 @@ draw_rect (incl. alpha blending), draw_text, and the event stream.
 `view.c` is also a sketch of the eventual presenter: the same SDL window +
 texture upload the GPU backend will hang off the `ruxen_canvas_*` ABI.
 
+## Buttons & styling (Skia primitives)
+
+`buttons.rx` showcases the building blocks quiver (L2) will compose into real
+widgets: filled and outlined rounded-rect buttons, **per-corner radii** (pills
+and top-rounded tabs), circles with stroked rings, lines, and
+horizontally-centered antialiased Skia text (centering uses `measure_text` +
+`text_height`, which report Skia's true metrics). Renders to `out.ppm`.
+
+```bash
+mkdir -p /tmp/canvas_buttons/src && cd /tmp/canvas_buttons
+cat > Ruxen.toml <<'TOML'
+[package]
+name = "canvas_buttons"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+canvas = { path = "/path/to/canvas" }
+TOML
+cp /path/to/canvas/examples/buttons.rx src/main.rx
+RUXEN_ALLOW_EXTERNAL_PATH=1 ruxen run        # -> /tmp/canvas_buttons/out.ppm
+convert out.ppm buttons.png                  # or: ./view out.ppm
+```
+
+Requires the Skia backend for the rounded/curved shapes — run
+`runtime/fetch_skia.sh` first (see `../docs/SKIA.md`); the example prints which
+backend it used.
+
 ## Interactive counter (real window, live input)
 
 `counter.rx` is the full loop quiver will automate: open → show → poll
