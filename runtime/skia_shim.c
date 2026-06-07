@@ -942,7 +942,8 @@ static int64_t rx_draw_image(RxHost *h, sk_image_t *image, sk_rect_t src, sk_rec
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
     if (!canvas || !sk->canvas_draw_image_rect) return RXC_ERR_NO_SKIA;
-    sk_sampling_options_t samp = { 0, 0.0f, 0.0f, RX_SK_FILTER_LINEAR, 0 };
+    /* {max_aniso, use_cubic, cubic_b, cubic_c, filter, mipmap} */
+    sk_sampling_options_t samp = { 0, 0, 0.0f, 0.0f, RX_SK_FILTER_LINEAR, 0 };
     sk->canvas_draw_image_rect(canvas, image, &src, &dst, &samp, NULL, 0);
     return RXC_OK;
 }
@@ -953,6 +954,7 @@ int64_t ruxen_canvas_draw_image(int64_t self, int64_t img, double x, double y) {
     sk_image_t *image = (sk_image_t *)img;
     const RxSkia *sk = rx_skia();
     if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!sk->image_get_width || !sk->image_get_height) return RXC_ERR_NO_SKIA;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
     float iw = (float)sk->image_get_width(image);
@@ -969,6 +971,7 @@ int64_t ruxen_canvas_draw_image_rect(int64_t self, int64_t img, double dx, doubl
     sk_image_t *image = (sk_image_t *)img;
     const RxSkia *sk = rx_skia();
     if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!sk->image_get_width || !sk->image_get_height) return RXC_ERR_NO_SKIA;
     if (rxc_is_nan(dw) || rxc_is_nan(dh)) return RXC_ERR_BAD_ARGS;
     if (!(dw > 0.0) || !(dh > 0.0)) return RXC_OK;

@@ -98,6 +98,43 @@ Tester.describe("Canvas.draw_image") do |t: &var Tester|
   end
 end
 
+Tester.describe("Canvas image scaling uses linear sampling") do |t: &var Tester|
+  t.it("blends across a 2-colour image upscaled (not nearest-neighbour)") do
+    var c = match Canvas.create(32, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    # twopix.png is 2x1: left red, right blue. Upscaled to 32 wide, linear
+    # sampling blends to purple at the centre; nearest would be a hard split.
+    match Image.load(String.from("tests/fixtures/twopix.png"))
+      Ok(img) ->
+        match c.draw_image_rect(&img, Rect.new(0.0f32, 0.0f32, 32.0f32, 4.0f32))
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw_image_rect failed")
+        end
+        match c.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("end_frame failed")
+        end
+        let mid = c.read_pixel(16, 2)
+        let r = (mid >> 16) & 0xFF
+        let b = mid & 0xFF
+        t.expect(r > 40 && b > 40).to_eq(true)   # blended -> linear sampling
+      Err(_) ->
+        t.expect(active).to_eq(false)
+    end
+  end
+end
+
 Tester.describe("Canvas.draw_image_rect_src") do |t: &var Tester|
   t.it("draws sub-regions of an atlas") do
     var c = match Canvas.create(16, 16)

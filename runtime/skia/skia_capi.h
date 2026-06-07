@@ -67,9 +67,13 @@ typedef struct { float left, top, right, bottom; } sk_rect_t;
 typedef struct { float x, y; } sk_vector_t;   /* a per-corner (x,y) radius */
 typedef struct { float x, y; } sk_point_t;    /* a gradient endpoint / center */
 
-/* sk_sampling_options_t — layout ABI-pinned by probe (a NULL sampling crashes
- * draw_image_rect, so we always pass this). useCubic=0 + filter=linear. */
+/* sk_sampling_options_t — layout ABI-pinned by probe (24 bytes). The leading
+ * max_aniso field is REQUIRED: without it the fields shift and `filter` is
+ * misread, silently degrading scaling to nearest-neighbor (verified — the
+ * 20-byte form drew blocky; this one interpolates). A NULL sampling crashes
+ * draw_image_rect, so we always pass this with filter = linear. */
 typedef struct {
+    int32_t max_aniso;
     int32_t use_cubic;
     float   cubic_b, cubic_c;
     int32_t filter;   /* sk_filter_mode_t */
