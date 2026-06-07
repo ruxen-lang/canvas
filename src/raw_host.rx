@@ -30,6 +30,9 @@ class RawHost
     def fill_round_rect_gradient_raw as "ruxen_canvas_fill_round_rect_gradient"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, gx0: Float, gy0: Float, gx1: Float, gy1: Float, argb0: Int, argb1: Int) -> Int
     def fill_circle_radial_raw as "ruxen_canvas_fill_circle_radial"(self, cx: Float, cy: Float, radius: Float, argb0: Int, argb1: Int) -> Int
     def draw_round_rect_shadow_raw as "ruxen_canvas_draw_round_rect_shadow"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, blur: Float, argb: Int) -> Int
+    def draw_image_raw as "ruxen_canvas_draw_image"(self, img: Int, x: Float, y: Float) -> Int
+    def draw_image_rect_raw as "ruxen_canvas_draw_image_rect"(self, img: Int, dx: Float, dy: Float, dw: Float, dh: Float) -> Int
+    def draw_image_rect_src_raw as "ruxen_canvas_draw_image_rect_src"(self, img: Int, sx: Float, sy: Float, sw: Float, sh: Float, dx: Float, dy: Float, dw: Float, dh: Float) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_text_sized_raw as "ruxen_canvas_draw_text_sized"(self, text: &String, x: Float, y: Float, size: Float, argb: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int

@@ -27,6 +27,8 @@ typedef struct sk_paint_t      sk_paint_t;
 typedef struct sk_rrect_t      sk_rrect_t;
 typedef struct sk_shader_t     sk_shader_t;
 typedef struct sk_maskfilter_t sk_maskfilter_t;
+typedef struct sk_image_t      sk_image_t;
+typedef struct sk_data_t       sk_data_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
@@ -49,6 +51,8 @@ enum { RX_SK_TILE_CLAMP = 0, RX_SK_TILE_REPEAT = 1, RX_SK_TILE_MIRROR = 2, RX_SK
 enum { RX_SK_BLUR_NORMAL = 0, RX_SK_BLUR_SOLID = 1, RX_SK_BLUR_OUTER = 2, RX_SK_BLUR_INNER = 3 };
 /* sk_clipop_t (probe-pinned: 1 = intersect) */
 enum { RX_SK_CLIP_DIFFERENCE = 0, RX_SK_CLIP_INTERSECT = 1 };
+/* sk_filter_mode_t */
+enum { RX_SK_FILTER_NEAREST = 0, RX_SK_FILTER_LINEAR = 1 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -62,6 +66,15 @@ typedef struct {
 typedef struct { float left, top, right, bottom; } sk_rect_t;
 typedef struct { float x, y; } sk_vector_t;   /* a per-corner (x,y) radius */
 typedef struct { float x, y; } sk_point_t;    /* a gradient endpoint / center */
+
+/* sk_sampling_options_t — layout ABI-pinned by probe (a NULL sampling crashes
+ * draw_image_rect, so we always pass this). useCubic=0 + filter=linear. */
+typedef struct {
+    int32_t use_cubic;
+    float   cubic_b, cubic_c;
+    int32_t filter;   /* sk_filter_mode_t */
+    int32_t mipmap;   /* sk_mipmap_mode_t (0 = none) */
+} sk_sampling_options_t;
 
 /* Full sk_fontmetrics_t so &metrics has the right size; we read ascent/descent. */
 typedef struct {
@@ -101,6 +114,17 @@ typedef void (*pfn_canvas_reset_matrix)(sk_canvas_t *);
 /* clip op: 1 = intersect (ABI-pinned by probe); doAA != 0 for antialiased edges */
 typedef void (*pfn_canvas_clip_rect)(sk_canvas_t *, const sk_rect_t *, int op, int do_aa);
 typedef void (*pfn_canvas_clip_rrect)(sk_canvas_t *, const sk_rrect_t *, int op, int do_aa);
+
+/* images: decode encoded bytes (PNG/JPEG/WebP) -> sk_image, draw scaled */
+typedef sk_data_t  *(*pfn_data_new_from_file)(const char *path);
+typedef void        (*pfn_data_unref)(sk_data_t *);
+typedef sk_image_t *(*pfn_image_new_from_encoded)(sk_data_t *);
+typedef int         (*pfn_image_get_width)(const sk_image_t *);
+typedef int         (*pfn_image_get_height)(const sk_image_t *);
+typedef void        (*pfn_image_unref)(sk_image_t *);
+typedef void        (*pfn_canvas_draw_image_rect)(sk_canvas_t *, const sk_image_t *,
+        const sk_rect_t *src, const sk_rect_t *dst, const sk_sampling_options_t *,
+        const sk_paint_t *, int constraint);
 
 /* radii[4] order: upper-left, upper-right, lower-right, lower-left. */
 typedef sk_rrect_t *(*pfn_rrect_new)(void);
@@ -164,6 +188,14 @@ typedef struct {
     pfn_canvas_reset_matrix     canvas_reset_matrix;
     pfn_canvas_clip_rect        canvas_clip_rect;
     pfn_canvas_clip_rrect       canvas_clip_rrect;
+
+    pfn_data_new_from_file      data_new_from_file;
+    pfn_data_unref              data_unref;
+    pfn_image_new_from_encoded  image_new_from_encoded;
+    pfn_image_get_width         image_get_width;
+    pfn_image_get_height        image_get_height;
+    pfn_image_unref             image_unref;
+    pfn_canvas_draw_image_rect  canvas_draw_image_rect;
 
     pfn_rrect_new               rrect_new;
     pfn_rrect_delete            rrect_delete;

@@ -150,6 +150,13 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(canvas_reset_matrix,       "sk_canvas_reset_matrix");
     RX_SK_OPTIONAL(canvas_clip_rect,          "sk_canvas_clip_rect_with_operation");
     RX_SK_OPTIONAL(canvas_clip_rrect,         "sk_canvas_clip_rrect_with_operation");
+    RX_SK_OPTIONAL(data_new_from_file,        "sk_data_new_from_file");
+    RX_SK_OPTIONAL(data_unref,                "sk_data_unref");
+    RX_SK_OPTIONAL(image_new_from_encoded,    "sk_image_new_from_encoded");
+    RX_SK_OPTIONAL(image_get_width,           "sk_image_get_width");
+    RX_SK_OPTIONAL(image_get_height,          "sk_image_get_height");
+    RX_SK_OPTIONAL(image_unref,               "sk_image_unref");
+    RX_SK_OPTIONAL(canvas_draw_image_rect,    "sk_canvas_draw_image_rect");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
@@ -879,6 +886,121 @@ int64_t ruxen_canvas_draw_round_rect_shadow(int64_t self, double x, double y, do
     sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
     sk->paint_delete(paint);
     return RXC_OK;
+}
+
+/* ---- images (Skia-only) ----
+ *
+ * An image is a decoded sk_image owned by the Ruxen Image; its raw pointer
+ * crosses the FFI as an int64 handle (load returns it, draw takes it, drop
+ * frees it). Encoded bytes (PNG/JPEG/WebP) are decoded via Skia's codecs. */
+
+/* Decode an image file; returns the sk_image pointer as an int64 handle, or 0
+ * on failure (bad path / undecodable / Skia unavailable). `path` is the C
+ * string of an &String from Ruxen. */
+int64_t ruxen_canvas_image_load(int64_t path) {
+    const char *p = (const char *)path;
+    if (!p) return 0;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->data_new_from_file || !sk->image_new_from_encoded ||
+        !sk->data_unref) {
+        return 0;
+    }
+    sk_data_t *data = sk->data_new_from_file(p);
+    if (!data) return 0;
+    sk_image_t *img = sk->image_new_from_encoded(data);
+    sk->data_unref(data);   /* the image keeps its own ref to the pixels */
+    return (int64_t)img;    /* 0 if the bytes were not a decodable image */
+}
+
+/* Identity accessor: a RawImage's handle IS the pointer; this lets the Ruxen
+ * side pass it to draw calls as a plain Int. */
+int64_t ruxen_canvas_image_ptr(int64_t self) { return self; }
+
+int64_t ruxen_canvas_image_is_null(int64_t self) { return self == 0 ? 1 : 0; }
+
+int64_t ruxen_canvas_image_width(int64_t self) {
+    const RxSkia *sk = rx_skia();
+    if (!self || !sk->image_get_width) return 0;
+    return (int64_t)sk->image_get_width((sk_image_t *)self);
+}
+
+int64_t ruxen_canvas_image_height(int64_t self) {
+    const RxSkia *sk = rx_skia();
+    if (!self || !sk->image_get_height) return 0;
+    return (int64_t)sk->image_get_height((sk_image_t *)self);
+}
+
+void ruxen_canvas_image_drop(int64_t self) {
+    const RxSkia *sk = rx_skia();
+    if (self && sk->image_unref) sk->image_unref((sk_image_t *)self);
+}
+
+/* Shared blit: draw `image`'s `src` region into `dst` (linear sampling). */
+static int64_t rx_draw_image(RxHost *h, sk_image_t *image, sk_rect_t src, sk_rect_t dst) {
+    if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_image_rect) return RXC_ERR_NO_SKIA;
+    sk_sampling_options_t samp = { 0, 0.0f, 0.0f, RX_SK_FILTER_LINEAR, 0 };
+    sk->canvas_draw_image_rect(canvas, image, &src, &dst, &samp, NULL, 0);
+    return RXC_OK;
+}
+
+/* Draw an image at (x, y) at its natural pixel size. */
+int64_t ruxen_canvas_draw_image(int64_t self, int64_t img, double x, double y) {
+    RxHost *h = (RxHost *)self;
+    sk_image_t *image = (sk_image_t *)img;
+    const RxSkia *sk = rx_skia();
+    if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (!sk->image_get_width || !sk->image_get_height) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
+    float iw = (float)sk->image_get_width(image);
+    float ih = (float)sk->image_get_height(image);
+    sk_rect_t src = { 0.0f, 0.0f, iw, ih };
+    sk_rect_t dst = { (float)x, (float)y, (float)x + iw, (float)y + ih };
+    return rx_draw_image(h, image, src, dst);
+}
+
+/* Draw an image scaled to fill the destination rectangle. */
+int64_t ruxen_canvas_draw_image_rect(int64_t self, int64_t img, double dx, double dy,
+                                     double dw, double dh) {
+    RxHost *h = (RxHost *)self;
+    sk_image_t *image = (sk_image_t *)img;
+    const RxSkia *sk = rx_skia();
+    if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (!sk->image_get_width || !sk->image_get_height) return RXC_ERR_NO_SKIA;
+    if (rxc_is_nan(dw) || rxc_is_nan(dh)) return RXC_ERR_BAD_ARGS;
+    if (!(dw > 0.0) || !(dh > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(dx) || !rxc_finite_pixels(dy) ||
+        !rxc_finite_pixels(dw) || !rxc_finite_pixels(dh)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    float iw = (float)sk->image_get_width(image);
+    float ih = (float)sk->image_get_height(image);
+    sk_rect_t src = { 0.0f, 0.0f, iw, ih };
+    sk_rect_t dst = { (float)dx, (float)dy, (float)(dx + dw), (float)(dy + dh) };
+    return rx_draw_image(h, image, src, dst);
+}
+
+/* Draw a sub-region (sx,sy,sw,sh) of an image into a destination rect — for
+ * sprite sheets / atlases. */
+int64_t ruxen_canvas_draw_image_rect_src(int64_t self, int64_t img,
+        double sx, double sy, double sw, double sh,
+        double dx, double dy, double dw, double dh) {
+    RxHost *h = (RxHost *)self;
+    sk_image_t *image = (sk_image_t *)img;
+    if (!h || !image) return RXC_ERR_BAD_ARGS;
+    if (rxc_is_nan(sw) || rxc_is_nan(sh) || rxc_is_nan(dw) || rxc_is_nan(dh)) return RXC_ERR_BAD_ARGS;
+    if (!(sw > 0.0) || !(sh > 0.0) || !(dw > 0.0) || !(dh > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(sx) || !rxc_finite_pixels(sy) || !rxc_finite_pixels(sw) ||
+        !rxc_finite_pixels(sh) || !rxc_finite_pixels(dx) || !rxc_finite_pixels(dy) ||
+        !rxc_finite_pixels(dw) || !rxc_finite_pixels(dh)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_rect_t src = { (float)sx, (float)sy, (float)(sx + sw), (float)(sy + sh) };
+    sk_rect_t dst = { (float)dx, (float)dy, (float)(dx + dw), (float)(dy + dh) };
+    return rx_draw_image(h, image, src, dst);
 }
 
 #include "bitmap_font.h"

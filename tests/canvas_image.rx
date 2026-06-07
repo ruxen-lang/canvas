@@ -1,0 +1,139 @@
+# Pin tests for image decode + draw (Skia-only). Fixtures live in
+# tests/fixtures/. When Skia is active we assert decoded sizes and drawn pixels;
+# when it is absent, Image.load returns Err (no software decode). A missing file
+# always errors, regardless of backend.
+
+Tester.describe("Image.load") do |t: &var Tester|
+  t.it("decodes a PNG and reports its pixel size") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+    match Image.load(String.from("tests/fixtures/red.png"))
+      Ok(img) ->
+        t.expect(img.width).to_eq(4)
+        t.expect(img.height).to_eq(4)
+      Err(_) ->
+        t.expect(active).to_eq(false)   # decode only fails without Skia
+    end
+  end
+
+  t.it("errors on a missing file") do
+    var failed = false
+    match Image.load(String.from("tests/fixtures/does_not_exist.png"))
+      Ok(_)  -> nil
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+  end
+end
+
+Tester.describe("Canvas.draw_image_rect") do |t: &var Tester|
+  t.it("scales an image to fill the destination") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    match Image.load(String.from("tests/fixtures/red.png"))
+      Ok(img) ->
+        match c.draw_image_rect(&img, Rect.new(0.0f32, 0.0f32, 16.0f32, 16.0f32))
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw_image_rect failed")
+        end
+        match c.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("end_frame failed")
+        end
+        t.expect(c.read_pixel(8, 8)).to_eq(red)   # the 4x4 red image fills 16x16
+      Err(_) ->
+        t.expect(active).to_eq(false)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_image") do |t: &var Tester|
+  t.it("draws at natural size at an offset") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    match Image.load(String.from("tests/fixtures/red.png"))
+      Ok(img) ->
+        match c.draw_image(&img, 4.0f32, 4.0f32)   # 4x4 red at (4,4)..(8,8)
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw_image failed")
+        end
+        match c.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("end_frame failed")
+        end
+        t.expect(c.read_pixel(5, 5)).to_eq(red)    # inside the placed image
+        t.expect(c.read_pixel(0, 0)).to_eq(black)  # outside it
+        t.expect(c.read_pixel(12, 12)).to_eq(black)
+      Err(_) ->
+        t.expect(active).to_eq(false)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_image_rect_src") do |t: &var Tester|
+  t.it("draws sub-regions of an atlas") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let blue = Color.rgb(0u8, 0u8, 255u8).to_argb as Int
+    # halves.png is 8x8: left 4 cols red, right 4 cols blue
+    match Image.load(String.from("tests/fixtures/halves.png"))
+      Ok(img) ->
+        match c.draw_image_rect_src(&img, Rect.new(0.0f32, 0.0f32, 4.0f32, 8.0f32), Rect.new(0.0f32, 0.0f32, 8.0f32, 16.0f32))
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw left half failed")
+        end
+        match c.draw_image_rect_src(&img, Rect.new(4.0f32, 0.0f32, 4.0f32, 8.0f32), Rect.new(8.0f32, 0.0f32, 8.0f32, 16.0f32))
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw right half failed")
+        end
+        match c.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("end_frame failed")
+        end
+        t.expect(c.read_pixel(4, 8)).to_eq(red)    # left half -> red
+        t.expect(c.read_pixel(12, 8)).to_eq(blue)  # right half -> blue
+      Err(_) ->
+        t.expect(active).to_eq(false)
+    end
+  end
+end

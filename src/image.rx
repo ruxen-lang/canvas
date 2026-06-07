@@ -1,0 +1,36 @@
+## A decoded image (PNG / JPEG / WebP) that can be drawn onto any `Canvas`.
+##
+## `Image` owns its decoded pixels; dropping it frees them deterministically
+## (no GC). Images require the Skia backend — `load` returns `Err` when it is
+## unavailable. Draw them with `Canvas#draw_image` / `draw_image_rect`.
+class Image
+  raw: RawImage
+
+  def init(@raw: RawImage)
+  end
+
+  ## Decode an image file. `Err` when the path can't be read, the bytes aren't a
+  ## decodable image, or the Skia backend isn't available.
+  def self.load(path: String) -> Result[Image, String]
+    let raw = RawImage.load_raw(&path)
+    if raw.is_null
+      return Err(String.from("canvas: could not load image '#{path}' (missing, undecodable, or no Skia backend)"))
+    end
+    Ok(Image.new(raw))
+  end
+
+  ## Pixel width of the decoded image.
+  def width -> Int
+    self.raw.width
+  end
+
+  ## Pixel height of the decoded image.
+  def height -> Int
+    self.raw.height
+  end
+
+  ## INTERNAL — the raw `sk_image` pointer, passed to `Canvas` draw calls.
+  def handle -> Int
+    self.raw.ptr
+  end
+end
