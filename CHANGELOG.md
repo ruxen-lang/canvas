@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Skia vendoring infrastructure** — `canvas` will render with real Skia
+  (the prebuilt `libSkiaSharp` that ships behind Avalonia / Uno / .NET MAUI,
+  exposing Skia's flat `sk_*` C API). It is **fetched, not committed, and
+  dlopen'd, not linked**:
+  - `runtime/fetch_skia.sh` — SHA-256-pinned download of
+    `SkiaSharp.NativeAssets.Linux` 3.119.4; verifies both the package and the
+    extracted `.so`; installs to `$HOME/.cache/ruxen-canvas/` (idempotent).
+  - `runtime/skia/skia_capi.h` — the committed minimal C-API surface (opaque
+    types, ABI-pinned enums/structs, function-pointer table). The 11 MB `.so`
+    is never checked in; only this header is.
+  - `docs/SKIA.md` — the vendoring + integration model (Skia rasterizes
+    straight into the existing `0xAARRGGBB` `RxHost.pixels` buffer, so the
+    SDL presenter is untouched), and the 4-step discipline for growing the
+    binding.
 - **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
   window on screen (SDL2 runtime via dlopen — no dev packages, zero
   link-time deps), `present` blits the canvas after `end_frame`, the pump
