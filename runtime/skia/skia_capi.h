@@ -25,6 +25,8 @@ typedef struct sk_surface_t    sk_surface_t;
 typedef struct sk_canvas_t     sk_canvas_t;
 typedef struct sk_paint_t      sk_paint_t;
 typedef struct sk_rrect_t      sk_rrect_t;
+typedef struct sk_shader_t     sk_shader_t;
+typedef struct sk_maskfilter_t sk_maskfilter_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
@@ -41,6 +43,10 @@ enum { RX_SK_ALPHA_OPAQUE = 1, RX_SK_ALPHA_PREMUL = 2, RX_SK_ALPHA_UNPREMUL = 3 
 enum { RX_SK_PAINT_FILL = 0, RX_SK_PAINT_STROKE = 1, RX_SK_PAINT_STROKE_AND_FILL = 2 };
 /* sk_text_encoding_t */
 enum { RX_SK_TEXT_UTF8 = 0, RX_SK_TEXT_UTF16 = 1, RX_SK_TEXT_UTF32 = 2, RX_SK_TEXT_GLYPH = 3 };
+/* sk_shader_tilemode_t */
+enum { RX_SK_TILE_CLAMP = 0, RX_SK_TILE_REPEAT = 1, RX_SK_TILE_MIRROR = 2, RX_SK_TILE_DECAL = 3 };
+/* sk_blurstyle_t */
+enum { RX_SK_BLUR_NORMAL = 0, RX_SK_BLUR_SOLID = 1, RX_SK_BLUR_OUTER = 2, RX_SK_BLUR_INNER = 3 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -53,6 +59,7 @@ typedef struct {
 
 typedef struct { float left, top, right, bottom; } sk_rect_t;
 typedef struct { float x, y; } sk_vector_t;   /* a per-corner (x,y) radius */
+typedef struct { float x, y; } sk_point_t;    /* a gradient endpoint / center */
 
 /* Full sk_fontmetrics_t so &metrics has the right size; we read ascent/descent. */
 typedef struct {
@@ -92,6 +99,20 @@ typedef void        (*pfn_paint_set_color)(sk_paint_t *, sk_color_t);
 typedef void        (*pfn_paint_set_antialias)(sk_paint_t *, int /*bool*/);
 typedef void        (*pfn_paint_set_style)(sk_paint_t *, int /*sk_paint_style_t*/);
 typedef void        (*pfn_paint_set_stroke_width)(sk_paint_t *, float);
+typedef void        (*pfn_paint_set_shader)(sk_paint_t *, sk_shader_t *);
+typedef void        (*pfn_paint_set_maskfilter)(sk_paint_t *, sk_maskfilter_t *);
+
+/* colors[count] packed 0xAARRGGBB; pos[count] in [0,1] or NULL for even spacing;
+ * matrix NULL = identity. */
+typedef sk_shader_t *(*pfn_shader_new_linear_gradient)(const sk_point_t pts[2],
+        const sk_color_t colors[], const float pos[], int count, int tile_mode,
+        const void *local_matrix);
+typedef sk_shader_t *(*pfn_shader_new_radial_gradient)(const sk_point_t *center, float radius,
+        const sk_color_t colors[], const float pos[], int count, int tile_mode,
+        const void *local_matrix);
+typedef void         (*pfn_shader_unref)(sk_shader_t *);
+typedef sk_maskfilter_t *(*pfn_maskfilter_new_blur)(int blur_style, float sigma);
+typedef void             (*pfn_maskfilter_unref)(sk_maskfilter_t *);
 
 typedef sk_typeface_t *(*pfn_typeface_create_default)(void);
 typedef sk_font_t     *(*pfn_font_new_with_values)(sk_typeface_t *, float size, float scale_x,
@@ -128,6 +149,14 @@ typedef struct {
     pfn_paint_set_antialias    paint_set_antialias;
     pfn_paint_set_style        paint_set_style;
     pfn_paint_set_stroke_width paint_set_stroke_width;
+    pfn_paint_set_shader       paint_set_shader;
+    pfn_paint_set_maskfilter   paint_set_maskfilter;
+
+    pfn_shader_new_linear_gradient shader_new_linear_gradient;
+    pfn_shader_new_radial_gradient shader_new_radial_gradient;
+    pfn_shader_unref               shader_unref;
+    pfn_maskfilter_new_blur        maskfilter_new_blur;
+    pfn_maskfilter_unref           maskfilter_unref;
 
     pfn_typeface_create_default typeface_create_default;
     pfn_font_new_with_values    font_new_with_values;

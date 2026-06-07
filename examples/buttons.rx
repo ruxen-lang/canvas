@@ -21,6 +21,14 @@ def outline_button(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float3
   center_label(&var c, x, y, w, h, label, fg)
 end
 
+# A raised button: soft drop shadow + vertical gradient fill + centered label.
+def gradient_button(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
+                    label: String, top: Color, bottom: Color, fg: Color, radius: Float32)
+  let _ = c.draw_round_rect_shadow(Rect.new(x + 1.0f32, y + 4.0f32, w, h), radius, 8.0f32, Color.new(0u8, 0u8, 0u8, 90u8))
+  let _ = c.fill_round_rect_gradient(Rect.new(x, y, w, h), radius, x, y, x, y + h, top, bottom)
+  center_label(&var c, x, y, w, h, label, fg)
+end
+
 def center_label(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
                  label: String, fg: Color)
   let tw = c.measure_text(String.from("#{label}")) as Float32
@@ -47,25 +55,26 @@ def main
   let _ = c.begin_frame
   let _ = c.clear(Color.rgb(245u8, 247u8, 250u8))
 
-  # title
-  let _ = c.draw_text(String.from("Skia buttons & styling"), 24.0f32, 40.0f32, ink)
-  let _ = c.draw_line(24.0f32, 52.0f32, 396.0f32, 52.0f32, 1.0f32, Color.rgb(220u8, 224u8, 230u8))
+  # title (sized Skia text)
+  let _ = c.draw_text_sized(String.from("Skia buttons & styling"), 24.0f32, 42.0f32, 22.0f32, ink)
+  let _ = c.draw_line(24.0f32, 54.0f32, 396.0f32, 54.0f32, 1.0f32, Color.rgb(220u8, 224u8, 230u8))
 
-  # primary (filled, rounded) + secondary (outlined)
-  filled_button(&var c, 24.0f32, 72.0f32, 150.0f32, 44.0f32, String.from("Submit"), blue, white, 10.0f32)
-  outline_button(&var c, 190.0f32, 72.0f32, 150.0f32, 44.0f32, String.from("Cancel"), Color.rgb(205u8, 210u8, 218u8), ink, 10.0f32)
+  # primary: shadowed vertical-gradient button + secondary (outlined)
+  gradient_button(&var c, 24.0f32, 74.0f32, 150.0f32, 44.0f32, String.from("Submit"),
+    Color.rgb(96u8, 148u8, 255u8), Color.rgb(40u8, 92u8, 214u8), white, 10.0f32)
+  outline_button(&var c, 190.0f32, 74.0f32, 150.0f32, 44.0f32, String.from("Cancel"), Color.rgb(205u8, 210u8, 218u8), ink, 10.0f32)
 
   # pill (per-corner radius = half height) + top-rounded tab (per-corner)
   filled_button(&var c, 24.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Follow"), pink, white, 20.0f32)
   let _ = c.draw_rrect(Rect.new(190.0f32, 134.0f32, 150.0f32, 40.0f32), 14.0f32, 14.0f32, 0.0f32, 0.0f32, green)
   center_label(&var c, 190.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Home tab"), white)
 
-  # circle avatar (fill) + ring (stroke)
-  let _ = c.draw_circle(50.0f32, 224.0f32, 24.0f32, blue)
+  # radial-gradient circle (bright centre -> rim) + white ring
+  let _ = c.fill_circle_radial(50.0f32, 224.0f32, 24.0f32, Color.rgb(120u8, 200u8, 255u8), Color.rgb(40u8, 92u8, 214u8))
   let _ = c.stroke_circle(50.0f32, 224.0f32, 24.0f32, 3.0f32, Color.rgb(255u8, 255u8, 255u8))
-  let _ = c.draw_text(String.from("circle + ring, all antialiased"), 90.0f32, 230.0f32, muted)
+  let _ = c.draw_text(String.from("radial gradient + ring"), 90.0f32, 230.0f32, muted)
 
-  let _ = c.draw_text(String.from("rounded · per-corner · stroke · pills · tabs"), 24.0f32, 280.0f32, muted)
+  let _ = c.draw_text(String.from("gradients · shadows · rounded · per-corner · sized text"), 24.0f32, 280.0f32, muted)
   let _ = c.end_frame
 
   if c.skia_active?
