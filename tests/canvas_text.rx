@@ -1,7 +1,52 @@
-# Pin tests for ruxen_canvas_draw_text / _measure_text (5x7 bitmap font).
+# Pin tests for text: draw_text / measure_text / text_height.
+#
+# Backend-agnostic invariants — exact glyph pixels and advances differ between
+# the real Skia font and the 5x7 bitmap fallback, so these assert STRUCTURAL
+# properties (ink appears in-bounds, empties draw nothing, measure is positive
+# and monotonic, height is positive) that hold under either backend.
 
 Tester.describe("Canvas.draw_text") do |t: &var Tester|
-  t.it("draws glyph pixels above the baseline") do
+  t.it("draws ink for a glyph, leaving the origin corner clear") do
+    var c = match Canvas.create(24, 20)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_text(String.from("A"), 2.0f32, 14.0f32, Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_text failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    var lit = 0
+    var y = 0
+    while y < 20
+      var x = 0
+      while x < 24
+        if c.read_pixel(x, y) != black
+          lit += 1
+        end
+        x += 1
+      end
+      y += 1
+    end
+    t.expect(lit > 0).to_eq(true)               # the glyph drew something
+    t.expect(c.read_pixel(0, 0)).to_eq(black)   # left of / above the origin: clear
+    t.expect(c.read_pixel(23, 0)).to_eq(black)  # far corner: clear
+  end
+
+  t.it("a space draws nothing") do
     var c = match Canvas.create(8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Canvas.create failed")
@@ -14,38 +59,6 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    # 'A' at baseline y=7 occupies rows 0..6: apex (2,0), legs at x=0 and
-    # x=4, crossbar row 4 (cols 1..3 carry 0x11 = rows 0 and 4)
-    match c.draw_text(String.from("A"), 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
-      Ok(_)  -> nil
-      Err(_) -> panic!("draw_text failed")
-    end
-    match c.end_frame
-      Ok(_)  -> nil
-      Err(_) -> panic!("end_frame failed")
-    end
-
-    let white_c: Color = Color.rgb(255u8, 255u8, 255u8)
-    let black_c: Color = Color.rgb(0u8, 0u8, 0u8)
-    let white = white_c.to_argb as Int
-    let black = black_c.to_argb as Int
-    t.expect(c.read_pixel(2, 0)).to_eq(white)   # apex
-    t.expect(c.read_pixel(0, 3)).to_eq(white)   # left leg
-    t.expect(c.read_pixel(4, 3)).to_eq(white)   # right leg
-    t.expect(c.read_pixel(2, 4)).to_eq(white)   # crossbar
-    t.expect(c.read_pixel(0, 0)).to_eq(black)   # top-left corner stays empty
-    t.expect(c.read_pixel(0, 7)).to_eq(black)   # baseline row stays empty
-  end
-
-  t.it("a space draws nothing") do
-    var c = match Canvas.create(8, 8)
-      Ok(v)  -> v
-      Err(_) -> panic!("Canvas.create failed")
-    end
-    match c.begin_frame
-      Ok(_)  -> nil
-      Err(_) -> panic!("begin_frame failed")
-    end
     match c.draw_text(String.from(" "), 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("draw_text failed")
@@ -55,12 +68,13 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Err(_) -> panic!("end_frame failed")
     end
 
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
     var lit = 0
     var y = 0
     while y < 8
       var x = 0
       while x < 8
-        if c.read_pixel(x, y) != 0
+        if c.read_pixel(x, y) != black
           lit += 1
         end
         x += 1
@@ -70,32 +84,7 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
     t.expect(lit).to_eq(0)
   end
 
-  t.it("advances 6px per character") do
-    var c = match Canvas.create(16, 8)
-      Ok(v)  -> v
-      Err(_) -> panic!("Canvas.create failed")
-    end
-    match c.begin_frame
-      Ok(_)  -> nil
-      Err(_) -> panic!("begin_frame failed")
-    end
-    # '!' is a single column at x=2 of the glyph cell (0x5F: rows 0..4, 6)
-    match c.draw_text(String.from("!!"), 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
-      Ok(_)  -> nil
-      Err(_) -> panic!("draw_text failed")
-    end
-    match c.end_frame
-      Ok(_)  -> nil
-      Err(_) -> panic!("end_frame failed")
-    end
-
-    let white_c: Color = Color.rgb(255u8, 255u8, 255u8)
-    let white = white_c.to_argb as Int
-    t.expect(c.read_pixel(2, 2)).to_eq(white)   # first '!'
-    t.expect(c.read_pixel(8, 2)).to_eq(white)   # second '!' at x=6+2
-  end
-
-  t.it("clips text that runs off the surface") do
+  t.it("offscreen baselines leave the surface untouched") do
     var c = match Canvas.create(4, 4)
       Ok(v)  -> v
       Err(_) -> panic!("Canvas.create failed")
@@ -104,11 +93,15 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("begin_frame failed")
     end
-    match c.draw_text(String.from("WWWW"), 0.0f32, 20.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_text(String.from("WWWW"), 0.0f32, 40.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("below-surface draw_text failed")
     end
-    match c.draw_text(String.from("WWWW"), 0.0f32, -20.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text(String.from("WWWW"), 0.0f32, -40.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("above-surface draw_text failed")
     end
@@ -116,8 +109,8 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("end_frame failed")
     end
-    # nothing crashed; offscreen baselines leave the surface untouched
-    t.expect(c.read_pixel(0, 0)).to_eq(0)
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    t.expect(c.read_pixel(0, 0)).to_eq(black)
   end
 
   t.it("outside a frame it errors") do
@@ -135,26 +128,25 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
 end
 
 Tester.describe("Canvas.measure_text") do |t: &var Tester|
-  t.it("measures the single-line advance width") do
-    var c = match Canvas.create(4, 4)
-      Ok(v)  -> v
-      Err(_) -> panic!("Canvas.create failed")
-    end
-    let empty = String.from("")
-    let one = String.from("A")
-    let two = String.from("AB")
-    t.expect(c.measure_text(&empty)).to_eq(0)
-    t.expect(c.measure_text(&one)).to_eq(5)
-    t.expect(c.measure_text(&two)).to_eq(11)
-  end
-end
-
-Tester.describe("Canvas.text_height") do |t: &var Tester|
-  t.it("reports the font line height") do
+  t.it("is zero for empty, positive and monotonic otherwise") do
     let c = match Canvas.create(4, 4)
       Ok(v)  -> v
       Err(_) -> panic!("Canvas.create failed")
     end
-    t.expect(c.text_height).to_eq(7)
+    t.expect(c.measure_text(String.from(""))).to_eq(0)
+    let one = c.measure_text(String.from("A"))
+    let many = c.measure_text(String.from("AAAA"))
+    t.expect(one > 0).to_eq(true)
+    t.expect(many >= one).to_eq(true)
+  end
+end
+
+Tester.describe("Canvas.text_height") do |t: &var Tester|
+  t.it("reports a positive font line height") do
+    let c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    t.expect(c.text_height > 0).to_eq(true)
   end
 end

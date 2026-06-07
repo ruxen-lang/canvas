@@ -123,9 +123,9 @@ class Canvas
     self.status_to_result(code, "draw_line")
   end
 
-  ## Draw a single line of text with (x, y) as the BASELINE origin: glyphs
-  ## occupy the 7 pixel rows above y. One embedded 5x7 bitmap font for the
-  ## first vertical slice; Skia paragraph/HarfBuzz shaping comes later.
+  ## Draw a single line of text with (x, y) as the BASELINE origin. Rendered
+  ## with a real antialiased Skia font when the backend is active; otherwise an
+  ## embedded 5x7 bitmap font (glyphs occupy the 7 px rows above y).
   def var draw_text(text: String, x: Float32, y: Float32, color: Color) -> Result[nil, String]
     let code = self.raw.draw_text_raw(
       &text, x as Float, y as Float,
@@ -133,14 +133,15 @@ class Canvas
     self.status_to_result(code, "draw_text")
   end
 
-  ## Width in pixels `text` would occupy when drawn (single line). The
-  ## character count crosses the FFI, not the string — the font metric
-  ## stays defined in the shim.
-  def measure_text(text: &String) -> Int
-    self.raw.measure_text_n_raw(text.size)
+  ## Advance width in pixels `text` would occupy when drawn (single line).
+  ## Uses Skia's real font metrics when active — so measure matches draw, for
+  ## centering button labels — else the bitmap advance. Takes an owned String
+  ## (borrowed at the FFI call, the shape that lowers correctly).
+  def measure_text(text: String) -> Int
+    self.raw.measure_text_raw(&text)
   end
 
-  ## The font's line height (ascent above the baseline), in pixels.
+  ## The font's line height in pixels (Skia metrics when active, else 7).
   def text_height -> Int
     self.raw.text_height_raw
   end

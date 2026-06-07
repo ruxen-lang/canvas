@@ -35,6 +35,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `draw_line`. Fill and stroke (border) variants throughout. These are
   Skia-only: with no library loaded they return a clear `Err`
   (`requires the Skia backend`), never a silent no-op.
+- **Antialiased Skia text** — `draw_text` now renders with a real Skia font
+  (system default typeface) when the backend is active, and `measure_text` /
+  `text_height` report Skia's true metrics so measurement matches drawing (for
+  centering labels). The embedded 5x7 bitmap font remains the software
+  fallback. `measure_text` now takes the actual string (real advance width)
+  rather than a character count. With text on the Skia path, a frame is now
+  rendered entirely by one backend, so there is no premultiplied-vs-straight
+  alpha mismatch between shapes and text.
+
+### Changed
+- `src/lib.rx` split into per-type files (`color`/`rect`/`rxc`/`raw_host`/
+  `canvas`/`event`/`window`.rx); the 5x7 font table moved to
+  `runtime/bitmap_font.h`. No behavior change.
 - **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
   window on screen (SDL2 runtime via dlopen — no dev packages, zero
   link-time deps), `present` blits the canvas after `end_frame`, the pump

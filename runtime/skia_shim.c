@@ -550,19 +550,65 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
 
 #include "bitmap_font.h"
 
-/* Width in pixels of an n-character single line at this font's one size.
- * Each glyph advances RXC_ADVANCE px; no trailing gap. The CHARACTER COUNT
- * crosses the FFI (not the string): the metric stays defined here, and the
- * call uses only integer arguments. */
+/* Pixel size of the default Skia font. The bitmap fallback is a fixed 7px
+ * face; this is chosen close to it so layouts stay sane across backends. */
+#define RXC_SKIA_FONT_PX 13.0f
+
+/* The process-wide default Skia font (system default typeface at a fixed
+ * size), built once on first use. NULL when Skia / the font symbols are
+ * unavailable, in which case callers use the 5x7 bitmap path. */
+static sk_font_t *rx_default_font(void) {
+    static sk_font_t *font = NULL;
+    static int tried = 0;
+    if (tried) return font;
+    tried = 1;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->font_new_with_values) return NULL;
+    sk_typeface_t *tf = sk->typeface_create_default ? sk->typeface_create_default() : NULL;
+    /* A NULL typeface is fine — Skia substitutes its default face. */
+    font = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    return font;
+}
+
+/* Width in pixels of `n` characters at the bitmap font's one size. The
+ * character count crosses the FFI; kept for the software path / callers that
+ * only have a count. */
 int64_t ruxen_canvas_measure_text_n(int64_t self, int64_t n) {
     (void)self;
     if (n <= 0) return 0;
     return n * RXC_ADVANCE - 1;
 }
 
-/* The font's line height (ascent above the baseline), in pixels. */
+/* Advance width in pixels of `text` as it would actually be drawn. Uses Skia's
+ * real font metrics when active (so measure matches draw for centering), else
+ * the bitmap advance. `text` is the C string pointer (an &String from Ruxen). */
+int64_t ruxen_canvas_measure_text(int64_t self, int64_t text) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s) return 0;
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (sk->available && font && sk->font_measure_text) {
+        float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
+        if (!(w > 0.0f)) return 0;
+        return (int64_t)(w + 0.5f);
+    }
+    size_t n = strlen(s);
+    return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
+}
+
+/* The font's line height in pixels (ascent above + descent below the
+ * baseline). Skia metrics when active, else the bitmap's 7px. */
 int64_t ruxen_canvas_text_height(int64_t self) {
     (void)self;
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (sk->available && font && sk->font_get_metrics) {
+        sk_fontmetrics_t m;
+        sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
+        float hgt = m.descent - m.ascent;
+        if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
+    }
     return RXC_GLYPH_H;
 }
 
@@ -577,6 +623,24 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
 
+    /* Skia path: a real antialiased font. (x, y) is the baseline origin, the
+     * same convention as the bitmap path below. */
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_default_font();
+    if (canvas && font && sk->canvas_draw_simple_text) {
+        sk_paint_t *paint = sk->paint_new();
+        if (!paint) return RXC_ERR_BAD_ARGS;
+        sk->paint_set_antialias(paint, 1);
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        sk->canvas_draw_simple_text(canvas, s, strlen(s), RX_SK_TEXT_UTF8,
+                                    (float)x, (float)y, font, paint);
+        sk->paint_delete(paint);
+        return RXC_OK;
+    }
+
+    /* software fallback: 5x7 bitmap font */
     uint32_t src = rxc_pack(r, g, b, a);
     int64_t pen_x = rxc_floor_to_i64(x);
     int64_t top   = rxc_floor_to_i64(y) - RXC_GLYPH_H;
