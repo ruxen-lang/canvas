@@ -1,4 +1,4 @@
-/target
+target/
 Ruxen.lock
 
 # Fetched Skia native library — pulled by runtime/fetch_skia.sh, never committed.
