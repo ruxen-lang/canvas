@@ -127,8 +127,12 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(paint_set_stroke_width,    "sk_paint_set_stroke_width");
     RX_SK_OPTIONAL(canvas_draw_oval,          "sk_canvas_draw_oval");
     RX_SK_OPTIONAL(canvas_draw_round_rect,    "sk_canvas_draw_round_rect");
+    RX_SK_OPTIONAL(canvas_draw_rrect,         "sk_canvas_draw_rrect");
     RX_SK_OPTIONAL(canvas_draw_line,          "sk_canvas_draw_line");
     RX_SK_OPTIONAL(canvas_draw_simple_text,   "sk_canvas_draw_simple_text");
+    RX_SK_OPTIONAL(rrect_new,                 "sk_rrect_new");
+    RX_SK_OPTIONAL(rrect_delete,              "sk_rrect_delete");
+    RX_SK_OPTIONAL(rrect_set_rect_radii,      "sk_rrect_set_rect_radii");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
@@ -388,6 +392,159 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
             row[px] = rxc_blend(row[px], src);
         }
     }
+    return RXC_OK;
+}
+
+/* ---- Skia-native primitives (no software fallback) ----
+ *
+ * These shapes have no software-raster implementation: when Skia is not loaded
+ * they return RXC_ERR_NO_SKIA so the Ruxen side surfaces a clear Err (never a
+ * silent no-op — docs/FFI.md). Each is antialiased. `stroke_w > 0` strokes an
+ * outline of that width; `stroke_w <= 0` fills. Color arrives packed as
+ * 0xAARRGGBB in the low 32 bits of `argb`. */
+
+/* Build a paint for the given packed color and stroke width, or NULL on
+ * allocation failure. Caller owns it (paint_delete). */
+static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w) {
+    sk_paint_t *p = sk->paint_new();
+    if (!p) return NULL;
+    sk->paint_set_antialias(p, 1);
+    if (stroke_w > 0.0) {
+        sk->paint_set_style(p, RX_SK_PAINT_STROKE);
+        if (sk->paint_set_stroke_width) sk->paint_set_stroke_width(p, (float)stroke_w);
+    } else {
+        sk->paint_set_style(p, RX_SK_PAINT_FILL);
+    }
+    sk->paint_set_color(p, (sk_color_t)(uint32_t)argb);
+    return p;
+}
+
+/* Common entry guard: validate host + frame, ensure the Skia surface and the
+ * given drawing function pointer are live. Returns the canvas (and the table)
+ * or NULL with *err set. */
+static sk_canvas_t *rx_skia_draw_begin(RxHost *h, const void *fnptr,
+                                       const RxSkia **out_sk, int64_t *err) {
+    if (!h) { *err = RXC_ERR_BAD_ARGS; return NULL; }
+    if (!h->in_frame) { *err = RXC_ERR_NO_FRAME; return NULL; }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas || !fnptr) { *err = RXC_ERR_NO_SKIA; return NULL; }
+    *out_sk = rx_skia();
+    return canvas;
+}
+
+/* Filled/stroked circle centered at (cx, cy). */
+int64_t ruxen_canvas_draw_circle(int64_t self, double cx, double cy, double radius,
+                                 double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_oval : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (rxc_is_nan(radius) || !(radius > 0.0)) return RXC_OK;   /* empty */
+    if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) ||
+        !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rect_t bounds = { (float)(cx - radius), (float)(cy - radius),
+                         (float)(cx + radius), (float)(cy + radius) };
+    sk->canvas_draw_oval(canvas, &bounds, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Filled/stroked rounded rectangle with a single uniform corner radius. */
+int64_t ruxen_canvas_draw_round_rect(int64_t self, double x, double y, double w, double hgt,
+                                     double radius, double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_round_rect : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;              /* empty */
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt) ||
+        !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double rad = radius > 0.0 ? radius : 0.0;
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Filled/stroked rounded rectangle with independent corner radii (each a single
+ * symmetric x=y radius): tl, tr, br, bl. Enables one-side-only / pill / tab
+ * shapes. Needs the sk_rrect builder symbols. */
+int64_t ruxen_canvas_draw_rrect_radii(int64_t self, double x, double y, double w, double hgt,
+                                      double tl, double tr, double br, double bl,
+                                      double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_rrect || !sk->rrect_new ||
+        !sk->rrect_set_rect_radii || !sk->rrect_delete) {
+        return RXC_ERR_NO_SKIA;
+    }
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;              /* empty */
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt) ||
+        !rxc_finite_pixels(tl) || !rxc_finite_pixels(tr) ||
+        !rxc_finite_pixels(br) || !rxc_finite_pixels(bl) ||
+        !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    if (tl < 0.0) tl = 0.0;
+    if (tr < 0.0) tr = 0.0;
+    if (br < 0.0) br = 0.0;
+    if (bl < 0.0) bl = 0.0;
+
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk_rrect_t *rr = sk->rrect_new();
+    if (!rr) { sk->paint_delete(paint); return RXC_ERR_BAD_ARGS; }
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    /* radii order: upper-left, upper-right, lower-right, lower-left */
+    sk_vector_t radii[4] = {
+        { (float)tl, (float)tl }, { (float)tr, (float)tr },
+        { (float)br, (float)br }, { (float)bl, (float)bl },
+    };
+    sk->rrect_set_rect_radii(rr, &rect, radii);
+    sk->canvas_draw_rrect(canvas, rr, paint);
+    sk->rrect_delete(rr);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Stroked line from (x0, y0) to (x1, y1). stroke_w <= 0 draws a 1px hairline. */
+int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, double y1,
+                               double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_line : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (!rxc_finite_pixels(x0) || !rxc_finite_pixels(y0) ||
+        !rxc_finite_pixels(x1) || !rxc_finite_pixels(y1) ||
+        !rxc_finite_pixels(stroke_w)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double width = stroke_w > 0.0 ? stroke_w : 1.0;
+    sk_paint_t *paint = rx_make_paint(sk, argb, width);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
     return RXC_OK;
 }
 

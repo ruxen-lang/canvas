@@ -120,6 +120,10 @@ module Rxc
   def is_no_sdl(code: Int) -> Bool
     code == 6
   end
+
+  def is_no_skia(code: Int) -> Bool
+    code == 8
+  end
 end
 
 ## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
@@ -137,6 +141,10 @@ class RawHost
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
     def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def draw_circle_raw as "ruxen_canvas_draw_circle"(self, cx: Float, cy: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_round_rect_raw as "ruxen_canvas_draw_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_rrect_radii_raw as "ruxen_canvas_draw_rrect_radii"(self, x: Float, y: Float, w: Float, h: Float, tl: Float, tr: Float, br: Float, bl: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_line_raw as "ruxen_canvas_draw_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, argb: Int) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
@@ -226,6 +234,64 @@ class Canvas
     self.status_to_result(code, "draw_rect")
   end
 
+  ## Fill a circle of `radius` centered at (cx, cy). Antialiased. Requires the
+  ## Skia backend (Err otherwise — there is no software fallback for curves).
+  def var draw_circle(cx: Float32, cy: Float32, radius: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_circle_raw(cx as Float, cy as Float, radius as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_circle")
+  end
+
+  ## Stroke a circle outline of the given line `width`. Antialiased; Skia-only.
+  def var stroke_circle(cx: Float32, cy: Float32, radius: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_circle_raw(cx as Float, cy as Float, radius as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_circle")
+  end
+
+  ## Fill a rounded rectangle with one uniform corner `radius`. The button
+  ## background shape. Antialiased; Skia-only.
+  def var draw_round_rect(rect: Rect, radius: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_round_rect_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_round_rect")
+  end
+
+  ## Stroke a rounded-rectangle outline (border) of the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_round_rect(rect: Rect, radius: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_round_rect_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_round_rect")
+  end
+
+  ## Fill a rounded rectangle with independent per-corner radii (top-left,
+  ## top-right, bottom-right, bottom-left) — for one-side-only rounding, pills,
+  ## and tabs. Antialiased; Skia-only.
+  def var draw_rrect(rect: Rect, tl: Float32, tr: Float32, br: Float32, bl: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_rrect_radii_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      tl as Float, tr as Float, br as Float, bl as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_rrect")
+  end
+
+  ## Stroke a per-corner rounded-rectangle outline of the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_rrect(rect: Rect, tl: Float32, tr: Float32, br: Float32, bl: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_rrect_radii_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      tl as Float, tr as Float, br as Float, bl as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_rrect")
+  end
+
+  ## Stroke a line from (x0, y0) to (x1, y1) with the given `width` (<=0 draws
+  ## a 1px hairline). Antialiased; Skia-only.
+  def var draw_line(x0: Float32, y0: Float32, x1: Float32, y1: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_line_raw(
+      x0 as Float, y0 as Float, x1 as Float, y1 as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_line")
+  end
+
   ## Draw a single line of text with (x, y) as the BASELINE origin: glyphs
   ## occupy the 7 pixel rows above y. One embedded 5x7 bitmap font for the
   ## first vertical slice; Skia paragraph/HarfBuzz shaping comes later.
@@ -293,6 +359,8 @@ class Canvas
       Err(String.from("canvas: #{what} called while a frame is already open"))
     elsif Rxc.is_bad_args(code)
       Err(String.from("canvas: #{what} failed: invalid arguments"))
+    elsif Rxc.is_no_skia(code)
+      Err(String.from("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
     else
       Err(String.from("canvas: #{what} failed with unknown status #{code}"))
     end

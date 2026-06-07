@@ -24,6 +24,7 @@
 typedef struct sk_surface_t    sk_surface_t;
 typedef struct sk_canvas_t     sk_canvas_t;
 typedef struct sk_paint_t      sk_paint_t;
+typedef struct sk_rrect_t      sk_rrect_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
@@ -51,6 +52,7 @@ typedef struct {
 } sk_imageinfo_t;
 
 typedef struct { float left, top, right, bottom; } sk_rect_t;
+typedef struct { float x, y; } sk_vector_t;   /* a per-corner (x,y) radius */
 
 /* Full sk_fontmetrics_t so &metrics has the right size; we read ascent/descent. */
 typedef struct {
@@ -74,8 +76,15 @@ typedef void (*pfn_canvas_draw_round_rect)(sk_canvas_t *, const sk_rect_t *, flo
         const sk_paint_t *);
 typedef void (*pfn_canvas_draw_line)(sk_canvas_t *, float x0, float y0, float x1, float y1,
         const sk_paint_t *);
+typedef void (*pfn_canvas_draw_rrect)(sk_canvas_t *, const sk_rrect_t *, const sk_paint_t *);
 typedef void (*pfn_canvas_draw_simple_text)(sk_canvas_t *, const void *text, size_t byte_len,
         int encoding, float x, float y, const sk_font_t *, const sk_paint_t *);
+
+/* radii[4] order: upper-left, upper-right, lower-right, lower-left. */
+typedef sk_rrect_t *(*pfn_rrect_new)(void);
+typedef void        (*pfn_rrect_delete)(sk_rrect_t *);
+typedef void        (*pfn_rrect_set_rect_radii)(sk_rrect_t *, const sk_rect_t *,
+        const sk_vector_t radii[4]);
 
 typedef sk_paint_t *(*pfn_paint_new)(void);
 typedef void        (*pfn_paint_delete)(sk_paint_t *);
@@ -105,8 +114,13 @@ typedef struct {
     pfn_canvas_draw_rect        canvas_draw_rect;
     pfn_canvas_draw_oval        canvas_draw_oval;
     pfn_canvas_draw_round_rect  canvas_draw_round_rect;
+    pfn_canvas_draw_rrect       canvas_draw_rrect;
     pfn_canvas_draw_line        canvas_draw_line;
     pfn_canvas_draw_simple_text canvas_draw_simple_text;
+
+    pfn_rrect_new               rrect_new;
+    pfn_rrect_delete            rrect_delete;
+    pfn_rrect_set_rect_radii    rrect_set_rect_radii;
 
     pfn_paint_new              paint_new;
     pfn_paint_delete           paint_delete;

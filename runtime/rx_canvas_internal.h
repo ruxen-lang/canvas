@@ -24,6 +24,9 @@
 #define RXC_ERR_QUEUE_FULL 4  /* event ring buffer is full */
 #define RXC_ERR_PRESENT    5  /* presenting to the platform window failed /
                                  no platform window available */
+/* 6 (NO_SDL) and 7 (BUSY) are reserved by runtime/sdl_window.c. */
+#define RXC_ERR_NO_SKIA    8  /* op requires the Skia backend, which is not
+                                 loaded (run runtime/fetch_skia.sh) */
 
 /* ---- events ---- */
 

@@ -28,6 +28,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Canvas#skia_available?` reports library load; `Canvas#skia_active?` reports
   whether *this* canvas is genuinely rendering through Skia. Opaque draws are
   byte-identical across both backends (pin-tested).
+- **Skia-native shape primitives** (antialiased; the building blocks for quiver
+  widgets) — `Canvas#draw_circle`/`stroke_circle`, `draw_round_rect`/
+  `stroke_round_rect` (uniform corner radius), `draw_rrect`/`stroke_rrect`
+  (independent per-corner radii — one-side-only rounding, pills, tabs), and
+  `draw_line`. Fill and stroke (border) variants throughout. These are
+  Skia-only: with no library loaded they return a clear `Err`
+  (`requires the Skia backend`), never a silent no-op.
 - **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
   window on screen (SDL2 runtime via dlopen — no dev packages, zero
   link-time deps), `present` blits the canvas after `end_frame`, the pump
