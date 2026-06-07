@@ -7,6 +7,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Canvas transforms + clipping** (the foundation for scrolling, nested
+  layout, and overflow/masking in L2):
+  - `Canvas#save` / `#restore` / `#restore_to` / `#save_count` — the
+    matrix+clip state stack.
+  - `Canvas#translate` / `#scale` / `#rotate` — coordinate-system transforms.
+  - `Canvas#clip_rect` / `#clip_round_rect` — intersect the clip (antialiased;
+    rounded masks). Scope with `save`/`restore`.
+  - State is **reset at `begin_frame`** so a transform/clip never leaks into the
+    next frame. Applied on the Skia backend; a no-op under the software fallback
+    (drawing lands untransformed) so `save`/`restore` stays balanced either way.
 - **Gradient fills, soft shadows, and sized text** (L1 styling):
   - `Canvas#fill_rect_gradient` / `#fill_round_rect_gradient` (2-stop linear,
     e.g. vertical button backgrounds) and `#fill_circle_radial` (radial:

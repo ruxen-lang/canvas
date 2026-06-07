@@ -47,6 +47,8 @@ enum { RX_SK_TEXT_UTF8 = 0, RX_SK_TEXT_UTF16 = 1, RX_SK_TEXT_UTF32 = 2, RX_SK_TE
 enum { RX_SK_TILE_CLAMP = 0, RX_SK_TILE_REPEAT = 1, RX_SK_TILE_MIRROR = 2, RX_SK_TILE_DECAL = 3 };
 /* sk_blurstyle_t */
 enum { RX_SK_BLUR_NORMAL = 0, RX_SK_BLUR_SOLID = 1, RX_SK_BLUR_OUTER = 2, RX_SK_BLUR_INNER = 3 };
+/* sk_clipop_t (probe-pinned: 1 = intersect) */
+enum { RX_SK_CLIP_DIFFERENCE = 0, RX_SK_CLIP_INTERSECT = 1 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -86,6 +88,19 @@ typedef void (*pfn_canvas_draw_line)(sk_canvas_t *, float x0, float y0, float x1
 typedef void (*pfn_canvas_draw_rrect)(sk_canvas_t *, const sk_rrect_t *, const sk_paint_t *);
 typedef void (*pfn_canvas_draw_simple_text)(sk_canvas_t *, const void *text, size_t byte_len,
         int encoding, float x, float y, const sk_font_t *, const sk_paint_t *);
+
+/* canvas state stack + transforms + clipping */
+typedef int  (*pfn_canvas_save)(sk_canvas_t *);
+typedef void (*pfn_canvas_restore)(sk_canvas_t *);
+typedef int  (*pfn_canvas_get_save_count)(sk_canvas_t *);
+typedef void (*pfn_canvas_restore_to_count)(sk_canvas_t *, int save_count);
+typedef void (*pfn_canvas_translate)(sk_canvas_t *, float dx, float dy);
+typedef void (*pfn_canvas_scale)(sk_canvas_t *, float sx, float sy);
+typedef void (*pfn_canvas_rotate_degrees)(sk_canvas_t *, float degrees);
+typedef void (*pfn_canvas_reset_matrix)(sk_canvas_t *);
+/* clip op: 1 = intersect (ABI-pinned by probe); doAA != 0 for antialiased edges */
+typedef void (*pfn_canvas_clip_rect)(sk_canvas_t *, const sk_rect_t *, int op, int do_aa);
+typedef void (*pfn_canvas_clip_rrect)(sk_canvas_t *, const sk_rrect_t *, int op, int do_aa);
 
 /* radii[4] order: upper-left, upper-right, lower-right, lower-left. */
 typedef sk_rrect_t *(*pfn_rrect_new)(void);
@@ -138,6 +153,17 @@ typedef struct {
     pfn_canvas_draw_rrect       canvas_draw_rrect;
     pfn_canvas_draw_line        canvas_draw_line;
     pfn_canvas_draw_simple_text canvas_draw_simple_text;
+
+    pfn_canvas_save             canvas_save;
+    pfn_canvas_restore          canvas_restore;
+    pfn_canvas_get_save_count   canvas_get_save_count;
+    pfn_canvas_restore_to_count canvas_restore_to_count;
+    pfn_canvas_translate        canvas_translate;
+    pfn_canvas_scale            canvas_scale;
+    pfn_canvas_rotate_degrees   canvas_rotate_degrees;
+    pfn_canvas_reset_matrix     canvas_reset_matrix;
+    pfn_canvas_clip_rect        canvas_clip_rect;
+    pfn_canvas_clip_rrect       canvas_clip_rrect;
 
     pfn_rrect_new               rrect_new;
     pfn_rrect_delete            rrect_delete;
