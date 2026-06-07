@@ -191,4 +191,48 @@ Tester.describe("Canvas state reset") do |t: &var Tester|
     # not translated by the previous frame's leaked (10,10)
     t.expect(c.read_pixel(2, 2)).to_eq(red)
   end
+
+  t.it("begin_frame clears a leaked base-level clip from the previous frame") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    # frame 1: clip WITHOUT a surrounding save (a base-level clip leak)
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let _ = c.clip_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32))
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 32.0f32, 32.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    # frame 2: the leaked clip must be gone — a full fill reaches (16,16)
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame 2 failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear 2 failed")
+    end
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 32.0f32, 32.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect 2 failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame 2 failed")
+    end
+    # (16,16) is outside the previous frame's 8x8 clip; it must be filled now
+    t.expect(c.read_pixel(16, 16)).to_eq(Color.rgb(255u8, 255u8, 255u8).to_argb as Int)
+  end
 end

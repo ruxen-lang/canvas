@@ -294,15 +294,19 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->in_frame) return RXC_ERR_IN_FRAME;
     h->in_frame = 1;
-    /* Reset canvas state so transforms/clips never leak across frames: pop any
-     * unbalanced saves back to the base, then clear the matrix to identity.
-     * (Clips are scoped by save/restore — L2 must balance them; this still
-     * guards against a stray translate/scale without a save.) */
+    /* Reset canvas state so NOTHING (transform or clip) leaks across frames.
+     * restore_to_count(1) pops everything above the pristine base; reset_matrix
+     * clears any base-level matrix change. Then we push one save so the whole
+     * frame runs at depth >= 2 — this is what lets the NEXT begin_frame's
+     * restore_to_count(1) discard even a clip the caller applied WITHOUT a save
+     * (a base-level clip is not undone by restore_to_count alone, and there is
+     * no reset-clip call). Same approach Flutter uses (an outer per-frame save). */
     sk_canvas_t *canvas = rx_host_canvas(h);
     if (canvas) {
         const RxSkia *sk = rx_skia();
         if (sk->canvas_restore_to_count) sk->canvas_restore_to_count(canvas, 1);
         if (sk->canvas_reset_matrix) sk->canvas_reset_matrix(canvas);
+        if (sk->canvas_save) sk->canvas_save(canvas);
     }
     return RXC_OK;
 }

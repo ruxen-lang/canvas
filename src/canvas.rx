@@ -68,7 +68,9 @@ class Canvas
     self.status_to_result(self.raw.restore_to_count_raw(count), "restore_to")
   end
 
-  ## The current depth of the save stack (1 at the base).
+  ## The current depth of the save stack — it increases with each `save`. Pass
+  ## a value captured from `save` to `restore_to`; don't assume a specific base
+  ## number (the engine keeps an outer per-frame save).
   def save_count -> Int
     self.raw.save_count_raw
   end
@@ -90,7 +92,9 @@ class Canvas
   end
 
   ## Intersect the clip with `rect` — subsequent drawing is confined to it
-  ## (overflow/masking). Scope inside `save`/`restore`. Skia backend only.
+  ## (overflow/masking). Scope inside `save`/`restore`. Applied on the Skia
+  ## backend; under the software fallback this returns `Ok` without clipping
+  ## (content is not confined), so don't treat `Ok` as "definitely clipped".
   def var clip_rect(rect: Rect) -> Result[nil, String]
     let code = self.raw.clip_rect_raw(rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float)
     self.status_to_result(code, "clip_rect")
