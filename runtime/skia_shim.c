@@ -140,6 +140,16 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(shader_unref,              "sk_shader_unref");
     RX_SK_OPTIONAL(maskfilter_new_blur,       "sk_maskfilter_new_blur");
     RX_SK_OPTIONAL(maskfilter_unref,          "sk_maskfilter_unref");
+    RX_SK_OPTIONAL(canvas_save,               "sk_canvas_save");
+    RX_SK_OPTIONAL(canvas_restore,            "sk_canvas_restore");
+    RX_SK_OPTIONAL(canvas_get_save_count,     "sk_canvas_get_save_count");
+    RX_SK_OPTIONAL(canvas_restore_to_count,   "sk_canvas_restore_to_count");
+    RX_SK_OPTIONAL(canvas_translate,          "sk_canvas_translate");
+    RX_SK_OPTIONAL(canvas_scale,              "sk_canvas_scale");
+    RX_SK_OPTIONAL(canvas_rotate_degrees,     "sk_canvas_rotate_degrees");
+    RX_SK_OPTIONAL(canvas_reset_matrix,       "sk_canvas_reset_matrix");
+    RX_SK_OPTIONAL(canvas_clip_rect,          "sk_canvas_clip_rect_with_operation");
+    RX_SK_OPTIONAL(canvas_clip_rrect,         "sk_canvas_clip_rrect_with_operation");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
@@ -284,6 +294,16 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->in_frame) return RXC_ERR_IN_FRAME;
     h->in_frame = 1;
+    /* Reset canvas state so transforms/clips never leak across frames: pop any
+     * unbalanced saves back to the base, then clear the matrix to identity.
+     * (Clips are scoped by save/restore — L2 must balance them; this still
+     * guards against a stray translate/scale without a save.) */
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (canvas) {
+        const RxSkia *sk = rx_skia();
+        if (sk->canvas_restore_to_count) sk->canvas_restore_to_count(canvas, 1);
+        if (sk->canvas_reset_matrix) sk->canvas_reset_matrix(canvas);
+    }
     return RXC_OK;
 }
 
@@ -295,6 +315,144 @@ int64_t ruxen_canvas_end_frame(int64_t self) {
     if (!h) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     h->in_frame = 0;
+    return RXC_OK;
+}
+
+/* ---- canvas state: save/restore + transforms + clipping ----
+ *
+ * These manage the Skia canvas's matrix + clip stack — the foundation L2 uses
+ * for scrolling (translate), nested layouts, and overflow/masking (clip).
+ * They are best-effort state ops: on the software fallback (no Skia surface)
+ * they no-op and return OK, so an L2 save/translate/draw/restore sequence stays
+ * balanced (draws just land untransformed). All require an open frame; state is
+ * reset at begin_frame so nothing leaks between frames. */
+
+/* Push the current matrix+clip; returns the save count to pair with
+ * restore_to (0 outside a frame / no surface). */
+int64_t ruxen_canvas_save(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h || !h->in_frame) return 0;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_save) return (int64_t)sk->canvas_save(canvas);
+    return 0;
+}
+
+/* Pop the last save (matrix+clip). */
+int64_t ruxen_canvas_restore(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_restore) sk->canvas_restore(canvas);
+    return RXC_OK;
+}
+
+/* Restore down to a save count from a prior save (unwinds nested saves). */
+int64_t ruxen_canvas_restore_to_count(int64_t self, int64_t count) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_restore_to_count && count >= 1) {
+        sk->canvas_restore_to_count(canvas, (int)count);
+    }
+    return RXC_OK;
+}
+
+/* The current save-stack depth (1 at the base). */
+int64_t ruxen_canvas_save_count(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_get_save_count) return (int64_t)sk->canvas_get_save_count(canvas);
+    return 1;
+}
+
+int64_t ruxen_canvas_translate(int64_t self, double dx, double dy) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(dx) || !rxc_finite_pixels(dy)) return RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_translate) sk->canvas_translate(canvas, (float)dx, (float)dy);
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_scale(int64_t self, double sx, double sy) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(sx) || !rxc_finite_pixels(sy)) return RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_scale) sk->canvas_scale(canvas, (float)sx, (float)sy);
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_rotate(int64_t self, double degrees) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(degrees)) return RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_rotate_degrees) sk->canvas_rotate_degrees(canvas, (float)degrees);
+    return RXC_OK;
+}
+
+/* Intersect the clip with a rectangle (antialiased). Scope with save/restore. */
+int64_t ruxen_canvas_clip_rect(int64_t self, double x, double y, double w, double hgt) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) ||
+        !rxc_finite_pixels(w) || !rxc_finite_pixels(hgt)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_clip_rect) {
+        sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+        sk->canvas_clip_rect(canvas, &rect, RX_SK_CLIP_INTERSECT, 1);
+    }
+    return RXC_OK;
+}
+
+/* Intersect the clip with a uniform rounded rectangle (antialiased) — rounded
+ * masks / overflow. Scope with save/restore. */
+int64_t ruxen_canvas_clip_round_rect(int64_t self, double x, double y, double w, double hgt,
+                                     double radius) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
+        !rxc_finite_pixels(hgt) || !rxc_finite_pixels(radius)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_clip_rrect && sk->rrect_new && sk->rrect_set_rect_radii &&
+        sk->rrect_delete) {
+        double rad = radius > 0.0 ? radius : 0.0;
+        sk_rrect_t *rr = sk->rrect_new();
+        if (rr) {
+            sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+            sk_vector_t radii[4] = {
+                { (float)rad, (float)rad }, { (float)rad, (float)rad },
+                { (float)rad, (float)rad }, { (float)rad, (float)rad },
+            };
+            sk->rrect_set_rect_radii(rr, &rect, radii);
+            sk->canvas_clip_rrect(canvas, rr, RX_SK_CLIP_INTERSECT, 1);
+            sk->rrect_delete(rr);
+        }
+    }
     return RXC_OK;
 }
 

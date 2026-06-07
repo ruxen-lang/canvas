@@ -51,6 +51,58 @@ class Canvas
     self.status_to_result(self.raw.end_frame_raw, "end_frame")
   end
 
+  ## Push the current transform + clip onto the state stack; returns a save
+  ## count to pass to `restore_to`. Pair every `save` with a `restore`. Applied
+  ## only on the Skia backend (a no-op under the software fallback).
+  def var save -> Int
+    self.raw.save_raw
+  end
+
+  ## Pop the last `save`, restoring the previous transform + clip.
+  def var restore -> Result[nil, String]
+    self.status_to_result(self.raw.restore_raw, "restore")
+  end
+
+  ## Restore the state stack down to a `count` returned by an earlier `save`.
+  def var restore_to(count: Int) -> Result[nil, String]
+    self.status_to_result(self.raw.restore_to_count_raw(count), "restore_to")
+  end
+
+  ## The current depth of the save stack (1 at the base).
+  def save_count -> Int
+    self.raw.save_count_raw
+  end
+
+  ## Translate the coordinate system by (dx, dy) — the basis of scrolling and
+  ## nested layout. Scope inside `save`/`restore`.
+  def var translate(dx: Float32, dy: Float32) -> Result[nil, String]
+    self.status_to_result(self.raw.translate_raw(dx as Float, dy as Float), "translate")
+  end
+
+  ## Scale the coordinate system by (sx, sy).
+  def var scale(sx: Float32, sy: Float32) -> Result[nil, String]
+    self.status_to_result(self.raw.scale_raw(sx as Float, sy as Float), "scale")
+  end
+
+  ## Rotate the coordinate system by `degrees` (clockwise) about the origin.
+  def var rotate(degrees: Float32) -> Result[nil, String]
+    self.status_to_result(self.raw.rotate_raw(degrees as Float), "rotate")
+  end
+
+  ## Intersect the clip with `rect` — subsequent drawing is confined to it
+  ## (overflow/masking). Scope inside `save`/`restore`. Skia backend only.
+  def var clip_rect(rect: Rect) -> Result[nil, String]
+    let code = self.raw.clip_rect_raw(rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float)
+    self.status_to_result(code, "clip_rect")
+  end
+
+  ## Intersect the clip with a uniform rounded rectangle — rounded masks (e.g.
+  ## clipping content to a card). Scope inside `save`/`restore`. Skia only.
+  def var clip_round_rect(rect: Rect, radius: Float32) -> Result[nil, String]
+    let code = self.raw.clip_round_rect_raw(rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float, radius as Float)
+    self.status_to_result(code, "clip_round_rect")
+  end
+
   ## Clear the whole surface to a solid color (no blending).
   def var clear(color: Color) -> Result[nil, String]
     let code = self.raw.clear_raw(color.r as Int, color.g as Int, color.b as Int, color.a as Int)

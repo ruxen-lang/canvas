@@ -1,0 +1,194 @@
+# Pin tests for canvas state: save/restore, translate/scale, clip, and the
+# begin_frame state reset. Transforms/clips apply on the Skia backend; under the
+# software fallback they no-op (drawing lands untransformed/unclipped), so each
+# test asserts the matching outcome for the active backend.
+
+Tester.describe("Canvas.translate") do |t: &var Tester|
+  t.it("offsets subsequent drawing, scoped by save/restore") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    let _ = c.translate(10.0f32, 10.0f32)
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 4.0f32, 4.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(12, 12)).to_eq(red)   # drawn at origin + (10,10)
+      t.expect(c.read_pixel(2, 2)).to_eq(black)    # original origin is clear
+    else
+      t.expect(c.read_pixel(2, 2)).to_eq(red)      # untransformed fallback
+    end
+  end
+end
+
+Tester.describe("Canvas.scale") do |t: &var Tester|
+  t.it("scales subsequent drawing") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    let _ = c.scale(2.0f32, 2.0f32)
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 2.0f32, 2.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(3, 3)).to_eq(red)     # 2x2 scaled 2x covers 0..4
+    else
+      t.expect(c.read_pixel(3, 3)).to_eq(black)   # unscaled 2x2 stops before (3,3)
+    end
+  end
+end
+
+Tester.describe("Canvas.clip_rect") do |t: &var Tester|
+  t.it("confines drawing to the clip region") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    let _ = c.clip_rect(Rect.new(8.0f32, 8.0f32, 16.0f32, 16.0f32))
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 32.0f32, 32.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(16, 16)).to_eq(white)  # inside the clip
+      t.expect(c.read_pixel(2, 2)).to_eq(black)    # clipped out
+    else
+      t.expect(c.read_pixel(2, 2)).to_eq(white)    # unclipped fallback
+    end
+  end
+end
+
+Tester.describe("Canvas.clip_round_rect") do |t: &var Tester|
+  t.it("clips to a rounded region, carving the corners") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    let _ = c.clip_round_rect(Rect.new(0.0f32, 0.0f32, 32.0f32, 32.0f32), 10.0f32)
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 32.0f32, 32.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(16, 16)).to_eq(white)  # centre inside
+      t.expect(c.read_pixel(0, 0)).to_eq(black)    # rounded corner carved
+    else
+      t.expect(c.read_pixel(0, 0)).to_eq(white)    # unclipped fallback
+    end
+  end
+end
+
+Tester.describe("Canvas state reset") do |t: &var Tester|
+  t.it("begin_frame clears a leaked transform from the previous frame") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    # frame 1: translate WITHOUT a matching restore (a leak)
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let _ = c.translate(10.0f32, 10.0f32)
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    # frame 2: a fresh frame must start at identity — draw at origin lands at origin
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame 2 failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear 2 failed")
+    end
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 4.0f32, 4.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect 2 failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame 2 failed")
+    end
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    # not translated by the previous frame's leaked (10,10)
+    t.expect(c.read_pixel(2, 2)).to_eq(red)
+  end
+end

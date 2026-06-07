@@ -11,6 +11,15 @@ class RawHost
     def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
     def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
+    def save_raw as "ruxen_canvas_save"(self) -> Int
+    def restore_raw as "ruxen_canvas_restore"(self) -> Int
+    def restore_to_count_raw as "ruxen_canvas_restore_to_count"(self, count: Int) -> Int
+    def save_count_raw as "ruxen_canvas_save_count"(self) -> Int
+    def translate_raw as "ruxen_canvas_translate"(self, dx: Float, dy: Float) -> Int
+    def scale_raw as "ruxen_canvas_scale"(self, sx: Float, sy: Float) -> Int
+    def rotate_raw as "ruxen_canvas_rotate"(self, degrees: Float) -> Int
+    def clip_rect_raw as "ruxen_canvas_clip_rect"(self, x: Float, y: Float, w: Float, h: Float) -> Int
+    def clip_round_rect_raw as "ruxen_canvas_clip_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float) -> Int
     def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_circle_raw as "ruxen_canvas_draw_circle"(self, cx: Float, cy: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
