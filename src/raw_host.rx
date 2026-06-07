@@ -1,0 +1,40 @@
+## INTERNAL — raw handle over the C shim's host object. Use `Canvas` /
+## `Window`; this class is the step-2 `lib` declaration of the
+## incremental-FFI discipline (docs/FFI.md) and offers no safety checks of
+## its own.
+class RawHost
+  lib "runtime/skia_shim.c"
+    def self.new as "ruxen_canvas_host_new"(width: Int, height: Int) -> RawHost
+    def width as "ruxen_canvas_host_width"(self) -> Int
+    def height as "ruxen_canvas_host_height"(self) -> Int
+    def is_null as "ruxen_canvas_host_is_null"(self) -> Bool
+    def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
+    def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
+    def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
+    def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
+    def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def draw_circle_raw as "ruxen_canvas_draw_circle"(self, cx: Float, cy: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_round_rect_raw as "ruxen_canvas_draw_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_rrect_radii_raw as "ruxen_canvas_draw_rrect_radii"(self, x: Float, y: Float, w: Float, h: Float, tl: Float, tr: Float, br: Float, bl: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_line_raw as "ruxen_canvas_draw_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
+    def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
+    def skia_available_raw as "ruxen_canvas_skia_available"(self) -> Bool
+    def skia_active_raw as "ruxen_canvas_skia_active"(self) -> Bool
+    def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
+    def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
+    def event_ai as "ruxen_canvas_event_ai"(self) -> Int
+    def event_bi as "ruxen_canvas_event_bi"(self) -> Int
+    def sleep_ms_raw as "ruxen_canvas_sleep_ms"(self, ms: Int) -> nil
+    def drop as "ruxen_canvas_host_drop"(self) -> nil
+  end
+
+  lib "runtime/sdl_window.c"
+    def window_show as "ruxen_canvas_window_show"(self, title: &String, scale: Int) -> Int
+    def window_present as "ruxen_canvas_window_present"(self) -> Int
+    def window_pump as "ruxen_canvas_window_pump"(self) -> Int
+    def self.window_is_shown as "ruxen_canvas_window_is_shown" -> Int
+    def self.window_destroy as "ruxen_canvas_window_destroy" -> Int
+  end
+end

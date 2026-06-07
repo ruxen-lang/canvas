@@ -1,0 +1,199 @@
+## The drawing surface for a single frame. Methods mirror Skia's `SkCanvas`.
+##
+## The exposed subset grows over time; see `docs/FFI.md` for the 4-step
+## process to bind a new Skia call. Every newly-bound method gets a pin test.
+##
+## A `Canvas` owns its framebuffer; dropping it tears the C-side host down
+## deterministically (no GC). Offscreen canvases (from `Canvas.create`) are
+## first-class — they are what the pin tests draw on.
+class Canvas
+  raw: RawHost
+
+  def init(@raw: RawHost)
+  end
+
+  ## Create an offscreen canvas with the given pixel size.
+  def self.create(width: Int, height: Int) -> Result[Canvas, String]
+    if !Rxc.valid_dimensions(width, height)
+      return Err(String.from("canvas: invalid canvas size #{width}x#{height}"))
+    end
+    let raw = RawHost.new(width, height)
+    if raw.is_null
+      return Err(String.from("canvas: framebuffer allocation failed (#{width}x#{height})"))
+    end
+    Ok(Canvas.new(raw))
+  end
+
+  ## Width of the framebuffer in pixels.
+  def width -> Int
+    self.raw.width
+  end
+
+  ## Height of the framebuffer in pixels.
+  def height -> Int
+    self.raw.height
+  end
+
+  ## Read one pixel back as packed `0xAARRGGBB` (see `Color.to_argb`).
+  ## Returns -1 when (x, y) is out of bounds. This is the observation hook
+  ## the pin tests use; it is not part of the upward L2 surface.
+  def read_pixel(x: Int, y: Int) -> Int
+    self.raw.read_pixel(x, y)
+  end
+
+  ## Begin a frame; must be paired with `end_frame`.
+  def var begin_frame -> Result[nil, String]
+    self.status_to_result(self.raw.begin_frame_raw, "begin_frame")
+  end
+
+  ## Present the frame to the surface.
+  def var end_frame -> Result[nil, String]
+    self.status_to_result(self.raw.end_frame_raw, "end_frame")
+  end
+
+  ## Clear the whole surface to a solid color (no blending).
+  def var clear(color: Color) -> Result[nil, String]
+    let code = self.raw.clear_raw(color.r as Int, color.g as Int, color.b as Int, color.a as Int)
+    self.status_to_result(code, "clear")
+  end
+
+  ## Fill a rectangle with source-over blending, clipped to the surface.
+  def var draw_rect(rect: Rect, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_rect_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      color.r as Int, color.g as Int, color.b as Int, color.a as Int)
+    self.status_to_result(code, "draw_rect")
+  end
+
+  ## Fill a circle of `radius` centered at (cx, cy). Antialiased. Requires the
+  ## Skia backend (Err otherwise — there is no software fallback for curves).
+  def var draw_circle(cx: Float32, cy: Float32, radius: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_circle_raw(cx as Float, cy as Float, radius as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_circle")
+  end
+
+  ## Stroke a circle outline of the given line `width`. Antialiased; Skia-only.
+  def var stroke_circle(cx: Float32, cy: Float32, radius: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_circle_raw(cx as Float, cy as Float, radius as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_circle")
+  end
+
+  ## Fill a rounded rectangle with one uniform corner `radius`. The button
+  ## background shape. Antialiased; Skia-only.
+  def var draw_round_rect(rect: Rect, radius: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_round_rect_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_round_rect")
+  end
+
+  ## Stroke a rounded-rectangle outline (border) of the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_round_rect(rect: Rect, radius: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_round_rect_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_round_rect")
+  end
+
+  ## Fill a rounded rectangle with independent per-corner radii (top-left,
+  ## top-right, bottom-right, bottom-left) — for one-side-only rounding, pills,
+  ## and tabs. Antialiased; Skia-only.
+  def var draw_rrect(rect: Rect, tl: Float32, tr: Float32, br: Float32, bl: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_rrect_radii_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      tl as Float, tr as Float, br as Float, bl as Float, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_rrect")
+  end
+
+  ## Stroke a per-corner rounded-rectangle outline of the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_rrect(rect: Rect, tl: Float32, tr: Float32, br: Float32, bl: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_rrect_radii_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      tl as Float, tr as Float, br as Float, bl as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_rrect")
+  end
+
+  ## Stroke a line from (x0, y0) to (x1, y1) with the given `width` (<=0 draws
+  ## a 1px hairline). Antialiased; Skia-only.
+  def var draw_line(x0: Float32, y0: Float32, x1: Float32, y1: Float32, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_line_raw(
+      x0 as Float, y0 as Float, x1 as Float, y1 as Float, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_line")
+  end
+
+  ## Draw a single line of text with (x, y) as the BASELINE origin: glyphs
+  ## occupy the 7 pixel rows above y. One embedded 5x7 bitmap font for the
+  ## first vertical slice; Skia paragraph/HarfBuzz shaping comes later.
+  def var draw_text(text: String, x: Float32, y: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_text_raw(
+      &text, x as Float, y as Float,
+      color.r as Int, color.g as Int, color.b as Int, color.a as Int)
+    self.status_to_result(code, "draw_text")
+  end
+
+  ## Width in pixels `text` would occupy when drawn (single line). The
+  ## character count crosses the FFI, not the string — the font metric
+  ## stays defined in the shim.
+  def measure_text(text: &String) -> Int
+    self.raw.measure_text_n_raw(text.size)
+  end
+
+  ## The font's line height (ascent above the baseline), in pixels.
+  def text_height -> Int
+    self.raw.text_height_raw
+  end
+
+  ## True when the real Skia backend is loaded and rendering; false when the
+  ## shim is on its deterministic software-raster fallback (Skia native lib
+  ## not fetched — see docs/SKIA.md). A capability probe for L2/tests; drawing
+  ## works either way.
+  def skia_available? -> Bool
+    self.raw.skia_available_raw
+  end
+
+  ## True only when THIS canvas has a live Skia raster surface — Skia is loaded
+  ## AND the surface was created for this framebuffer, so draws genuinely go
+  ## through Skia rather than silently falling back to software. (`skia_available?`
+  ## reports library load; this reports actual per-canvas rendering.)
+  def var skia_active? -> Bool
+    self.raw.skia_active_raw
+  end
+
+  ## INTERNAL (used by Window.open): attach the live OS window. Mirrors
+  ## draw_text's exact FFI calling shape — an owned String parameter
+  ## borrowed at the call — which is the one &String form that lowers
+  ## correctly today.
+  def var show_window(title: String) -> Int
+    self.raw.window_show(&title, 0)
+  end
+
+  ## INTERNAL (used by Window.show_scaled): like show_window with an
+  ## explicit integer scale (1-8; 0 = auto). The OS window opens at
+  ## scale x the framebuffer; pointer coordinates are mapped back, so
+  ## apps always work in framebuffer coordinates.
+  def var show_window_scaled(title: String, scale: Int) -> Int
+    self.raw.window_show(&title, scale)
+  end
+
+  private
+
+  ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
+  ## a descriptive `Err` — a not-yet-valid call is never a silent no-op.
+  def status_to_result(code: Int, what: &str) -> Result[nil, String]
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_no_frame(code)
+      Err(String.from("canvas: #{what} called outside begin_frame/end_frame"))
+    elsif Rxc.is_in_frame(code)
+      Err(String.from("canvas: #{what} called while a frame is already open"))
+    elsif Rxc.is_bad_args(code)
+      Err(String.from("canvas: #{what} failed: invalid arguments"))
+    elsif Rxc.is_no_skia(code)
+      Err(String.from("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
+    else
+      Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+    end
+  end
+end

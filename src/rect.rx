@@ -1,0 +1,35 @@
+## An axis-aligned rectangle in device-independent pixels.
+struct Rect
+  x: Float32
+  y: Float32
+  width: Float32
+  height: Float32
+
+  ## The x coordinate of the right edge (exclusive).
+  def right -> Float32
+    self.x + self.width
+  end
+
+  ## The y coordinate of the bottom edge (exclusive).
+  def bottom -> Float32
+    self.y + self.height
+  end
+
+  ## True when the rect covers no area.
+  def is_empty -> Bool
+    self.width <= 0.0f32 || self.height <= 0.0f32
+  end
+
+  ## Point containment: left/top edges inclusive, right/bottom exclusive
+  ## (half-open, so adjacent rects never both claim a boundary pixel).
+  def contains(px: Float32, py: Float32) -> Bool
+    px >= self.x && px < self.right && py >= self.y && py < self.bottom
+  end
+
+  ## True when the two rects overlap on a non-zero area.
+  def intersects(other: &Rect) -> Bool
+    !self.is_empty && !other.is_empty &&
+      self.x < other.right && other.x < self.right &&
+      self.y < other.bottom && other.y < self.bottom
+  end
+end

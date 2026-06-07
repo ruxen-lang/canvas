@@ -1,0 +1,22 @@
+## A single input or lifecycle event delivered by the engine's event stream.
+##
+## L1 exposes a stream of these upward; L2 dispatches them to widget handlers.
+##
+## Pointer coordinates are whole logical pixels for the first vertical
+## slice (TODO: return to Float32 payloads once enum float payloads
+## compile correctly); the C-side event payloads are already doubles, so
+## the FFI surface won't change.
+enum Event
+  ## The pointer moved to (x, y) in logical pixels.
+  PointerMove(Int, Int)
+  ## A pointer button was pressed at (x, y).
+  PointerDown(Int, Int)
+  ## A pointer button was released at (x, y).
+  PointerUp(Int, Int)
+  ## A key was pressed (platform keycode).
+  KeyDown(Int)
+  ## The window was resized to (width, height).
+  Resize(Int, Int)
+  ## The application/window was asked to close.
+  CloseRequested
+end

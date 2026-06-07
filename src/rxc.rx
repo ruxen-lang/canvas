@@ -1,0 +1,41 @@
+## Predicates over values shared with the C shim — keep in sync with
+## runtime/skia_shim.c. A class of static helpers (a `module` does not resolve
+## across package files the way a same-named class does). Top-level `let`
+## constants are not supported in library files, and zero-arg helpers tied to
+## one shared status are expressed as one-arg predicate functions.
+class Rxc
+  ## True when (width, height) is a framebuffer size the engine accepts.
+  ## 16384 is the per-axis maximum (matches the C shim).
+  def self.valid_dimensions(width: Int, height: Int) -> Bool
+    width > 0 && height > 0 && width <= 16384 && height <= 16384
+  end
+
+  # status-code predicates (RXC_OK / RXC_ERR_* in the shim)
+  def self.is_ok(code: Int) -> Bool
+    code == 0
+  end
+
+  def self.is_no_frame(code: Int) -> Bool
+    code == 2
+  end
+
+  def self.is_in_frame(code: Int) -> Bool
+    code == 3
+  end
+
+  def self.is_queue_full(code: Int) -> Bool
+    code == 4
+  end
+
+  def self.is_bad_args(code: Int) -> Bool
+    code == 1
+  end
+
+  def self.is_no_sdl(code: Int) -> Bool
+    code == 6
+  end
+
+  def self.is_no_skia(code: Int) -> Bool
+    code == 8
+  end
+end
