@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Images** — decode and draw PNG / JPEG / WebP:
+  - `Image.load(path)` decodes a file into an `Image` (owns its pixels, freed
+    deterministically on drop); `Image#width` / `#height`. `Err` when the file
+    is missing/undecodable or the Skia backend is unavailable.
+  - `Canvas#draw_image` (natural size), `#draw_image_rect` (scaled to a rect,
+    linear sampling), and `#draw_image_rect_src` (a sub-region → rect, for
+    sprite sheets / atlases). Skia backend only.
 - **Canvas transforms + clipping** (the foundation for scrolling, nested
   layout, and overflow/masking in L2):
   - `Canvas#save` / `#restore` / `#restore_to` / `#save_count` — the

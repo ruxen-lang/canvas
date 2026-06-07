@@ -217,6 +217,28 @@ class Canvas
     self.status_to_result(code, "draw_round_rect_shadow")
   end
 
+  ## Draw `image` at (x, y) at its natural pixel size. Skia backend only.
+  def var draw_image(image: &Image, x: Float32, y: Float32) -> Result[nil, String]
+    let code = self.raw.draw_image_raw(image.handle, x as Float, y as Float)
+    self.status_to_result(code, "draw_image")
+  end
+
+  ## Draw `image` scaled to fill `dst` (linear sampling). Skia backend only.
+  def var draw_image_rect(image: &Image, dst: Rect) -> Result[nil, String]
+    let code = self.raw.draw_image_rect_raw(image.handle,
+      dst.x as Float, dst.y as Float, dst.width as Float, dst.height as Float)
+    self.status_to_result(code, "draw_image_rect")
+  end
+
+  ## Draw a sub-region `src` of `image` into `dst` (sprite sheets / atlases).
+  ## Skia backend only.
+  def var draw_image_rect_src(image: &Image, src: Rect, dst: Rect) -> Result[nil, String]
+    let code = self.raw.draw_image_rect_src_raw(image.handle,
+      src.x as Float, src.y as Float, src.width as Float, src.height as Float,
+      dst.x as Float, dst.y as Float, dst.width as Float, dst.height as Float)
+    self.status_to_result(code, "draw_image_rect_src")
+  end
+
   ## Draw a single line of text with (x, y) as the BASELINE origin. Rendered
   ## with a real antialiased Skia font when the backend is active; otherwise an
   ## embedded 5x7 bitmap font (glyphs occupy the 7 px rows above y).

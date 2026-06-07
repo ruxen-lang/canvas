@@ -1,0 +1,13 @@
+## INTERNAL — raw handle over a decoded Skia image (an `sk_image` pointer).
+## Use `Image`; this is the step-2 `lib` declaration (docs/FFI.md). The handle
+## owns the decoded pixels and frees them on `drop`.
+class RawImage
+  lib "runtime/skia_shim.c"
+    def self.load_raw as "ruxen_canvas_image_load"(path: &String) -> RawImage
+    def ptr as "ruxen_canvas_image_ptr"(self) -> Int
+    def is_null as "ruxen_canvas_image_is_null"(self) -> Bool
+    def width as "ruxen_canvas_image_width"(self) -> Int
+    def height as "ruxen_canvas_image_height"(self) -> Int
+    def drop as "ruxen_canvas_image_drop"(self) -> nil
+  end
+end
