@@ -150,3 +150,59 @@ Tester.describe("Canvas.text_height") do |t: &var Tester|
     t.expect(c.text_height > 0).to_eq(true)
   end
 end
+
+Tester.describe("Canvas font sizing") do |t: &var Tester|
+  t.it("a larger size is taller and wider when Skia is active") do
+    let c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let small_h = c.text_height_sized(10.0f32)
+    let large_h = c.text_height_sized(30.0f32)
+    let small_w = c.measure_text_sized(String.from("AAA"), 10.0f32)
+    let large_w = c.measure_text_sized(String.from("AAA"), 30.0f32)
+    if c.skia_active?
+      t.expect(large_h > small_h).to_eq(true)
+      t.expect(large_w > small_w).to_eq(true)
+    else
+      t.expect(large_h).to_eq(small_h)   # bitmap fallback ignores size
+    end
+  end
+
+  t.it("draw_text_sized renders ink") do
+    var c = match Canvas.create(48, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_text_sized(String.from("Hi"), 4.0f32, 30.0f32, 24.0f32, Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_text_sized failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    var lit = 0
+    var y = 0
+    while y < 40
+      var x = 0
+      while x < 48
+        if c.read_pixel(x, y) != black
+          lit += 1
+        end
+        x += 1
+      end
+      y += 1
+    end
+    t.expect(lit > 0).to_eq(true)
+  end
+end

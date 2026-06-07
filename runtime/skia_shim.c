@@ -748,56 +748,21 @@ static sk_font_t *rx_default_font(void) {
     return font;
 }
 
-/* Width in pixels of `n` characters at the bitmap font's one size. The
- * character count crosses the FFI; kept for the software path / callers that
- * only have a count. */
-int64_t ruxen_canvas_measure_text_n(int64_t self, int64_t n) {
-    (void)self;
-    if (n <= 0) return 0;
-    return n * RXC_ADVANCE - 1;
-}
-
-/* Advance width in pixels of `text` as it would actually be drawn. Uses Skia's
- * real font metrics when active (so measure matches draw for centering), else
- * the bitmap advance. `text` is the C string pointer (an &String from Ruxen). */
-int64_t ruxen_canvas_measure_text(int64_t self, int64_t text) {
-    (void)self;
-    const char *s = (const char *)text;
-    if (!s) return 0;
-    const RxSkia *sk = rx_skia();
+/* The default font with its size set to `size` px (resized in place — single
+ * owner, so safe). NULL when no Skia font is available. Pass RXC_SKIA_FONT_PX
+ * for the default size. */
+static sk_font_t *rx_font_at(double size) {
     sk_font_t *font = rx_default_font();
-    if (sk->available && font && sk->font_measure_text) {
-        float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
-        if (!(w > 0.0f)) return 0;
-        return (int64_t)(w + 0.5f);
-    }
-    size_t n = strlen(s);
-    return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
-}
-
-/* The font's line height in pixels (ascent above + descent below the
- * baseline). Skia metrics when active, else the bitmap's 7px. */
-int64_t ruxen_canvas_text_height(int64_t self) {
-    (void)self;
+    if (!font) return NULL;
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_default_font();
-    if (sk->available && font && sk->font_get_metrics) {
-        sk_fontmetrics_t m;
-        sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
-        float hgt = m.descent - m.ascent;
-        if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
-    }
-    return RXC_GLYPH_H;
+    if (sk->font_set_size && size > 0.0) sk->font_set_size(font, (float)size);
+    return font;
 }
 
-/* Draw a single line of text. (x, y) is the BASELINE origin: glyphs occupy
- * the 7 rows above y. Characters outside printable ASCII render as a
- * replacement box. Source-over blended, clipped to the surface. */
-int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
-                               int64_t r, int64_t g, int64_t b, int64_t a) {
-    RxHost *h = (RxHost *)self;
-    const char *s = (const char *)text;
-    if (!h || !s || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
+/* Shared text impl at an explicit font size. `argb` is packed 0xAARRGGBB. */
+static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
+                                 int64_t argb, double size) {
+    if (!h || !s) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
 
@@ -805,21 +770,21 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
      * same convention as the bitmap path below. */
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_default_font();
+    sk_font_t *font = rx_font_at(size);
     if (canvas && font && sk->canvas_draw_simple_text) {
         sk_paint_t *paint = sk->paint_new();
         if (!paint) return RXC_ERR_BAD_ARGS;
         sk->paint_set_antialias(paint, 1);
         sk->paint_set_style(paint, RX_SK_PAINT_FILL);
-        sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
         sk->canvas_draw_simple_text(canvas, s, strlen(s), RX_SK_TEXT_UTF8,
                                     (float)x, (float)y, font, paint);
         sk->paint_delete(paint);
         return RXC_OK;
     }
 
-    /* software fallback: 5x7 bitmap font */
-    uint32_t src = rxc_pack(r, g, b, a);
+    /* software fallback: 5x7 bitmap font (fixed size — `size` is ignored) */
+    uint32_t src = (uint32_t)argb;
     int64_t pen_x = rxc_floor_to_i64(x);
     int64_t top   = rxc_floor_to_i64(y) - RXC_GLYPH_H;
 
@@ -845,6 +810,83 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
         }
     }
     return RXC_OK;
+}
+
+static int64_t rx_measure_impl(const char *s, double size) {
+    if (!s) return 0;
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_font_at(size);
+    if (sk->available && font && sk->font_measure_text) {
+        float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
+        if (!(w > 0.0f)) return 0;
+        return (int64_t)(w + 0.5f);
+    }
+    size_t n = strlen(s);
+    return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
+}
+
+static int64_t rx_text_height_impl(double size) {
+    const RxSkia *sk = rx_skia();
+    sk_font_t *font = rx_font_at(size);
+    if (sk->available && font && sk->font_get_metrics) {
+        sk_fontmetrics_t m;
+        sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
+        float hgt = m.descent - m.ascent;
+        if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
+    }
+    return RXC_GLYPH_H;
+}
+
+/* Width in pixels of `n` characters at the bitmap font's one size. The
+ * character count crosses the FFI; kept for the software path / callers that
+ * only have a count. */
+int64_t ruxen_canvas_measure_text_n(int64_t self, int64_t n) {
+    (void)self;
+    if (n <= 0) return 0;
+    return n * RXC_ADVANCE - 1;
+}
+
+/* Advance width in pixels of `text` as it would actually be drawn. Uses Skia's
+ * real font metrics when active (so measure matches draw for centering), else
+ * the bitmap advance. `text` is the C string pointer (an &String from Ruxen). */
+int64_t ruxen_canvas_measure_text(int64_t self, int64_t text) {
+    (void)self;
+    return rx_measure_impl((const char *)text, RXC_SKIA_FONT_PX);
+}
+
+/* Advance width of `text` at an explicit font `size` px. */
+int64_t ruxen_canvas_measure_text_sized(int64_t self, int64_t text, double size) {
+    (void)self;
+    return rx_measure_impl((const char *)text, size);
+}
+
+/* The font's line height in pixels (ascent above + descent below the
+ * baseline). Skia metrics when active, else the bitmap's 7px. */
+int64_t ruxen_canvas_text_height(int64_t self) {
+    (void)self;
+    return rx_text_height_impl(RXC_SKIA_FONT_PX);
+}
+
+/* Line height at an explicit font `size` px. */
+int64_t ruxen_canvas_text_height_sized(int64_t self, double size) {
+    (void)self;
+    return rx_text_height_impl(size);
+}
+
+/* Draw a single line of text at (x, y) BASELINE origin, at the default size.
+ * Color as separate r,g,b,a channels (validated). */
+int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
+                               int64_t r, int64_t g, int64_t b, int64_t a) {
+    if (!rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
+    return rx_draw_text_impl((RxHost *)self, (const char *)text, x, y,
+                             (int64_t)rxc_pack(r, g, b, a), RXC_SKIA_FONT_PX);
+}
+
+/* Draw text at an explicit font `size` px (Skia path); color packed 0xAARRGGBB.
+ * The software bitmap fallback renders at its fixed size. */
+int64_t ruxen_canvas_draw_text_sized(int64_t self, int64_t text, double x, double y,
+                                     double size, int64_t argb) {
+    return rx_draw_text_impl((RxHost *)self, (const char *)text, x, y, argb, size);
 }
 
 /* ---- event queue ---- */

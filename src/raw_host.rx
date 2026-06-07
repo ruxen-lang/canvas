@@ -22,9 +22,12 @@ class RawHost
     def fill_circle_radial_raw as "ruxen_canvas_fill_circle_radial"(self, cx: Float, cy: Float, radius: Float, argb0: Int, argb1: Int) -> Int
     def draw_round_rect_shadow_raw as "ruxen_canvas_draw_round_rect_shadow"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, blur: Float, argb: Int) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+    def draw_text_sized_raw as "ruxen_canvas_draw_text_sized"(self, text: &String, x: Float, y: Float, size: Float, argb: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
+    def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
+    def text_height_sized_raw as "ruxen_canvas_text_height_sized"(self, size: Float) -> Int
     def skia_available_raw as "ruxen_canvas_skia_available"(self) -> Bool
     def skia_active_raw as "ruxen_canvas_skia_active"(self) -> Bool
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int

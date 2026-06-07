@@ -171,6 +171,24 @@ class Canvas
     self.status_to_result(code, "draw_text")
   end
 
+  ## Draw text at an explicit font `size` in pixels (Skia path). The software
+  ## bitmap fallback renders at its fixed size. (x, y) is the baseline origin.
+  def var draw_text_sized(text: String, x: Float32, y: Float32, size: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_text_sized_raw(&text, x as Float, y as Float, size as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_text_sized")
+  end
+
+  ## Advance width of `text` at an explicit font `size` px — pair with
+  ## `draw_text_sized` for centering. Skia metrics when active, else bitmap.
+  def measure_text_sized(text: String, size: Float32) -> Int
+    self.raw.measure_text_sized_raw(&text, size as Float)
+  end
+
+  ## Font line height at an explicit `size` px (Skia metrics when active).
+  def text_height_sized(size: Float32) -> Int
+    self.raw.text_height_sized_raw(size as Float)
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String
