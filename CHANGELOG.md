@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Gradient fills, soft shadows, and sized text** (L1 styling):
+  - `Canvas#fill_rect_gradient` / `#fill_round_rect_gradient` (2-stop linear,
+    e.g. vertical button backgrounds) and `#fill_circle_radial` (radial:
+    centre colour → rim). The shim builds the colour/point arrays so none
+    crosses the FFI.
+  - `Canvas#draw_round_rect_shadow` — a soft (blurred) rounded rectangle for
+    drop shadows (via a Skia blur mask filter).
+  - `Canvas#draw_text_sized` / `#measure_text_sized` / `#text_height_sized` —
+    text at an explicit pixel size (the shared font is resized per call). Font
+    *family* selection is still to come.
+  - All Skia-only (clear `Err` when the library is absent); demonstrated in
+    `examples/buttons.rx` (gradient + shadowed buttons, radial circle, sized
+    heading).
+
 - **Skia vendoring infrastructure** — `canvas` will render with real Skia
   (the prebuilt `libSkiaSharp` that ships behind Avalonia / Uno / .NET MAUI,
   exposing Skia's flat `sk_*` C API). It is **fetched, not committed, and
