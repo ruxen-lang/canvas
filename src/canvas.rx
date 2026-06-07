@@ -123,6 +123,44 @@ class Canvas
     self.status_to_result(code, "draw_line")
   end
 
+  ## Fill a rectangle with a 2-stop linear gradient from color `c0` at
+  ## (gx0, gy0) to `c1` at (gx1, gy1). Antialiased; Skia-only.
+  def var fill_rect_gradient(rect: Rect, gx0: Float32, gy0: Float32, gx1: Float32, gy1: Float32, c0: Color, c1: Color) -> Result[nil, String]
+    let code = self.raw.fill_rect_gradient_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      gx0 as Float, gy0 as Float, gx1 as Float, gy1 as Float,
+      c0.to_argb as Int, c1.to_argb as Int)
+    self.status_to_result(code, "fill_rect_gradient")
+  end
+
+  ## Fill a rounded rectangle (uniform `radius`) with a 2-stop linear gradient —
+  ## the gradient button background. Antialiased; Skia-only.
+  def var fill_round_rect_gradient(rect: Rect, radius: Float32, gx0: Float32, gy0: Float32, gx1: Float32, gy1: Float32, c0: Color, c1: Color) -> Result[nil, String]
+    let code = self.raw.fill_round_rect_gradient_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, gx0 as Float, gy0 as Float, gx1 as Float, gy1 as Float,
+      c0.to_argb as Int, c1.to_argb as Int)
+    self.status_to_result(code, "fill_round_rect_gradient")
+  end
+
+  ## Fill a circle with a 2-stop radial gradient: `center` color at (cx, cy)
+  ## fading to `rim` at the edge. Antialiased; Skia-only.
+  def var fill_circle_radial(cx: Float32, cy: Float32, radius: Float32, center: Color, rim: Color) -> Result[nil, String]
+    let code = self.raw.fill_circle_radial_raw(
+      cx as Float, cy as Float, radius as Float, center.to_argb as Int, rim.to_argb as Int)
+    self.status_to_result(code, "fill_circle_radial")
+  end
+
+  ## Draw a soft drop shadow: a blurred rounded rectangle. `blur` is the blur
+  ## radius in pixels; offset `rect` to place the shadow under a widget.
+  ## Antialiased; Skia-only.
+  def var draw_round_rect_shadow(rect: Rect, radius: Float32, blur: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_round_rect_shadow_raw(
+      rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
+      radius as Float, blur as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_round_rect_shadow")
+  end
+
   ## Draw a single line of text with (x, y) as the BASELINE origin. Rendered
   ## with a real antialiased Skia font when the backend is active; otherwise an
   ## embedded 5x7 bitmap font (glyphs occupy the 7 px rows above y).

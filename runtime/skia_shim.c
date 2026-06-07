@@ -133,6 +133,13 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(rrect_new,                 "sk_rrect_new");
     RX_SK_OPTIONAL(rrect_delete,              "sk_rrect_delete");
     RX_SK_OPTIONAL(rrect_set_rect_radii,      "sk_rrect_set_rect_radii");
+    RX_SK_OPTIONAL(paint_set_shader,          "sk_paint_set_shader");
+    RX_SK_OPTIONAL(paint_set_maskfilter,      "sk_paint_set_maskfilter");
+    RX_SK_OPTIONAL(shader_new_linear_gradient,"sk_shader_new_linear_gradient");
+    RX_SK_OPTIONAL(shader_new_radial_gradient,"sk_shader_new_radial_gradient");
+    RX_SK_OPTIONAL(shader_unref,              "sk_shader_unref");
+    RX_SK_OPTIONAL(maskfilter_new_blur,       "sk_maskfilter_new_blur");
+    RX_SK_OPTIONAL(maskfilter_unref,          "sk_maskfilter_unref");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
@@ -544,6 +551,161 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
     sk_paint_t *paint = rx_make_paint(sk, argb, width);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* ---- gradients & shadows (Skia-only) ----
+ *
+ * Two-stop gradients (the common UI case) — colours arrive packed as
+ * 0xAARRGGBB; the shim builds the 2-element colour/point arrays locally so no
+ * array crosses the FFI. Soft shadows use a blur mask filter. All antialiased;
+ * RXC_ERR_NO_SKIA when the backend or the needed symbols are absent. */
+
+/* A fill paint carrying a 2-stop linear gradient between (x0,y0)->(x1,y1).
+ * The paint owns the shader (we drop our ref after set). NULL on failure. */
+static sk_paint_t *rx_linear_gradient_paint(const RxSkia *sk,
+        double x0, double y0, double x1, double y1, int64_t argb0, int64_t argb1) {
+    if (!sk->shader_new_linear_gradient || !sk->paint_set_shader || !sk->shader_unref) return NULL;
+    sk_point_t pts[2] = { { (float)x0, (float)y0 }, { (float)x1, (float)y1 } };
+    sk_color_t cols[2] = { (sk_color_t)(uint32_t)argb0, (sk_color_t)(uint32_t)argb1 };
+    sk_shader_t *sh = sk->shader_new_linear_gradient(pts, cols, NULL, 2, RX_SK_TILE_CLAMP, NULL);
+    if (!sh) return NULL;
+    sk_paint_t *p = sk->paint_new();
+    if (!p) { sk->shader_unref(sh); return NULL; }
+    sk->paint_set_antialias(p, 1);
+    sk->paint_set_style(p, RX_SK_PAINT_FILL);
+    sk->paint_set_shader(p, sh);
+    sk->shader_unref(sh);
+    return p;
+}
+
+/* A fill paint carrying a 2-stop radial gradient: argb0 at the centre,
+ * argb1 at the rim. NULL on failure. */
+static sk_paint_t *rx_radial_gradient_paint(const RxSkia *sk,
+        double cx, double cy, double radius, int64_t argb0, int64_t argb1) {
+    if (!sk->shader_new_radial_gradient || !sk->paint_set_shader || !sk->shader_unref) return NULL;
+    sk_point_t center = { (float)cx, (float)cy };
+    sk_color_t cols[2] = { (sk_color_t)(uint32_t)argb0, (sk_color_t)(uint32_t)argb1 };
+    sk_shader_t *sh = sk->shader_new_radial_gradient(&center, (float)radius, cols, NULL, 2,
+                                                     RX_SK_TILE_CLAMP, NULL);
+    if (!sh) return NULL;
+    sk_paint_t *p = sk->paint_new();
+    if (!p) { sk->shader_unref(sh); return NULL; }
+    sk->paint_set_antialias(p, 1);
+    sk->paint_set_style(p, RX_SK_PAINT_FILL);
+    sk->paint_set_shader(p, sh);
+    sk->shader_unref(sh);
+    return p;
+}
+
+/* Fill a rectangle with a 2-stop linear gradient. */
+int64_t ruxen_canvas_fill_rect_gradient(int64_t self, double x, double y, double w, double hgt,
+        double gx0, double gy0, double gx1, double gy1, int64_t argb0, int64_t argb1) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_rect) return RXC_ERR_NO_SKIA;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
+        !rxc_finite_pixels(hgt) || !rxc_finite_pixels(gx0) || !rxc_finite_pixels(gy0) ||
+        !rxc_finite_pixels(gx1) || !rxc_finite_pixels(gy1)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_linear_gradient_paint(sk, gx0, gy0, gx1, gy1, argb0, argb1);
+    if (!paint) return RXC_ERR_NO_SKIA;
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    sk->canvas_draw_rect(canvas, &rect, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Fill a uniform rounded rectangle with a 2-stop linear gradient (button bg). */
+int64_t ruxen_canvas_fill_round_rect_gradient(int64_t self, double x, double y, double w, double hgt,
+        double radius, double gx0, double gy0, double gx1, double gy1, int64_t argb0, int64_t argb1) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_round_rect) return RXC_ERR_NO_SKIA;
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
+        !rxc_finite_pixels(hgt) || !rxc_finite_pixels(radius) || !rxc_finite_pixels(gx0) ||
+        !rxc_finite_pixels(gy0) || !rxc_finite_pixels(gx1) || !rxc_finite_pixels(gy1)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double rad = radius > 0.0 ? radius : 0.0;
+    sk_paint_t *paint = rx_linear_gradient_paint(sk, gx0, gy0, gx1, gy1, argb0, argb1);
+    if (!paint) return RXC_ERR_NO_SKIA;
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Fill a circle with a 2-stop radial gradient (argb0 centre -> argb1 rim). */
+int64_t ruxen_canvas_fill_circle_radial(int64_t self, double cx, double cy, double radius,
+        int64_t argb0, int64_t argb1) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_oval) return RXC_ERR_NO_SKIA;
+    if (rxc_is_nan(radius) || !(radius > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) || !rxc_finite_pixels(radius)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_radial_gradient_paint(sk, cx, cy, radius, argb0, argb1);
+    if (!paint) return RXC_ERR_NO_SKIA;
+    sk_rect_t bounds = { (float)(cx - radius), (float)(cy - radius),
+                         (float)(cx + radius), (float)(cy + radius) };
+    sk->canvas_draw_oval(canvas, &bounds, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Draw a soft (blurred) rounded rectangle — a drop shadow. `blur` is the blur
+ * radius in pixels; the caller offsets the rect for the shadow direction. */
+int64_t ruxen_canvas_draw_round_rect_shadow(int64_t self, double x, double y, double w, double hgt,
+        double radius, double blur, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_draw_round_rect || !sk->maskfilter_new_blur ||
+        !sk->paint_set_maskfilter || !sk->maskfilter_unref) {
+        return RXC_ERR_NO_SKIA;
+    }
+    if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
+    if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
+        !rxc_finite_pixels(hgt) || !rxc_finite_pixels(radius) || !rxc_finite_pixels(blur)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    double rad = radius > 0.0 ? radius : 0.0;
+    sk_paint_t *paint = sk->paint_new();
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk->paint_set_antialias(paint, 1);
+    sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+    sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+    /* Skia blur sigma ~= radius/2 for a comparable visual spread. */
+    double sigma = blur > 0.0 ? blur * 0.5 : 0.0;
+    if (sigma > 0.0) {
+        sk_maskfilter_t *mf = sk->maskfilter_new_blur(RX_SK_BLUR_NORMAL, (float)sigma);
+        if (mf) {
+            sk->paint_set_maskfilter(paint, mf);
+            sk->maskfilter_unref(mf);
+        }
+    }
+    sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+    sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
     sk->paint_delete(paint);
     return RXC_OK;
 }

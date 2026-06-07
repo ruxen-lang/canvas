@@ -1,0 +1,182 @@
+# Pin tests for gradient fills and soft shadows (Skia-only). When Skia is
+# active we assert channel relationships (a gradient shifts hue across the
+# shape; a radial brightens the centre; a shadow spreads beyond a hard fill);
+# when absent these must return a clean Err.
+
+Tester.describe("Canvas.fill_rect_gradient") do |t: &var Tester|
+  t.it("shifts from c0 at one end to c1 at the other") do
+    var c = match Canvas.create(32, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    # horizontal: red at left -> blue at right
+    let res = c.fill_rect_gradient(Rect.new(0.0f32, 0.0f32, 32.0f32, 8.0f32),
+      0.0f32, 0.0f32, 32.0f32, 0.0f32, Color.rgb(255u8, 0u8, 0u8), Color.rgb(0u8, 0u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("fill_rect_gradient failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let left = c.read_pixel(2, 4)
+      let right = c.read_pixel(29, 4)
+      let lr = (left >> 16) & 0xFF
+      let lb = left & 0xFF
+      let rr = (right >> 16) & 0xFF
+      let rb = right & 0xFF
+      t.expect(lr > lb).to_eq(true)    # left end is reddish
+      t.expect(rb > rr).to_eq(true)    # right end is bluish
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.fill_round_rect_gradient") do |t: &var Tester|
+  t.it("fills a vertical gradient with carved corners") do
+    var c = match Canvas.create(32, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    # vertical: green at top -> blue at bottom
+    let res = c.fill_round_rect_gradient(Rect.new(0.0f32, 0.0f32, 32.0f32, 16.0f32), 6.0f32,
+      0.0f32, 0.0f32, 0.0f32, 16.0f32, Color.rgb(0u8, 255u8, 0u8), Color.rgb(0u8, 0u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("fill_round_rect_gradient failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      let top = c.read_pixel(16, 1)
+      let bottom = c.read_pixel(16, 14)
+      let tg = (top >> 8) & 0xFF
+      let bb = bottom & 0xFF
+      t.expect(tg > 100).to_eq(true)             # top is greenish
+      t.expect(bb > 100).to_eq(true)             # bottom is bluish
+      t.expect(c.read_pixel(0, 0)).to_eq(black)  # rounded corner carved
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.fill_circle_radial") do |t: &var Tester|
+  t.it("brightens the centre, leaves the corner") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let res = c.fill_circle_radial(16.0f32, 16.0f32, 12.0f32,
+      Color.rgb(255u8, 255u8, 255u8), Color.rgb(0u8, 0u8, 0u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("fill_circle_radial failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      let center = c.read_pixel(16, 16)
+      let cr = (center >> 16) & 0xFF
+      t.expect(cr > 150).to_eq(true)             # bright centre
+      t.expect(c.read_pixel(0, 0)).to_eq(black)  # outside the disc
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_round_rect_shadow") do |t: &var Tester|
+  t.it("spreads a soft shadow beyond a hard fill") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let res = c.draw_round_rect_shadow(Rect.new(10.0f32, 10.0f32, 12.0f32, 12.0f32),
+      4.0f32, 5.0f32, Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_round_rect_shadow failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      # blur spreads ink outside the 10..22 box; (7,16) is just outside the left
+      # edge and should be softly lit, while the far corner stays clear
+      let spill = c.read_pixel(7, 16)
+      t.expect(c.read_pixel(16, 16) != black).to_eq(true)  # shadow body
+      t.expect(spill != black).to_eq(true)                 # soft spill past the edge
+      t.expect(c.read_pixel(31, 31)).to_eq(black)          # far corner clear
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
