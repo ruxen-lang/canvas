@@ -563,10 +563,26 @@ static sk_font_t *rx_default_font(void) {
     if (tried) return font;
     tried = 1;
     const RxSkia *sk = rx_skia();
-    if (!sk->available || !sk->font_new_with_values) return NULL;
+    /* Require EVERY text symbol the font path uses (draw + measure + metrics),
+     * so draw_text/measure_text/text_height all make the same backend decision.
+     * If any is missing they fall back to the bitmap together — never Skia-draw
+     * with bitmap-measured advances (which would mis-center labels). */
+    if (!sk->available || !sk->font_new_with_values || !sk->canvas_draw_simple_text ||
+        !sk->font_measure_text || !sk->font_get_metrics) {
+        return NULL;
+    }
     sk_typeface_t *tf = sk->typeface_create_default ? sk->typeface_create_default() : NULL;
-    /* A NULL typeface is fine — Skia substitutes its default face. */
-    font = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    sk_font_t *f = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    if (!f) return NULL;
+    /* Guard against an empty-typeface font (some Skia builds give a NULL
+     * typeface zero glyphs — zero-width, no ink). A real face measures 'M' as a
+     * positive advance; if not, drop it so the bitmap path takes over. */
+    float probe = sk->font_measure_text(f, "M", 1, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(probe > 0.0f)) {
+        if (sk->font_delete) sk->font_delete(f);
+        return NULL;
+    }
+    font = f;
     return font;
 }
 
