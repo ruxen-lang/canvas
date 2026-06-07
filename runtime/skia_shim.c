@@ -607,7 +607,10 @@ int64_t ruxen_canvas_fill_rect_gradient(int64_t self, double x, double y, double
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    if (!canvas || !sk->canvas_draw_rect) return RXC_ERR_NO_SKIA;
+    if (!canvas || !sk->canvas_draw_rect || !sk->shader_new_linear_gradient ||
+        !sk->paint_set_shader || !sk->shader_unref) {
+        return RXC_ERR_NO_SKIA;
+    }
     if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
     if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
@@ -631,7 +634,10 @@ int64_t ruxen_canvas_fill_round_rect_gradient(int64_t self, double x, double y, 
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    if (!canvas || !sk->canvas_draw_round_rect) return RXC_ERR_NO_SKIA;
+    if (!canvas || !sk->canvas_draw_round_rect || !sk->shader_new_linear_gradient ||
+        !sk->paint_set_shader || !sk->shader_unref) {
+        return RXC_ERR_NO_SKIA;
+    }
     if (rxc_is_nan(w) || rxc_is_nan(hgt)) return RXC_ERR_BAD_ARGS;
     if (!(w > 0.0) || !(hgt > 0.0)) return RXC_OK;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(w) ||
@@ -656,7 +662,10 @@ int64_t ruxen_canvas_fill_circle_radial(int64_t self, double cx, double cy, doub
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    if (!canvas || !sk->canvas_draw_oval) return RXC_ERR_NO_SKIA;
+    if (!canvas || !sk->canvas_draw_oval || !sk->shader_new_radial_gradient ||
+        !sk->paint_set_shader || !sk->shader_unref) {
+        return RXC_ERR_NO_SKIA;
+    }
     if (rxc_is_nan(radius) || !(radius > 0.0)) return RXC_OK;
     if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) || !rxc_finite_pixels(radius)) {
         return RXC_ERR_BAD_ARGS;
@@ -730,7 +739,7 @@ static sk_font_t *rx_default_font(void) {
      * If any is missing they fall back to the bitmap together — never Skia-draw
      * with bitmap-measured advances (which would mis-center labels). */
     if (!sk->available || !sk->font_new_with_values || !sk->canvas_draw_simple_text ||
-        !sk->font_measure_text || !sk->font_get_metrics) {
+        !sk->font_measure_text || !sk->font_get_metrics || !sk->font_set_size) {
         return NULL;
     }
     sk_typeface_t *tf = sk->typeface_create_default ? sk->typeface_create_default() : NULL;
