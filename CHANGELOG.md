@@ -21,6 +21,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     straight into the existing `0xAARRGGBB` `RxHost.pixels` buffer, so the
     SDL presenter is untouched), and the 4-step discipline for growing the
     binding.
+- **Skia raster backend live for `clear` + `draw_rect`** — when libSkiaSharp
+  is present, both now render through a real Skia `sk_surface_new_raster_direct`
+  surface wrapping the host framebuffer (`kBGRA_8888`/premultiplied); when it is
+  absent the deterministic software path still runs, so the build never breaks.
+  `Canvas#skia_available?` reports library load; `Canvas#skia_active?` reports
+  whether *this* canvas is genuinely rendering through Skia. Opaque draws are
+  byte-identical across both backends (pin-tested).
 - **Live OS windows** (`runtime/sdl_window.c`): `Window.show` puts a real
   window on screen (SDL2 runtime via dlopen — no dev packages, zero
   link-time deps), `present` blits the canvas after `end_frame`, the pump

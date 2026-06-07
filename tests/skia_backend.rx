@@ -1,0 +1,116 @@
+# Pin tests for the Skia raster backend (ruxen_canvas_skia_available + the
+# Skia-routed clear/draw_rect). These assert backend-agnostic invariants so
+# they pass whether Skia is loaded or the software fallback is active: opaque
+# fills are byte-exact under both, which is the contract L2 relies on.
+
+Tester.describe("Canvas.skia_available?") do |t: &var Tester|
+  t.it("reports a backend without error") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # The probe must not crash and returns a definite Bool. We don't pin the
+    # value (it depends on whether runtime/fetch_skia.sh has run) — only that
+    # querying it is safe and total.
+    let avail = c.skia_available?
+    t.expect(avail == true || avail == false).to_eq(true)
+  end
+
+  t.it("skia_active? agrees with availability and is total") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # Whenever the library is available, a fixed-size raster surface must be
+    # creatable for this buffer, so active? follows available? here. (If the
+    # lib is absent both are false.) Either way the call is safe and total.
+    let active = c.skia_active?
+    t.expect(active == c.skia_available?).to_eq(true)
+  end
+end
+
+Tester.describe("Canvas Skia-routed drawing") do |t: &var Tester|
+  t.it("clear fills every pixel to an exact opaque color") do
+    var c = match Canvas.create(5, 3)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.new(10u8, 20u8, 30u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let want = Color.new(10u8, 20u8, 30u8, 255u8).to_argb as Int
+    t.expect(c.read_pixel(0, 0)).to_eq(want)
+    t.expect(c.read_pixel(4, 2)).to_eq(want)
+  end
+
+  t.it("draw_rect fills the integer box byte-exact and leaves the rest") do
+    var c = match Canvas.create(8, 6)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_rect(Rect.new(2.0f32, 1.0f32, 3.0f32, 2.0f32), Color.rgb(0u8, 128u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let fill = Color.rgb(0u8, 128u8, 255u8).to_argb as Int
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    # interior of the half-open box [2,5) x [1,3)
+    t.expect(c.read_pixel(2, 1)).to_eq(fill)
+    t.expect(c.read_pixel(4, 2)).to_eq(fill)
+    # exclusive right/bottom edges and outside stay background
+    t.expect(c.read_pixel(5, 1)).to_eq(bg)
+    t.expect(c.read_pixel(2, 3)).to_eq(bg)
+    t.expect(c.read_pixel(0, 0)).to_eq(bg)
+  end
+
+  t.it("source-over keeps opaque output opaque (premul-safe)") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    # 50% white over opaque black -> opaque mid-gray, regardless of backend.
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 2.0f32, 2.0f32), Color.new(255u8, 255u8, 255u8, 128u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("blend draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let px = c.read_pixel(0, 0)
+    let a = (px >> 24) & 0xFF
+    let r = (px >> 16) & 0xFF
+    t.expect(a).to_eq(255)
+    t.expect(r >= 120 && r <= 135).to_eq(true)
+  end
+end

@@ -140,6 +140,8 @@ class RawHost
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
+    def skia_available_raw as "ruxen_canvas_skia_available"(self) -> Bool
+    def skia_active_raw as "ruxen_canvas_skia_active"(self) -> Bool
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
@@ -244,6 +246,22 @@ class Canvas
   ## The font's line height (ascent above the baseline), in pixels.
   def text_height -> Int
     self.raw.text_height_raw
+  end
+
+  ## True when the real Skia backend is loaded and rendering; false when the
+  ## shim is on its deterministic software-raster fallback (Skia native lib
+  ## not fetched — see docs/SKIA.md). A capability probe for L2/tests; drawing
+  ## works either way.
+  def skia_available? -> Bool
+    self.raw.skia_available_raw
+  end
+
+  ## True only when THIS canvas has a live Skia raster surface — Skia is loaded
+  ## AND the surface was created for this framebuffer, so draws genuinely go
+  ## through Skia rather than silently falling back to software. (`skia_available?`
+  ## reports library load; this reports actual per-canvas rendering.)
+  def var skia_active? -> Bool
+    self.raw.skia_active_raw
   end
 
   ## INTERNAL (used by Window.open): attach the live OS window. Mirrors

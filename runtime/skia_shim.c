@@ -24,10 +24,14 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
+#include <dlfcn.h>
 
 #include "rx_canvas_internal.h"
+#include "skia/skia_capi.h"
 
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
@@ -47,6 +51,129 @@ static int rxc_finite_pixels(double v) {
     return v > -1.0e9 && v < 1.0e9;
 }
 
+
+/* ---- Skia loader (dlopen, lazy, process-wide singleton) ----
+ *
+ * libSkiaSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here — never
+ * linked (see docs/SKIA.md). rx_skia() resolves the sk_* table on first call;
+ * if the library or any required symbol is missing, ->available stays 0 and
+ * every drawing op falls back to the software raster path below. */
+
+static void *rx_skia_dlopen(void) {
+    /* Search order: explicit override, the fetch-script cache, then the system
+     * loader. dlopen of an absolute path is CWD-independent. */
+    const char *env = getenv("RUXEN_CANVAS_SKIA");
+    if (env && env[0]) {
+        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    char path[4096];
+    const char *cache = getenv("RUXEN_CANVAS_CACHE");
+    if (cache && cache[0]) {
+        snprintf(path, sizeof(path), "%s/libSkiaSharp.so", cache);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libSkiaSharp.so", home);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return dlopen("libSkiaSharp.so", RTLD_NOW | RTLD_LOCAL);
+}
+
+const RxSkia *rx_skia(void) {
+    static RxSkia skia;       /* zero-initialized: available = 0 */
+    static int initialized = 0;
+    if (initialized) return &skia;
+    initialized = 1;
+
+    void *lib = rx_skia_dlopen();
+    if (!lib) return &skia;   /* not available; software fallback */
+
+    /* Two resolution tiers (incremental-FFI discipline, docs/FFI.md):
+     *
+     *  - REQUIRED: the symbols every currently-implemented op needs (surface
+     *    setup + clear + draw_rect). A miss here disables the whole backend so
+     *    we never half-use a mismatched library — ->available stays 0 and we
+     *    fall back to software.
+     *  - OPTIONAL: symbols for capabilities bound in later commits (ovals,
+     *    rounded rects, lines, text). They are resolved into the table when
+     *    present, but a miss does NOT disable the backend; each wrapping method
+     *    must null-check its own pointer before calling and return Err if it is
+     *    absent. This keeps an older/newer library from silently dropping the
+     *    whole backend just because one not-yet-used symbol was renamed. */
+    int ok = 1;
+#define RX_SK_REQUIRED(field, sym)                                  \
+    do {                                                            \
+        *(void **)(&skia.field) = dlsym(lib, sym);                  \
+        if (!skia.field) ok = 0;                                    \
+    } while (0)
+#define RX_SK_OPTIONAL(field, sym)                                  \
+    do { *(void **)(&skia.field) = dlsym(lib, sym); } while (0)
+
+    RX_SK_REQUIRED(surface_new_raster_direct, "sk_surface_new_raster_direct");
+    RX_SK_REQUIRED(surface_get_canvas,        "sk_surface_get_canvas");
+    RX_SK_REQUIRED(surface_unref,             "sk_surface_unref");
+    RX_SK_REQUIRED(canvas_clear,              "sk_canvas_clear");
+    RX_SK_REQUIRED(canvas_draw_rect,          "sk_canvas_draw_rect");
+    RX_SK_REQUIRED(paint_new,                 "sk_paint_new");
+    RX_SK_REQUIRED(paint_delete,              "sk_paint_delete");
+    RX_SK_REQUIRED(paint_set_color,           "sk_paint_set_color");
+    RX_SK_REQUIRED(paint_set_antialias,       "sk_paint_set_antialias");
+    RX_SK_REQUIRED(paint_set_style,           "sk_paint_set_style");
+
+    RX_SK_OPTIONAL(paint_set_stroke_width,    "sk_paint_set_stroke_width");
+    RX_SK_OPTIONAL(canvas_draw_oval,          "sk_canvas_draw_oval");
+    RX_SK_OPTIONAL(canvas_draw_round_rect,    "sk_canvas_draw_round_rect");
+    RX_SK_OPTIONAL(canvas_draw_line,          "sk_canvas_draw_line");
+    RX_SK_OPTIONAL(canvas_draw_simple_text,   "sk_canvas_draw_simple_text");
+    RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
+    RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
+    RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
+    RX_SK_OPTIONAL(font_delete,               "sk_font_delete");
+    RX_SK_OPTIONAL(font_measure_text,         "sk_font_measure_text");
+    RX_SK_OPTIONAL(font_get_metrics,          "sk_font_get_metrics");
+#undef RX_SK_REQUIRED
+#undef RX_SK_OPTIONAL
+
+    /* Keep the handle open for the process lifetime (no dlclose): the resolved
+     * pointers must stay valid. */
+    skia.available = ok;
+    return &skia;
+}
+
+/* Lazily create (once per host) a raster-direct Skia surface that wraps the
+ * host's own 0xAARRGGBB framebuffer, and return its canvas — or NULL when Skia
+ * is unavailable / creation failed. The surface is cached on the host and torn
+ * down in host_drop before the pixels are freed. */
+static sk_canvas_t *rx_host_canvas(RxHost *h) {
+    if (!h) return NULL;
+    if (h->sk_canvas) return (sk_canvas_t *)h->sk_canvas;
+    if (h->sk_tried) return NULL;
+    h->sk_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available) return NULL;
+
+    sk_imageinfo_t info;
+    info.colorspace = NULL;
+    info.width      = h->width;
+    info.height     = h->height;
+    info.colorType  = RX_SK_COLORTYPE_BGRA_8888;  /* 0xAARRGGBB on LE == B,G,R,A */
+    info.alphaType  = RX_SK_ALPHA_PREMUL;
+
+    sk_surface_t *surf = sk->surface_new_raster_direct(
+        &info, h->pixels, (size_t)h->width * 4, NULL, NULL, NULL);
+    if (!surf) return NULL;
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) { sk->surface_unref(surf); return NULL; }
+
+    h->sk_surface = surf;
+    h->sk_canvas  = canvas;
+    return canvas;
+}
 
 
 /* ---- lifecycle ---- */
@@ -87,8 +214,36 @@ void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
     ruxen_canvas_window_note_host_dropped(self);
+    /* The Skia surface wraps h->pixels — unref it before freeing the buffer.
+     * (sk_canvas is owned by the surface; no separate release.) */
+    if (h->sk_surface) {
+        const RxSkia *sk = rx_skia();
+        if (sk->available) sk->surface_unref((sk_surface_t *)h->sk_surface);
+        h->sk_surface = NULL;
+        h->sk_canvas  = NULL;
+    }
     free(h->pixels);
     free(h);
+}
+
+/* True (1) when the real Skia library is loaded and its required symbols
+ * resolved; 0 when the shim is on its software-raster fallback. A process-wide
+ * capability probe (does not by itself prove a surface was created — see
+ * ruxen_canvas_skia_active for that). */
+int64_t ruxen_canvas_skia_available(int64_t self) {
+    (void)self;
+    return rx_skia()->available ? 1 : 0;
+}
+
+/* True (1) only when THIS host has a live Skia raster surface — i.e. Skia is
+ * loaded AND sk_surface_new_raster_direct actually succeeded for this buffer,
+ * so draws are genuinely going through Skia (not silently falling back). This
+ * is the unambiguous "Skia is rendering into me" signal the pin tests assert,
+ * forcing the surface to be created if it has not been yet. */
+int64_t ruxen_canvas_skia_active(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    return rx_host_canvas(h) != NULL ? 1 : 0;
 }
 
 int64_t ruxen_canvas_host_width(int64_t self) {
@@ -172,6 +327,15 @@ int64_t ruxen_canvas_clear(int64_t self, int64_t r, int64_t g, int64_t b, int64_
     RxHost *h = (RxHost *)self;
     if (!h || !rxc_check_color(r, g, b, a)) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (canvas) {
+        const RxSkia *sk = rx_skia();
+        sk->canvas_clear(canvas, (sk_color_t)rxc_pack(r, g, b, a));
+        return RXC_OK;
+    }
+
+    /* software fallback */
     uint32_t px = rxc_pack(r, g, b, a);
     int64_t n = (int64_t)h->width * h->height;
     for (int64_t i = 0; i < n; i++) h->pixels[i] = px;
@@ -193,6 +357,21 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
         return RXC_ERR_BAD_ARGS;
     }
 
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (canvas) {
+        const RxSkia *sk = rx_skia();
+        sk_paint_t *paint = sk->paint_new();
+        if (!paint) return RXC_ERR_BAD_ARGS;
+        sk->paint_set_antialias(paint, 0);   /* crisp integer-aligned edges */
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
+        sk->canvas_draw_rect(canvas, &rect, paint);   /* Skia clips to surface */
+        sk->paint_delete(paint);
+        return RXC_OK;
+    }
+
+    /* software fallback: half-open floor box [floor(x),floor(x+w)) clipped */
     int64_t x0 = rxc_floor_to_i64(x);
     int64_t y0 = rxc_floor_to_i64(y);
     int64_t x1 = rxc_floor_to_i64(x + w);

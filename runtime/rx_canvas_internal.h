@@ -47,7 +47,13 @@ typedef struct {
 typedef struct RxHost {
     int32_t   width;
     int32_t   height;
-    uint32_t *pixels;      /* width*height, 0xAARRGGBB, non-premultiplied */
+    /* width*height, packed 0xAARRGGBB. Alpha convention depends on the active
+     * backend: the software raster path stores STRAIGHT (non-premultiplied)
+     * alpha; when the Skia backend is live the buffer holds PREMULTIPLIED alpha
+     * (the surface is created kBGRA_8888 / kPremul). The two agree for opaque
+     * pixels (a=255), which is why opaque draws read back identically under
+     * both. The SDL presenter only ever displays it, so it is agnostic. */
+    uint32_t *pixels;
     int32_t   in_frame;    /* begin_frame/end_frame discipline flag */
 
     /* event ring buffer (filled by the platform pump or by tests) */
@@ -55,6 +61,16 @@ typedef struct RxHost {
     int32_t   ev_head;
     int32_t   ev_count;
     RxEvent   pending;     /* the event most recently popped by poll */
+
+    /* Skia raster-direct state (trailing — invisible to sdl_window.c's
+     * RxHostPrefix view). Kept as void pointers so this header stays decoupled
+     * from skia_capi.h; skia_shim.c casts them to the sk_surface_t / sk_canvas_t
+     * handle types. The surface wraps `pixels` for the host's lifetime; NULL
+     * when Skia is unavailable or surface creation failed (sk_tried records the
+     * attempt so we don't retry every draw). */
+    void     *sk_surface;
+    void     *sk_canvas;
+    int32_t   sk_tried;
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */
