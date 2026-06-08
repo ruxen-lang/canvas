@@ -60,6 +60,7 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define RX_EV_RESIZE       4
 #define RX_EV_CLOSE        5
 #define RX_EV_SCROLL       6
+#define RX_EV_TEXT_INPUT   7
 
 /* ---- SDL2 constants (from the stable public ABI) ---- */
 #define SDL_INIT_VIDEO            0x00000020u
@@ -71,10 +72,31 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define SDL_QUIT_EV               0x100u
 #define SDL_WINDOWEVENT_EV        0x200u
 #define SDL_KEYDOWN_EV            0x300u
+#define SDL_TEXTINPUT_EV          0x303u
 #define SDL_MOUSEMOTION_EV        0x400u
 #define SDL_MOUSEBUTTONDOWN_EV    0x401u
 #define SDL_MOUSEBUTTONUP_EV      0x402u
 #define SDL_MOUSEWHEEL_EV         0x403u
+/* SDL_KeyboardEvent ABI: state@12, repeat@13 (Uint8), keysym.sym@20 (verified
+ * against SDL_events.h on this host — the repeat flag is at 13, NOT 10). */
+#define SDL_KEY_REPEAT_OFF        13
+/* SDL_TextInputEvent: the UTF-8 NUL-terminated text starts at offset 12. */
+#define SDL_TEXTINPUT_TEXT_OFF    12
+
+/* Control keysyms we still forward via KeyDown (TextInput owns printable chars).
+ * SDLK values: editing + navigation. The arrow keys are SDLK_RIGHT/LEFT/DOWN/UP
+ * = 0x4000004F..52 | (1<<30) = 1073741903..1073741906. */
+#define SDLK_BACKSPACE   8
+#define SDLK_TAB         9
+#define SDLK_RETURN      13
+#define SDLK_ESCAPE      27
+#define SDLK_DELETE      127
+#define SDLK_RIGHT       1073741903
+#define SDLK_LEFT        1073741904
+#define SDLK_DOWN        1073741905
+#define SDLK_UP          1073741906
+#define SDLK_HOME        1073741898
+#define SDLK_END         1073741901
 /* SDL_WindowEventID subtype (SDL_WindowEvent.event @ byte 12, Uint8). */
 #define SDL_WINDOWEVENT_RESIZED   5
 /* SDL_WINDOW_RESIZABLE — let the user resize the window; we re-create the GPU
@@ -131,6 +153,10 @@ static void  (*s_DestroyTexture)(void *);
 static void  (*s_DestroyRenderer)(void *);
 static void  (*s_DestroyWindow)(void *);
 static const char *(*s_GetError)(void);
+/* Text-input mode: when started, SDL emits SDL_TEXTINPUT (layout/shift-correct
+ * UTF-8) instead of relying on raw keysyms. OPTIONAL — a miss just means no text
+ * events (control keys via KEYDOWN still work). */
+static void  (*s_StartTextInput)(void);
 
 /* GL-context entry points (resolved best-effort; a miss only disables the GPU
  * path — the raster path above never depends on them). These are the SDL side
@@ -195,6 +221,13 @@ static void *s_mtl_drawable = NULL;   /* the frame's CAMetalDrawable, or NULL */
 
 static void *sym(const char *name) { return dlsym(s_lib, name); }
 
+/* Begin SDL text-input mode so the pump receives SDL_TEXTINPUT (layout/shift-
+ * correct UTF-8) for printable typing. Called once after a window is created;
+ * a no-op when SDL_StartTextInput is unavailable. */
+static void rx_start_text_input(void) {
+    if (s_StartTextInput) s_StartTextInput();
+}
+
 static int load_sdl(void) {
     if (s_lib) return 1;
     /* Host-aware: try a candidate list, first that dlopen()s wins. macOS does
@@ -231,6 +264,7 @@ static int load_sdl(void) {
     s_DestroyRenderer= (void (*)(void *))sym("SDL_DestroyRenderer");
     s_DestroyWindow  = (void (*)(void *))sym("SDL_DestroyWindow");
     s_GetError       = (const char *(*)(void))sym("SDL_GetError");
+    s_StartTextInput = (void (*)(void))sym("SDL_StartTextInput");  /* OPTIONAL */
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
         !s_UpdateTexture || !s_RenderClear || !s_RenderCopy || !s_RenderPresent ||
         !s_PollEvent) {
@@ -370,6 +404,7 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
             s_out_h = oh;
         }
     }
+    rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
     s_owner = (void *)h;
     return RXC_OK;
 }
@@ -473,6 +508,7 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
     s_scale = ws;
     s_tex_w = h->width;     /* reuse the size guard fields for the GL window */
     s_tex_h = h->height;
+    rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
     s_owner = (void *)h;
     return RXC_OK;
 }
@@ -586,6 +622,7 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
     s_scale = ws;
     s_tex_w = dpw;
     s_tex_h = dph;
+    rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
     s_owner = (void *)h;
     return RXC_OK;
 }
@@ -670,6 +707,45 @@ static double rx_map_point(int32_t window_point) {
     return (double)window_point / (double)(s_scale > 0 ? s_scale : 1);
 }
 
+/* Decode the FIRST UTF-8 character of a NUL-terminated string to a Unicode
+ * codepoint (>= 0), or -1 on an empty/invalid lead byte. ASCII is the fast path;
+ * 2–4 byte sequences are decoded with continuation-byte validation. An SDL
+ * SDL_TEXTINPUT carries one grapheme per event in practice, so the first char is
+ * the typed codepoint. */
+static int32_t rx_utf8_first_codepoint(const unsigned char *s) {
+    if (!s || s[0] == 0) return -1;
+    unsigned char c0 = s[0];
+    if (c0 < 0x80) return (int32_t)c0;                       /* ASCII */
+    if ((c0 & 0xE0) == 0xC0) {                               /* 2-byte */
+        if ((s[1] & 0xC0) != 0x80) return -1;
+        return ((c0 & 0x1F) << 6) | (s[1] & 0x3F);
+    }
+    if ((c0 & 0xF0) == 0xE0) {                               /* 3-byte */
+        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80) return -1;
+        return ((c0 & 0x0F) << 12) | ((s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+    }
+    if ((c0 & 0xF8) == 0xF0) {                               /* 4-byte */
+        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80 || (s[3] & 0xC0) != 0x80) return -1;
+        return ((c0 & 0x07) << 18) | ((s[1] & 0x3F) << 12) |
+               ((s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+    }
+    return -1;   /* invalid lead byte */
+}
+
+/* True for the CONTROL keysyms we forward via KeyDown (editing + navigation).
+ * Printable characters are NOT forwarded here — they arrive as SDL_TEXTINPUT.
+ * This is the allowlist that keeps raw keysyms from inserting garbage. */
+static int rx_is_control_keysym(int32_t sym) {
+    switch (sym) {
+    case SDLK_BACKSPACE: case SDLK_TAB:   case SDLK_RETURN: case SDLK_ESCAPE:
+    case SDLK_DELETE:    case SDLK_LEFT:   case SDLK_RIGHT:  case SDLK_UP:
+    case SDLK_DOWN:      case SDLK_HOME:   case SDLK_END:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /* shim hook: invalidate a windowed GL host's persistent GPU surface so the next
  * begin_frame rebuilds it at the new backing size (defined in skia_shim.c). */
 void ruxen_canvas_host_gl_invalidate_surface(int64_t self);
@@ -731,11 +807,30 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
             ruxen_canvas_push_event(self, RX_EV_SCROLL, (double)xi, (double)yi);
             forwarded++;
             break;
-        case SDL_KEYDOWN_EV:
-            memcpy(&sym, ev + 20, 4);
-            ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
-            forwarded++;
+        case SDL_TEXTINPUT_EV: {
+            /* SDL_TextInputEvent: NUL-terminated UTF-8 at offset 12. This is the
+             * ONLY path that inserts printable characters (layout/shift-correct).
+             * Emit the first codepoint as Event.TextInput. */
+            int32_t cp = rx_utf8_first_codepoint(ev + SDL_TEXTINPUT_TEXT_OFF);
+            if (cp >= 0) {
+                ruxen_canvas_push_event(self, RX_EV_TEXT_INPUT, (double)cp, 0.0);
+                forwarded++;
+            }
             break;
+        }
+        case SDL_KEYDOWN_EV: {
+            /* Skip auto-repeat (held key) so a control key doesn't machine-gun. */
+            if (ev[SDL_KEY_REPEAT_OFF] != 0) break;
+            memcpy(&sym, ev + 20, 4);
+            /* Forward CONTROL keys only — editing/navigation. Printable chars are
+             * owned by SDL_TEXTINPUT above; forwarding their raw keysyms here
+             * would insert garbage (no shift/layout). */
+            if (rx_is_control_keysym(sym)) {
+                ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
+                forwarded++;
+            }
+            break;
+        }
         case SDL_WINDOWEVENT_EV: {
             /* SDL_WindowEvent: Uint8 event @ 12, Sint32 data1 @ 16, data2 @ 20.
              * On RESIZED, data1/data2 are the new window size in POINTS; we emit
@@ -779,6 +874,29 @@ int64_t ruxen_canvas_window_pump_test_pointer(int64_t self, int64_t show_scale,
                             rx_map_point((int32_t)win_x), rx_map_point((int32_t)win_y));
     s_scale = saved;
     return RXC_OK;
+}
+
+/* Test seam: run the pump's SDL_TEXTINPUT handling on a synthetic UTF-8 string —
+ * decode the first codepoint and emit Event.TextInput (or nothing on invalid).
+ * Returns the codepoint pushed (>= 0), or -1 when nothing was emitted. */
+int64_t ruxen_canvas_window_pump_test_text(int64_t self, int64_t utf8_ptr) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    const unsigned char *s = (const unsigned char *)utf8_ptr;
+    int32_t cp = rx_utf8_first_codepoint(s);
+    if (cp >= 0) ruxen_canvas_push_event(self, RX_EV_TEXT_INPUT, (double)cp, 0.0);
+    return (int64_t)cp;
+}
+
+/* Test seam: run the pump's SDL_KEYDOWN handling on a synthetic (keysym, repeat).
+ * Applies the SAME filter the pump uses: skip when repeat != 0; emit KeyDown only
+ * for control keysyms (printable keysyms are dropped — TextInput owns them).
+ * Returns 1 if a KeyDown was emitted, 0 if filtered. */
+int64_t ruxen_canvas_window_pump_test_keydown(int64_t self, int64_t sym, int64_t repeat) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    if (repeat != 0) return 0;                       /* auto-repeat: filtered */
+    if (!rx_is_control_keysym((int32_t)sym)) return 0; /* printable: filtered */
+    ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
+    return 1;
 }
 
 /* Tear the window down (idempotent). The dlopen handle stays cached.

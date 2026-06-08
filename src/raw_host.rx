@@ -97,9 +97,12 @@ class RawHost
     def window_metal_drawable_size as "ruxen_canvas_window_metal_drawable_size"(self) -> Int
     def self.sdl_available as "ruxen_canvas_sdl_available" -> Int
     def self.window_metal_available as "ruxen_canvas_window_metal_available" -> Int
-    # Test seam: run the pump's exact point->design mapping (/ show_scale) on a
-    # synthetic window-point pointer event, pushing the design-mapped result into
-    # the ring — so the coord math is headless-verifiable without a live window.
+    # Test seams: run the pump's exact handling on synthetic events headlessly.
+    # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
+    # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:
+    # repeat + control-only filter -> KeyDown (returns 1 emitted / 0 filtered).
     def window_pump_test_pointer as "ruxen_canvas_window_pump_test_pointer"(self, show_scale: Int, win_x: Int, win_y: Int) -> Int
+    def window_pump_test_text as "ruxen_canvas_window_pump_test_text"(self, utf8: &String) -> Int
+    def window_pump_test_keydown as "ruxen_canvas_window_pump_test_keydown"(self, sym: Int, repeat: Int) -> Int
   end
 end
