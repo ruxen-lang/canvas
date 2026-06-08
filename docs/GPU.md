@@ -17,6 +17,40 @@ Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md
 > pending a GL-capable desktop (CI/this host are headless); the
 > `tests/gpu_backend.rx` smoke pin covers capability + clean fallback.
 
+> **Metal feasibility gate (2026-06-08) — BLOCKED on the current binary.**
+> A follow-up cycle attempted the Metal (Apple) backend. Step-0 feasibility
+> check found that **Metal is not functional in the `libSkiaSharp` we fetch**,
+> so the work was stopped (no stub / no fake path) per the gate:
+>
+> - We fetch **`SkiaSharp.NativeAssets.Linux` 3.119.4** (`runtime/fetch_skia.sh`
+>   pulls `runtimes/<linux-RID>/native/libSkiaSharp.so`). It is a **Linux**
+>   build, compiled with **`SK_METAL` undefined** (Linux has no Metal).
+> - In SkiaSharp's native C wrapper (`mono/skia@skiasharp`,
+>   `src/c/gr_context.cpp` + `src/c/sk_types_priv.h`), the Metal entry points
+>   `gr_direct_context_make_metal` / `gr_backendrendertarget_new_metal` are
+>   written as `SK_ONLY_METAL(<real metal body>, nullptr)`. When `SK_METAL` is
+>   off, `SK_ONLY_METAL` expands (via `SK_SKIP_ARG`) to just the fallback —
+>   so the function is **still exported as a symbol but its body is
+>   `return nullptr;`**. The header declares it unconditionally; only the body
+>   is compiled out.
+> - **Consequence:** `dlsym("gr_direct_context_make_metal")` would *succeed* on
+>   this `.so`, but **calling it always returns NULL** — there is no real Metal
+>   device path in this binary. A Metal rung built against it would resolve its
+>   symbols, then fall back to raster on every host (a useless rung that lies in
+>   its capability probe). That is exactly the "silently-wrong / non-functional
+>   GPU path" the invariants forbid.
+> - SDL's Metal layer side (`SDL_Metal_CreateView` / `SDL_Metal_GetLayer`) is
+>   fine and dlopen-resolvable; the block is **purely the Skia binary**, not SDL.
+>
+> **To unblock Metal later** (out of scope for the headless host): fetch the
+> **`SkiaSharp.NativeAssets.macOS`** package (a *separate* NuGet, confirmed to
+> exist) for `osx-arm64` / `osx-x64` — that build has `SK_METAL=1` and real
+> Metal bodies — and SHA-pin it per-RID in `fetch_skia.sh` alongside the Linux
+> one. Only then do `gr_direct_context_make_metal` / `_new_metal` create a live
+> context. The GL rung already landed is unaffected. Until that macOS binary is
+> wired + pinned, the **Metal backend cannot be soundly implemented** and stays
+> deferred; GL + raster cover the GPU/fallback story.
+
 This is an architecture decision record. It decides *which* GPU API `canvas`
 targets per platform when it moves off CPU raster, and — equally important —
 *how* that move is structured so it does not disturb the `ruxen_canvas_*` ABI
