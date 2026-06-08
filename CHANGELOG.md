@@ -7,6 +7,37 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GPU surface backend — Metal (Apple), with HEADLESS GPU pixel verification.**
+  An additive rung behind the same `rx_gpu_context` seam / backend ladder /
+  probes, with the **unchanged `ruxen_canvas_*` ABI** (`docs/GPU.md`):
+  - **Offscreen, no-window GPU rendering.** `MTLCreateSystemDefaultDevice`
+    returns the system GPU with no display, so an offscreen Metal-backed
+    `SkSurface` (`gr_direct_context_make_metal` + a BGRA
+    `sk_surface_new_render_target`, Skia owning the `MTLTexture` — no
+    `CAMetalLayer`) renders on the GPU and `sk_surface_read_pixels` copies the
+    result back into the framebuffer. The **first GPU backend pixel-verified
+    locally**: `Canvas#enable_gpu_offscreen` → draw → `end_frame` (flush+submit,
+    then readback) → `read_pixel` sees real GPU output.
+  - **Device/queue via dlopen, no link-time dep.** Metal device + command queue
+    come from `Metal.framework` + the Obj-C runtime
+    (`MTLCreateSystemDefaultDevice`, `[device newCommandQueue]` through
+    `objc_msgSend`/`sel_registerName`), a process-wide singleton — same
+    fetch/dlopen discipline as Skia/SDL.
+  - **Seam/ladder intact.** `rx_host_canvas` already routes `is_gpu` hosts to the
+    GPU canvas; Metal reuses it, so every `ruxen_canvas_*` draw op is unchanged.
+    New `gpu_backend_kind` slot (`Canvas#gpu_backend_kind`: 0 none / 1 GL /
+    2 Metal) + `gpu_metal_available?`. Any failure falls back cleanly to raster
+    (never half-GPU, never wrong pixels). Teardown: surface → `GrDirectContext`
+    (`gr_recording_context_unref`); device/queue not per-host.
+  - **Pixel proof is a standalone example, not an in-harness draw.** Apple
+    forbids Metal across `fork()`-without-`exec()`; the test harness forks per
+    case and Metal's shader-compiler XPC service is unreachable post-fork (a
+    shader-compiling draw dies in the forked child). So
+    `examples/metal_offscreen_verify.c` is the committed, runnable proof
+    (`cc -O2 -o m examples/metal_offscreen_verify.c && ./m` → `PASS`, blue rect
+    read back byte-exact `0xFF0080FF`); the in-harness `tests/gpu_backend.rx`
+    pins capability + clean fallback only. Full windowed Metal (`CAMetalLayer`
+    via `SDL_Metal_*`) stays deferred (no display on this host).
 - **Skia is now ACTIVE on macOS (real local pixel verification).**
   `runtime/fetch_skia.sh` is host-aware: on macOS it fetches + SHA-256-pins the
   **`SkiaSharp.NativeAssets.macOS`** package and installs its **universal**

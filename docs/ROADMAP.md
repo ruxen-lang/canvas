@@ -127,11 +127,22 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
         up here because there is no SDL2 / display on this host, so `gpu_active?`
         stays false and drawing falls back cleanly. macOS GL is deprecated by
         Apple anyway — **Metal is the real Apple path**.
-      - **Metal: now UNBLOCKED.** The macOS `libSkiaSharp.dylib` we now fetch is
-        built `SK_METAL=1` (links `Metal.framework` / `MetalKit.framework`) and
-        exports real `gr_direct_context_make_metal` / `gr_backendrendertarget_new_metal`
-        (verified by `nm`). The earlier feasibility gate (blocked on the Linux
-        `.so`'s `nullptr` Metal stubs) is cleared on this binary. Next task.
+      - **Metal (Apple) LANDED — with headless GPU pixel verification.** The
+        macOS `libSkiaSharp.dylib` is `SK_METAL=1`, so Metal is real. An
+        **offscreen** Metal `SkSurface` (`gr_direct_context_make_metal` + a BGRA
+        `sk_surface_new_render_target`; device+queue via `Metal.framework` + the
+        objc runtime through `dlopen`) renders on the GPU with **no window**
+        (`MTLCreateSystemDefaultDevice` is headless), and `sk_surface_read_pixels`
+        reads the result back into the framebuffer on `end_frame` — the **first
+        GPU backend pixel-verified locally**. `Canvas#enable_gpu_offscreen` is the
+        no-window entry; `gpu_metal_available?` + `gpu_backend_kind == 2`
+        (`RX_GPU_KIND_METAL`) report it; selection/teardown reuse the GL seam.
+        Pixel proof is `examples/metal_offscreen_verify.c` (a standalone `PASS`,
+        blue rect read back byte-exact) — NOT an in-harness draw, because Apple
+        forbids Metal across `fork()`-without-`exec()` and the test harness forks
+        per case (`MTLCompilerService` unreachable post-fork). The in-harness
+        `tests/gpu_backend.rx` pins capability + clean fallback. Windowed Metal
+        (`CAMetalLayer` via `SDL_Metal_*`) stays deferred (no display here).
       - **Still deferred:** Vulkan — additive behind the same seam, per the ADR.
 
 ### Later cycles (large, sequenced)

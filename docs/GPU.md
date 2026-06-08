@@ -1,8 +1,48 @@
 # ADR: GPU surface backend (Ganesh) — GL vs Vulkan vs Metal per platform
 
-Status: **Accepted — GL backend implemented (GL-first); Metal/Vulkan deferred**
+Status: **Accepted — GL + Metal backends implemented; Vulkan deferred**
 Date: 2026-06-08
 Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md`.
+
+> **Metal backend landed (Apple) — with headless GPU pixel verification.** The
+> Metal rung is implemented behind the same seam/ladder/probes as GL, with the
+> `ruxen_canvas_*` ABI unchanged. The win: an **offscreen** Metal-backed
+> `SkSurface` renders on the GPU with **no window or display**
+> (`MTLCreateSystemDefaultDevice` returns the system GPU headless), and
+> `sk_surface_read_pixels` copies the result back to the framebuffer — so this is
+> the **first GPU backend pixel-verified locally**.
+>
+> - **Bound** (`runtime/skia_shim.c`): the Metal device + command queue from
+>   `Metal.framework` + the Obj-C runtime via `dlopen`
+>   (`MTLCreateSystemDefaultDevice`, `[device newCommandQueue]` through
+>   `objc_msgSend`/`sel_registerName`) — a process-wide singleton (`rx_metal`),
+>   no link-time dependency; `gr_direct_context_make_metal`; an offscreen BGRA
+>   `sk_surface_new_render_target` (Skia allocates the `MTLTexture` — no
+>   `CAMetalLayer`); `gr_direct_context_flush_and_submit(sync)` + the BGRA
+>   `sk_surface_read_pixels` into `h->pixels` on `end_frame`.
+> - **Seam/ladder/ABI:** `rx_host_canvas` already routes `is_gpu` hosts to the
+>   GPU canvas — Metal reuses it verbatim; all draw ops are unchanged. New
+>   `gpu_backend_kind` slot (0 none / 1 GL / 2 Metal) +
+>   `ruxen_canvas_gpu_backend_kind`; `Canvas#enable_gpu_offscreen` is the
+>   no-window entry; `gpu_metal_available?` gates it. Any failure falls back
+>   cleanly to raster (never half-GPU, never wrong pixels). Teardown: surface →
+>   GrDirectContext (`gr_recording_context_unref`); device/queue are the
+>   process-wide singleton.
+> - **Pixel verification is real but runs OUTSIDE the test harness.** Apple
+>   forbids Metal in a process that `fork()`s without `exec()`. The `ruxen test`
+>   harness forks per case, and Metal's runtime shader-compiler XPC service
+>   (`MTLCompilerService`) is unreachable post-fork — `clear` works there but a
+>   shader-compiling draw (`draw_rect`) dies in the forked child (verified: the
+>   same clear+draw_rect renders correctly in a non-forked process, blank in a
+>   forked child). So: `examples/metal_offscreen_verify.c` is a standalone,
+>   committed proof (`cc -O2 -o m examples/metal_offscreen_verify.c && ./m`
+>   prints `PASS`, reading the blue rect back byte-exact `0xFF0080FF`); the
+>   in-harness `tests/gpu_backend.rx` pins only the **capability + clean-fallback**
+>   contract (no forked Metal draw). The 100 raster tests stay the deterministic
+>   oracle.
+> - **Windowed Metal (on-screen, `CAMetalLayer` via `SDL_Metal_*`) stays
+>   deferred** — there is no display on this host, same as GL windowed; the
+>   offscreen path is what unlocks local GPU verification.
 
 > **Implementation status (update):** the **Ganesh GL** backend described below
 > has landed. The `rx_gpu_context` seam lives in `runtime/sdl_window.c`
@@ -12,10 +52,12 @@ Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md
 > `ruxen_canvas_gpu_available` / `_gpu_active`). The Ganesh symbols are bound as
 > an OPTIONAL loader tier (a miss disables only the GPU rung). Surface creation
 > is reached from `Window#show_gpu`, which falls back to the raster window path
-> on any failure. **Metal on Apple and Vulkan remain deferred**, additive behind
-> the same seam, exactly as decided here. Full GPU **pixel** verification is
-> pending a GL-capable desktop (CI/this host are headless); the
-> `tests/gpu_backend.rx` smoke pin covers capability + clean fallback.
+> on any failure. (**Metal on Apple has since landed** — see the Metal block
+> above; **Vulkan remains deferred**, additive behind the same seam.) Full GPU
+> **pixel** verification for the windowed GL path is pending a GL-capable desktop
+> (CI/this host are headless); the `tests/gpu_backend.rx` smoke pin covers
+> capability + clean fallback. The offscreen Metal path IS pixel-verified locally
+> (above).
 
 > **Metal feasibility gate (2026-06-08) — BLOCKED on the current binary.**
 > A follow-up cycle attempted the Metal (Apple) backend. Step-0 feasibility

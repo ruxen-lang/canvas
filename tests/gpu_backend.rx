@@ -154,3 +154,81 @@ Tester.describe("Window.show_gpu — live path") do |t: &var Tester|
     t.expect(w.canvas.read_pixel(0, 0)).to_eq(bg)
   end
 end
+
+# ---- Metal backend (Apple offscreen GPU; docs/GPU.md) ----
+#
+# The Metal backend renders to an OFFSCREEN GPU surface with NO window/display
+# (MTLCreateSystemDefaultDevice returns the GPU headless) and reads pixels back,
+# so it is the first GPU backend that CAN be pixel-verified locally — in a normal
+# process. It is verified end-to-end that way (clear + draw_rect read back
+# byte-exact 0xFF0080FF; see the commit + docs/GPU.md).
+#
+# IT IS NOT pixel-verified INSIDE THIS HARNESS, on purpose. Apple forbids using
+# Metal in a process that fork()s without exec(); the test harness runs each `it`
+# in a forked child, and Metal's runtime shader-compiler XPC service
+# (MTLCompilerService) is unreachable post-fork — `clear` works but any draw that
+# needs a runtime-compiled shader (draw_rect, etc.) dies in the forked child.
+# Verified: the identical clear+draw_rect renders correctly in a non-forked
+# process but produces nothing in a forked child. So these pins assert the
+# CAPABILITY + CLEAN-FALLBACK contract (safe everywhere), and the real GPU
+# render+readback is a standalone-process verification documented in docs/GPU.md
+# — NOT a forked draw here (which would hang/blank the child).
+
+Tester.describe("Canvas.gpu_metal_available?") do |t: &var Tester|
+  t.it("is total and safe to query, and backend_kind is sane") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let m = c.gpu_metal_available?
+    t.expect(m == true || m == false).to_eq(true)
+    # Metal implies the umbrella GPU capability (can't have Metal without a GPU
+    # backend being available).
+    if m
+      t.expect(c.gpu_available?).to_eq(true)
+    end
+    # An offscreen canvas that was never put into GPU mode is on the raster path:
+    # not GPU-active, backend kind = none (0). Never a draw here (fork-unsafe).
+    t.expect(c.gpu_active?).to_eq(false)
+    t.expect(c.gpu_backend_kind).to_eq(0)
+  end
+end
+
+Tester.describe("Metal backend falls back cleanly to raster") do |t: &var Tester|
+  t.it("readback stays byte-exact on the raster path (Metal not engaged)") do
+    # The non-negotiable invariant: when the Metal GPU path is NOT taken, drawing
+    # is byte-exact on the raster/software fallback. We deliberately do NOT call
+    # enable_gpu_offscreen here (the forked child cannot run Metal draws); this
+    # pins that the raster oracle the GPU path reuses for readback is correct.
+    var c = match Canvas.create(8, 6)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    t.expect(c.gpu_active?).to_eq(false)
+    t.expect(c.gpu_backend_kind).to_eq(0)
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_rect(Rect.new(2.0f32, 1.0f32, 3.0f32, 2.0f32), Color.rgb(0u8, 128u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let fill = Color.rgb(0u8, 128u8, 255u8).to_argb as Int
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    t.expect(c.read_pixel(2, 1)).to_eq(fill)
+    t.expect(c.read_pixel(4, 2)).to_eq(fill)
+    t.expect(c.read_pixel(5, 1)).to_eq(bg)
+    t.expect(c.read_pixel(0, 0)).to_eq(bg)
+  end
+end
