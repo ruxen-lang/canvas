@@ -361,19 +361,19 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
         case SDL_MOUSEMOTION_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_MOVE,
-                                    (double)(xi / s_scale), (double)(yi / s_scale));
+                                    (double)xi / s_scale, (double)yi / s_scale);
             forwarded++;
             break;
         case SDL_MOUSEBUTTONDOWN_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
-                                    (double)(xi / s_scale), (double)(yi / s_scale));
+                                    (double)xi / s_scale, (double)yi / s_scale);
             forwarded++;
             break;
         case SDL_MOUSEBUTTONUP_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_UP,
-                                    (double)(xi / s_scale), (double)(yi / s_scale));
+                                    (double)xi / s_scale, (double)yi / s_scale);
             forwarded++;
             break;
         case SDL_KEYDOWN_EV:
