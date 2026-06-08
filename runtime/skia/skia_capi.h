@@ -32,6 +32,7 @@ typedef struct sk_data_t       sk_data_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
+typedef struct sk_path_t       sk_path_t;
 
 /* Packed 0xAARRGGBB, matching our framebuffer + RxHost.pixels. */
 typedef uint32_t sk_color_t;
@@ -53,6 +54,11 @@ enum { RX_SK_BLUR_NORMAL = 0, RX_SK_BLUR_SOLID = 1, RX_SK_BLUR_OUTER = 2, RX_SK_
 enum { RX_SK_CLIP_DIFFERENCE = 0, RX_SK_CLIP_INTERSECT = 1 };
 /* sk_filter_mode_t */
 enum { RX_SK_FILTER_NEAREST = 0, RX_SK_FILTER_LINEAR = 1 };
+/* sk_path_filltype_t (probe-pinned by upstream SkiaSharp: winding = 0). */
+enum { RX_SK_PATH_FILL_WINDING = 0, RX_SK_PATH_FILL_EVENODD = 1 };
+/* arc_to large-arc / sweep flags (SVG semantics) */
+enum { RX_SK_PATH_ARC_SMALL = 0, RX_SK_PATH_ARC_LARGE = 1 };
+enum { RX_SK_PATH_ARC_CCW = 0, RX_SK_PATH_ARC_CW = 1 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -166,6 +172,24 @@ typedef float          (*pfn_font_measure_text)(const sk_font_t *, const void *t
         int encoding, sk_rect_t *bounds, const sk_paint_t *);
 typedef float          (*pfn_font_get_metrics)(const sk_font_t *, sk_fontmetrics_t *);
 
+/* ---- paths (arbitrary contours: lines, béziers, arcs) ----
+ * An sk_path is a mutable builder owned on the Ruxen side as an int64 handle;
+ * the shim appends verbs to it, then sk_canvas_draw_path fills/strokes it with
+ * a paint. arc_to uses SVG semantics: (rx, ry, x-axis-rotate-deg, large-arc,
+ * sweep, x, y). All coordinates are device pixels. */
+typedef sk_path_t *(*pfn_path_new)(void);
+typedef void       (*pfn_path_delete)(sk_path_t *);
+typedef void       (*pfn_path_move_to)(sk_path_t *, float x, float y);
+typedef void       (*pfn_path_line_to)(sk_path_t *, float x, float y);
+typedef void       (*pfn_path_quad_to)(sk_path_t *, float cx, float cy, float x, float y);
+typedef void       (*pfn_path_cubic_to)(sk_path_t *, float c1x, float c1y,
+        float c2x, float c2y, float x, float y);
+typedef void       (*pfn_path_arc_to)(sk_path_t *, float rx, float ry, float x_axis_rotate,
+        int large_arc, int sweep, float x, float y);
+typedef void       (*pfn_path_close)(sk_path_t *);
+typedef void       (*pfn_path_set_filltype)(sk_path_t *, int /*sk_path_filltype_t*/);
+typedef void       (*pfn_canvas_draw_path)(sk_canvas_t *, const sk_path_t *, const sk_paint_t *);
+
 /* ---- the resolved loader ---- */
 typedef struct {
     int available;    /* 1 iff the .so loaded and all required symbols resolved */
@@ -226,6 +250,17 @@ typedef struct {
     pfn_font_delete             font_delete;
     pfn_font_measure_text       font_measure_text;
     pfn_font_get_metrics        font_get_metrics;
+
+    pfn_path_new           path_new;
+    pfn_path_delete        path_delete;
+    pfn_path_move_to       path_move_to;
+    pfn_path_line_to       path_line_to;
+    pfn_path_quad_to       path_quad_to;
+    pfn_path_cubic_to      path_cubic_to;
+    pfn_path_arc_to        path_arc_to;
+    pfn_path_close         path_close;
+    pfn_path_set_filltype  path_set_filltype;
+    pfn_canvas_draw_path   canvas_draw_path;
 } RxSkia;
 
 /* Lazily dlopen()s libSkiaSharp and resolves the table on first call; returns

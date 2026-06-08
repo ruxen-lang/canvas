@@ -179,6 +179,21 @@ class Canvas
     self.status_to_result(code, "draw_line")
   end
 
+  ## Fill an arbitrary `path` (lines, béziers, arcs) with a solid color, using
+  ## the path's fill rule. The general primitive for icons and custom shapes.
+  ## Antialiased; Skia-only (Err otherwise — no software fallback for paths).
+  def var draw_path(path: &Path2D, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_path_raw(path.handle, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_path")
+  end
+
+  ## Stroke an arbitrary `path`'s outline with the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_path(path: &Path2D, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_path_raw(path.handle, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_path")
+  end
+
   ## Fill a rectangle with a 2-stop linear gradient from color `c0` at
   ## (gx0, gy0) to `c1` at (gx1, gy1). Antialiased; Skia-only.
   def var fill_rect_gradient(rect: Rect, gx0: Float32, gy0: Float32, gx1: Float32, gy1: Float32, c0: Color, c1: Color) -> Result[nil, String]

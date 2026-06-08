@@ -7,6 +7,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Arbitrary paths** — `draw_path` / `stroke_path` over a `Path2D` builder
+  (the highest-value missing L1 primitive: icons, custom containers, any
+  non-rect/rrect shape):
+  - `Path2D.create` allocates a Skia path (owns it, freed deterministically on
+    drop); builder ops `move_to` / `line_to` / `quad_to` / `cubic_to` /
+    `arc_to` (SVG-style elliptical arc) / `close`, plus `even_odd` / `winding`
+    fill-rule selection.
+  - `Canvas#draw_path(path, color)` fills and `#stroke_path(path, width, color)`
+    strokes the path (antialiased). Skia backend only — a clear `Err` when the
+    library is absent, never a silent no-op.
+  - Shim builds any coordinate arrays internally; only the int64 path handle and
+    scalar device-pixel coords cross the FFI (`runtime/skia_shim.c`
+    `ruxen_canvas_path_*` / `_draw_path`, `sk_path_*` / `sk_canvas_draw_path`).
+  - Pin tests: `tests/canvas_path.rx` (filled triangle + stroked square outline
+    by offscreen pixel readback; clean `Err` when Skia is inactive).
+- **GPU surface backend ADR** — `docs/GPU.md` records the GL-vs-Vulkan-vs-Metal
+  decision (Metal on Apple, OpenGL on Linux/Windows behind one context seam,
+  Vulkan deferred), grounded in the fetch+dlopen model and Ganesh `gr_*` C API,
+  and how it preserves the `ruxen_canvas_*` ABI + the CPU-raster fallback.
+  Design only — no GPU implementation.
 - **Images** — decode and draw PNG / JPEG / WebP:
   - `Image.load(path)` decodes a file into an `Image` (owns its pixels, freed
     deterministically on drop); `Image#width` / `#height`. `Err` when the file

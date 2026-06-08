@@ -58,8 +58,9 @@ configurable font size/family; then the GPU (Ganesh GL) surface.
 
 ## Open decisions
 
-- **GPU surface backend** — GL vs Vulkan vs Metal per platform (the `gr_`
-  Ganesh C API is present in the fetched lib for when we move off CPU raster).
+- _(none currently — the GPU surface backend is decided in `docs/GPU.md`:
+  Metal on Apple, OpenGL on Linux/Windows behind one context seam, Vulkan
+  deferred. Implementation is a later cycle.)_
 
 ## Later cycles
 
@@ -67,3 +68,50 @@ configurable font size/family; then the GPU (Ganesh GL) surface.
 - Text i18n / accessibility (HarfBuzz shaping + paragraph layout via a separate
   `HarfBuzzSharp` native lib + ICU).
 - Platform matrix: macOS/Windows/Linux → Android/iOS → web (WASM + canvas).
+
+## Remaining — tracked checklist
+
+Audited 2026-06-08 against `src/**`, `runtime/**`, and CHANGELOG `[Unreleased]`.
+Ordered by what unblocks `quiver`'s widget library soonest. `→ ruxen #X` marks a
+cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
+
+### Unblocked now (current language is sufficient — additive FFI, 4-step discipline)
+
+- [x] **`draw_path` — arbitrary Skia paths** (`sk_path_*`: moveTo/lineTo/quadTo/
+      cubicTo/arcTo/close, fill + stroke, fill-rule). The single highest-value
+      missing primitive: it's what L2 needs for icons, custom containers, and any
+      non-rect/rrect shape. Done: `Path2D` builder + `Canvas#draw_path` /
+      `#stroke_path`; pin tests in `tests/canvas_path.rx`.
+- [ ] **Layers — `save_layer` / `save_layer_alpha`** (`sk_canvas_save_layer`):
+      offscreen compositing for group opacity + blended overlays (the basis for
+      fade transitions and translucent panels). Pairs with the existing
+      save/restore stack.
+- [ ] **Configurable font *family*** — `draw_text_sized` resizes the shared
+      default typeface today; add family selection (`sk_typeface_*` /
+      `sk_fontmgr_*`) so widgets can pick a font, not just a size.
+- [ ] **Multi-window** — one window per process today; lift to N windows for
+      real apps (engine-level, not blocking the widget library).
+
+### Needs an architecture decision (design doc first, then implement)
+
+- [ ] **GPU surface backend (Ganesh)** — CPU raster only today. **Decision
+      recorded in `docs/GPU.md`** (Metal on Apple, OpenGL on Linux/Windows
+      behind one context seam, Vulkan deferred; `gr_*` C API already in the
+      fetched lib). The ADR is done; the *binding/implementation* is a later
+      cycle and slots behind the unchanged `ruxen_canvas_*` ABI.
+
+### Later cycles (large, sequenced)
+
+- [ ] **Text i18n / shaping** — HarfBuzz + ICU + paragraph layout (separate
+      `HarfBuzzSharp` native lib). Gates real international text in L2.
+- [ ] **Accessibility** — platform a11y trees.
+- [ ] **Platform matrix** — Windows → Android/iOS → web (WASM + canvas).
+
+### Compiler-imposed deviations to revert (blocked on ruxen)
+
+- [ ] `Event` pointer coords are `Int` logical pixels — enum **float payloads
+      miscompile**; the C ABI already carries doubles. Revert to float once
+      fixed. **→ ruxen** (file a `Q##` if not already tracked).
+- [ ] `measure_text` forwards a **char count**, not the string, over the FFI —
+      a borrowed `&String` into an FFI call passes the wrong pointer. Revert to
+      real advance width once fixed. **→ ruxen.**

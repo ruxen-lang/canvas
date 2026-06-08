@@ -1,0 +1,138 @@
+# Pin tests for arbitrary-path drawing: Canvas#draw_path (fill) and
+# Canvas#stroke_path (stroke), built with the Path2D builder (move_to / line_to
+# / close). These are Skia-only — with no library, Path2D.create and the draw
+# calls must return a clean Err (RXC_ERR_NO_SKIA), never crash. When Skia is
+# active we assert the rasterized pixels: a filled triangle covers its interior
+# and leaves a corner of the square outside it; a stroked triangle inks its
+# edge and leaves the interior background.
+
+Tester.describe("Canvas.draw_path") do |t: &var Tester|
+  t.it("fills a triangle, leaves the opposite corner") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+
+    var pres = Path2D.create
+    if active
+      var p = match pres
+        Ok(v)  -> v
+        Err(_) -> panic!("Path2D.create failed")
+      end
+      # a triangle with a right angle at the top-left: (1,1)-(14,1)-(1,14)
+      match p.move_to(1.0f32, 1.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("move_to failed")
+      end
+      match p.line_to(14.0f32, 1.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("line_to failed")
+      end
+      match p.line_to(1.0f32, 14.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("line_to failed")
+      end
+      match p.close
+        Ok(_)  -> nil
+        Err(_) -> panic!("close failed")
+      end
+
+      match c.begin_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("begin_frame failed")
+      end
+      match c.clear(Color.rgb(0u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+      let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      match c.draw_path(&p, Color.rgb(255u8, 255u8, 255u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_path failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(3, 3)).to_eq(white)     # inside the triangle
+      t.expect(c.read_pixel(14, 14)).to_eq(black)   # opposite corner, outside
+    else
+      # Skia absent: Path2D.create must be a clean Err, not a crash.
+      var failed = false
+      match pres
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.stroke_path") do |t: &var Tester|
+  t.it("inks the outline, leaves the interior") do
+    var c = match Canvas.create(20, 20)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+
+    var pres = Path2D.create
+    if active
+      var p = match pres
+        Ok(v)  -> v
+        Err(_) -> panic!("Path2D.create failed")
+      end
+      # a closed square outline well inside the surface
+      match p.move_to(4.0f32, 4.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("move_to failed")
+      end
+      match p.line_to(16.0f32, 4.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("line_to failed")
+      end
+      match p.line_to(16.0f32, 16.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("line_to failed")
+      end
+      match p.line_to(4.0f32, 16.0f32)
+        Ok(_)  -> nil
+        Err(_) -> panic!("line_to failed")
+      end
+      match p.close
+        Ok(_)  -> nil
+        Err(_) -> panic!("close failed")
+      end
+
+      match c.begin_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("begin_frame failed")
+      end
+      match c.clear(Color.rgb(0u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+      let white = Color.rgb(255u8, 255u8, 255u8).to_argb as Int
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      match c.stroke_path(&p, 2.0f32, Color.rgb(255u8, 255u8, 255u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("stroke_path failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(4, 10)).to_eq(white)    # on the left edge stroke
+      t.expect(c.read_pixel(10, 10)).to_eq(black)   # interior, not stroked
+    else
+      var failed = false
+      match pres
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

@@ -163,6 +163,16 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(font_delete,               "sk_font_delete");
     RX_SK_OPTIONAL(font_measure_text,         "sk_font_measure_text");
     RX_SK_OPTIONAL(font_get_metrics,          "sk_font_get_metrics");
+    RX_SK_OPTIONAL(path_new,                  "sk_path_new");
+    RX_SK_OPTIONAL(path_delete,               "sk_path_delete");
+    RX_SK_OPTIONAL(path_move_to,              "sk_path_move_to");
+    RX_SK_OPTIONAL(path_line_to,              "sk_path_line_to");
+    RX_SK_OPTIONAL(path_quad_to,              "sk_path_quad_to");
+    RX_SK_OPTIONAL(path_cubic_to,             "sk_path_cubic_to");
+    RX_SK_OPTIONAL(path_arc_to,               "sk_path_arc_to");
+    RX_SK_OPTIONAL(path_close,                "sk_path_close");
+    RX_SK_OPTIONAL(path_set_filltype,         "sk_path_set_filltype");
+    RX_SK_OPTIONAL(canvas_draw_path,          "sk_canvas_draw_path");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
 
@@ -720,6 +730,142 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
     sk_paint_t *paint = rx_make_paint(sk, argb, width);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* ---- paths (Skia-only) ----
+ *
+ * An sk_path is a mutable builder owned by the Ruxen `Path`: its raw pointer
+ * crosses the FFI as an int64 handle (path_new returns it, the builder ops and
+ * draw take it, path_drop frees it) — exactly the ownership shape `Image` uses.
+ *
+ * The builder ops (move_to/line_to/.../close) require the path symbols but NOT
+ * a live canvas, so a `Path` can be constructed before any frame; they no-op
+ * when a needed symbol is missing (the handle is then 0 and draw_path reports
+ * the clear Err). The Skia-only gate that surfaces RXC_ERR_NO_SKIA is the
+ * *draw*, mirroring the image flow (load returns 0 → draw is the failure
+ * point). Nothing structured crosses the ABI: only the int64 handle and scalar
+ * device-pixel coordinates. */
+
+/* Allocate an empty path; returns its sk_path pointer as an int64 handle, or 0
+ * when Skia / the path symbols are unavailable. */
+int64_t ruxen_canvas_path_new(void) {
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->path_new) return 0;
+    return (int64_t)sk->path_new();
+}
+
+int64_t ruxen_canvas_path_is_null(int64_t self) { return self == 0 ? 1 : 0; }
+
+/* Identity accessor: a RawPath's handle IS the pointer; lets the Ruxen side
+ * pass it to draw_path as a plain Int (mirrors ruxen_canvas_image_ptr). */
+int64_t ruxen_canvas_path_ptr(int64_t self) { return self; }
+
+void ruxen_canvas_path_drop(int64_t self) {
+    const RxSkia *sk = rx_skia();
+    if (self && sk->path_delete) sk->path_delete((sk_path_t *)self);
+}
+
+/* Begin a new sub-contour at (x, y). */
+int64_t ruxen_canvas_path_move_to(int64_t self, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_move_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
+    sk->path_move_to(p, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Straight segment from the current point to (x, y). */
+int64_t ruxen_canvas_path_line_to(int64_t self, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_line_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
+    sk->path_line_to(p, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Quadratic bézier through control (cx, cy) to (x, y). */
+int64_t ruxen_canvas_path_quad_to(int64_t self, double cx, double cy, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_quad_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk->path_quad_to(p, (float)cx, (float)cy, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Cubic bézier through controls (c1x, c1y), (c2x, c2y) to (x, y). */
+int64_t ruxen_canvas_path_cubic_to(int64_t self, double c1x, double c1y,
+                                   double c2x, double c2y, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_cubic_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(c1x) || !rxc_finite_pixels(c1y) ||
+        !rxc_finite_pixels(c2x) || !rxc_finite_pixels(c2y) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk->path_cubic_to(p, (float)c1x, (float)c1y, (float)c2x, (float)c2y, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* SVG-style elliptical arc to (x, y): radii (rx, ry), x-axis rotation in
+ * degrees, large-arc flag (0/1), clockwise-sweep flag (0/1). */
+int64_t ruxen_canvas_path_arc_to(int64_t self, double rx, double ry, double x_axis_rotate,
+                                 int64_t large_arc, int64_t sweep, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_arc_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(rx) || !rxc_finite_pixels(ry) || !rxc_finite_pixels(x_axis_rotate) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    int la = large_arc ? RX_SK_PATH_ARC_LARGE : RX_SK_PATH_ARC_SMALL;
+    int sw = sweep ? RX_SK_PATH_ARC_CW : RX_SK_PATH_ARC_CCW;
+    sk->path_arc_to(p, (float)rx, (float)ry, (float)x_axis_rotate, la, sw, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Close the current sub-contour (straight segment back to its start). */
+int64_t ruxen_canvas_path_close(int64_t self) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_close) return RXC_ERR_NO_SKIA;
+    sk->path_close(p);
+    return RXC_OK;
+}
+
+/* Set the fill rule: even_odd != 0 selects even-odd, else non-zero winding. */
+int64_t ruxen_canvas_path_set_fill_type(int64_t self, int64_t even_odd) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_set_filltype) return RXC_ERR_NO_SKIA;
+    sk->path_set_filltype(p, even_odd ? RX_SK_PATH_FILL_EVENODD : RX_SK_PATH_FILL_WINDING);
+    return RXC_OK;
+}
+
+/* Fill (stroke_w <= 0) or stroke (stroke_w > 0) the path with a solid color.
+ * Antialiased; Skia-only — RXC_ERR_NO_SKIA when the backend or draw symbol is
+ * absent (never a silent no-op). Color packed 0xAARRGGBB in `argb`. */
+int64_t ruxen_canvas_draw_path(int64_t self, int64_t path, double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    sk_path_t *p = (sk_path_t *)path;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_path : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (!p) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(stroke_w)) return RXC_ERR_BAD_ARGS;
+    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk->canvas_draw_path(canvas, p, paint);
     sk->paint_delete(paint);
     return RXC_OK;
 }
