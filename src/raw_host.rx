@@ -62,5 +62,12 @@ class RawHost
     def window_pump as "ruxen_canvas_window_pump"(self) -> Int
     def self.window_is_shown as "ruxen_canvas_window_is_shown" -> Int
     def self.window_destroy as "ruxen_canvas_window_destroy" -> Int
+    # GL-context seam for the GPU backend (docs/GPU.md). create_gl opens an
+    # SDL_WINDOW_OPENGL window + current GL context (clean Err on headless/no
+    # SDL); gl_present swaps the back buffer; is_gl reports the active mode.
+    def window_create_gl as "ruxen_canvas_window_create_gl"(self) -> Int
+    def window_is_gl as "ruxen_canvas_window_is_gl"(self) -> Int
+    def window_gl_present as "ruxen_canvas_window_gl_present"(self) -> Int
+    def window_gl_drawable_size as "ruxen_canvas_window_gl_drawable_size"(self) -> Int
   end
 end
