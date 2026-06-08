@@ -579,14 +579,28 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     return RXC_OK;
 }
 
-/* End the frame. The software backend has nothing to flip; presenting to
+/* End the frame. The software/raster backend has nothing to flip; presenting to
  * a live window is the explicit ruxen_canvas_window_present call in
- * runtime/sdl_window.c (the Ruxen Window.end_frame does both). */
+ * runtime/sdl_window.c (the Ruxen Window.end_frame does both).
+ *
+ * GPU path (docs/GPU.md): Skia batches GPU draws, so the frame's commands must
+ * be flushed + submitted to the GL context here, BEFORE the GL buffer swap the
+ * Window present step issues. Without the flush the swap would present an empty
+ * or partial backbuffer. We prefer flush_and_submit (ensures the GL commands are
+ * handed to the driver), falling back to plain flush. */
 int64_t ruxen_canvas_end_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     h->in_frame = 0;
+    if (h->is_gpu && h->gr_context) {
+        const RxSkia *sk = rx_skia();
+        if (sk->gr_direct_context_flush_and_submit) {
+            sk->gr_direct_context_flush_and_submit((gr_direct_context_t *)h->gr_context, 0);
+        } else if (sk->gr_direct_context_flush) {
+            sk->gr_direct_context_flush((gr_direct_context_t *)h->gr_context);
+        }
+    }
     return RXC_OK;
 }
 

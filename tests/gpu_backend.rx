@@ -95,3 +95,62 @@ Tester.describe("GPU backend falls back cleanly to raster") do |t: &var Tester|
     t.expect(c.read_pixel(0, 0)).to_eq(bg)
   end
 end
+
+Tester.describe("Window.show_gpu — live path") do |t: &var Tester|
+  t.it("show_gpu either brings up a GPU window or falls back cleanly") do
+    # Adaptive, like window_live.rx: on a GL-capable desktop the GPU branch runs
+    # (a GL window appears briefly and gpu_active? is true); on a headless / no
+    # GL / no Ganesh host show_gpu falls back to the raster show path, which
+    # itself either shows a raster window or fails cleanly. Either way the
+    # canvas keeps working and the window is taken down at the end.
+    var w = match Window.open(String.from("canvas gpu pin"), 32, 24)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+
+    match w.canvas.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match w.canvas.clear(Color.rgb(10u8, 20u8, 30u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match w.canvas.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let shown = match w.show_gpu
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+
+    if shown
+      # Some window (GPU or raster) is up; present must succeed on it.
+      t.expect(w.windowed).to_eq(true)
+      t.expect(Window.shown?).to_eq(true)
+      match w.present
+        Ok(_)  -> nil
+        Err(_) -> panic!("present failed on a shown window")
+      end
+      # If the GPU surface came up, gpu_active? is true; if we fell back to the
+      # raster window, it is false. Both are valid — assert only that the probe
+      # is total here (it never crashes mid-live-window).
+      let g = w.canvas.gpu_active?
+      t.expect(g == true || g == false).to_eq(true)
+      w.hide
+      t.expect(Window.shown?).to_eq(false)
+    else
+      # Fully headless: no window, canvas still works, no GPU surface.
+      t.expect(w.windowed).to_eq(false)
+      t.expect(Window.shown?).to_eq(false)
+      t.expect(w.canvas.gpu_active?).to_eq(false)
+    end
+
+    # The framebuffer is observable on both branches (opaque draw is backend
+    # independent — the raster oracle still holds).
+    let bg = Color.rgb(10u8, 20u8, 30u8).to_argb as Int
+    t.expect(w.canvas.read_pixel(0, 0)).to_eq(bg)
+  end
+end

@@ -52,6 +52,29 @@ class Window
     end
   end
 
+  ## Put a real OS window on screen for this canvas, backed by the GPU
+  ## (Ganesh GL) surface when it can be created (docs/GPU.md). Attempts the GPU
+  ## backend first: an SDL GL window + context, then a GPU-backed Skia surface.
+  ## On ANY failure (no display, no SDL, no GL, no Ganesh symbols — e.g. headless
+  ## CI) it falls back cleanly to the raster `show` path, so drawing always works
+  ## and never produces wrong pixels. After a successful `show_gpu`,
+  ## `canvas.gpu_active?` is true and `present` swaps the GL back buffer instead
+  ## of blitting the raster framebuffer.
+  def var show_gpu -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    let code = self.canvas.raw.enable_gpu_raw
+    if code == 0
+      self.windowed = true
+      return Ok(nil)
+    end
+    # GPU unavailable / failed: fall back to the raster window path. The host was
+    # torn back down to its raster state by enable_gpu on failure, so this is a
+    # clean retry, not a half-GPU window.
+    self.show
+  end
+
   ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window
   ## opens at scale x the framebuffer size and pointer coordinates are
   ## mapped back, so the app still works in framebuffer coordinates.
@@ -72,10 +95,16 @@ class Window
     end
   end
 
-  ## Blit the canvas to the OS window (call after `end_frame`). Errs when
-  ## the window is not shown.
+  ## Present the canvas to the OS window (call after `end_frame`). On the GPU
+  ## backend this swaps the GL back buffer (the frame was flushed to the GL
+  ## context in `end_frame`); on the raster backend it blits the framebuffer.
+  ## Errs when the window is not shown.
   def var present -> Result[nil, String]
-    let code = self.canvas.raw.window_present
+    let code = if self.canvas.gpu_active?
+      self.canvas.raw.window_gl_present
+    else
+      self.canvas.raw.window_present
+    end
     if code == 0
       Ok(nil)
     else
