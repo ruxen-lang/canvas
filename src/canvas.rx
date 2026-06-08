@@ -352,6 +352,25 @@ class Canvas
     self.raw.skia_active_raw
   end
 
+  ## True when the GPU (Ganesh GL) backend COULD run in this process: Skia is
+  ## loaded AND every gr_* / backend-render-target symbol resolved (docs/GPU.md).
+  ## A capability probe mirroring `skia_available?` — it does not by itself prove
+  ## a GL context or GPU surface exists (use `gpu_active?` for that). GPU is the
+  ## top rung of the backend ladder; when it is unavailable the canvas renders on
+  ## the Skia raster path, or the software fallback, exactly as before.
+  def gpu_available? -> Bool
+    self.raw.gpu_available_raw
+  end
+
+  ## True only when THIS canvas has a live GPU-backed Skia surface — a GL context
+  ## plus a GrDirectContext plus a backend-render-target surface all exist and
+  ## draws genuinely go through the GPU. The unambiguous "GPU is rendering into
+  ## me" signal (mirrors `skia_active?` for the raster surface). False on a
+  ## headless / no-GL / no-Ganesh host, where drawing falls back cleanly.
+  def gpu_active? -> Bool
+    self.raw.gpu_active_raw
+  end
+
   ## INTERNAL (used by Window.open): attach the live OS window. Mirrors
   ## draw_text's exact FFI calling shape — an owned String parameter
   ## borrowed at the call — which is the one &String form that lowers

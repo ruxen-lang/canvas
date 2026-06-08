@@ -74,6 +74,25 @@ typedef struct RxHost {
     void     *sk_surface;
     void     *sk_canvas;
     int32_t   sk_tried;
+
+    /* GPU (Ganesh GL) backend state (trailing — invisible to sdl_window.c's
+     * RxHostPrefix view; docs/GPU.md). Set only when this host was put into GPU
+     * mode (a GL window + context were created for it and the GPU surface was
+     * built). gpu_requested gates whether rx_host_canvas even ATTEMPTS the GPU
+     * rung, so existing offscreen/raster hosts are wholly unaffected.
+     *   gr_context  — the GrDirectContext over the window's GL context
+     *   gr_target   — the GrBackendRenderTarget wrapping the default FBO
+     *   gpu_surface — the GPU-backed SkSurface (its canvas is sk_canvas when GPU
+     *                 is active); released BEFORE gr_context, both before the GL
+     *                 context is deleted (teardown order, docs/GPU.md).
+     * gl_interface  — the GrGLInterface (released last of the GPU objects). */
+    void     *gr_context;
+    void     *gr_target;
+    void     *gpu_surface;
+    void     *gl_interface;
+    int32_t   gpu_requested;  /* caller asked for the GPU backend on this host */
+    int32_t   gpu_tried;      /* GPU surface creation attempted (success or not) */
+    int32_t   is_gpu;         /* 1 iff sk_canvas currently targets the GPU surface */
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */

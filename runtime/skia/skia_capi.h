@@ -35,6 +35,17 @@ typedef struct sk_colorspace_t sk_colorspace_t;
 typedef struct sk_path_t       sk_path_t;
 typedef struct sk_fontstyle_t  sk_fontstyle_t;
 
+/* ---- Ganesh (GPU) opaque handles ----
+ * The GPU backend (docs/GPU.md). A gr_direct_context drives a GL/Metal/Vulkan
+ * device; a gr_backendrendertarget wraps the window's default framebuffer; the
+ * GPU SkSurface renders into it. All reached through symbols the prebuilt
+ * libSkiaSharp already exports — no new dependency. GL-first: only the gl_*
+ * entry points are bound this cycle (Metal/Vulkan deferred per the ADR). */
+typedef struct gr_direct_context_t    gr_direct_context_t;
+typedef struct gr_recording_context_t gr_recording_context_t;
+typedef struct gr_glinterface_t       gr_glinterface_t;
+typedef struct gr_backendrendertarget_t gr_backendrendertarget_t;
+
 /* Packed 0xAARRGGBB, matching our framebuffer + RxHost.pixels. */
 typedef uint32_t sk_color_t;
 
@@ -60,6 +71,19 @@ enum { RX_SK_PATH_FILL_WINDING = 0, RX_SK_PATH_FILL_EVENODD = 1 };
 /* arc_to large-arc / sweep flags (SVG semantics) */
 enum { RX_SK_PATH_ARC_SMALL = 0, RX_SK_PATH_ARC_LARGE = 1 };
 enum { RX_SK_PATH_ARC_CCW = 0, RX_SK_PATH_ARC_CW = 1 };
+
+/* gr_surfaceorigin_t — a window's GL default framebuffer is bottom-left
+ * origin (GL convention); an FBO-backed texture is top-left. */
+enum { RX_GR_SURFACE_ORIGIN_TOP_LEFT = 0, RX_GR_SURFACE_ORIGIN_BOTTOM_LEFT = 1 };
+/* The GL sized internal format we request for the window backbuffer color
+ * attachment. GL_RGBA8 == 0x8058; Skia maps the render-target color type from
+ * it. We keep the GPU surface at RGBA_8888 (not BGRA) because that is the GL
+ * default-framebuffer format; color is converted by Skia at draw, and present
+ * is a swap (no CPU readback in the present path), so this does not need to
+ * match the raster path's BGRA buffer. */
+enum { RX_GR_GL_RGBA8 = 0x8058 };
+/* sk_colortype_t for the GPU surface — RGBA_8888 == 4 (BGRA_8888 == 6 above). */
+enum { RX_SK_COLORTYPE_RGBA_8888 = 4 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -209,6 +233,56 @@ typedef void       (*pfn_path_close)(sk_path_t *);
 typedef void       (*pfn_path_set_filltype)(sk_path_t *, int /*sk_path_filltype_t*/);
 typedef void       (*pfn_canvas_draw_path)(sk_canvas_t *, const sk_path_t *, const sk_paint_t *);
 
+/* ---- Ganesh GL backend (the GPU surface, docs/GPU.md) ----
+ *
+ * These are the gr_* / sk_surface_new_backend_render_target symbols the prebuilt
+ * libSkiaSharp exports (Skia's include/c/gr_context.h + sk_surface.h C API). All
+ * are OPTIONAL in the loader: a miss disables only the GPU rung, never the
+ * raster backend. ABI shapes below are the upstream SkiaSharp C-API ones.
+ *
+ * gr_gl_framebufferinfo_t describes the GL default-framebuffer the window's GL
+ * context draws into: { fboid, format }. fboid is the bound FBO (0 on most
+ * desktop GL); format is the sized internal color format (GL_RGBA8). Some
+ * SkiaSharp builds add a trailing `protected` bool — we over-allocate by a few
+ * bytes at the call site to be safe rather than risk a short read. */
+typedef struct {
+    unsigned int fFBOID;
+    unsigned int fFormat;
+} gr_gl_framebufferinfo_t;
+
+/* The GL proc loader callback Skia calls to resolve each GL entry point. ctx is
+ * an opaque user pointer (we pass NULL and resolve via SDL_GL_GetProcAddress in
+ * a small trampoline). */
+typedef void *(*gr_gl_get_proc)(void *ctx, const char *name);
+
+/* Assemble a GrGLInterface from a proc loader (preferred — explicit about which
+ * context's procs we bind). Returns an owned interface (gr_glinterface_unref).
+ * gr_glinterface_create_native_interface() is the no-callback alternative that
+ * uses the current context's procs; we try assemble first, then native. */
+typedef gr_glinterface_t *(*pfn_gr_glinterface_assemble_gl)(void *ctx, gr_gl_get_proc get);
+typedef gr_glinterface_t *(*pfn_gr_glinterface_create_native)(void);
+typedef void              (*pfn_gr_glinterface_unref)(gr_glinterface_t *);
+
+/* Build a GPU device context over the (current) GL context described by the
+ * interface. NULL on failure. Owned: gr_direct_context_unref. */
+typedef gr_direct_context_t *(*pfn_gr_direct_context_make_gl)(const gr_glinterface_t *);
+typedef void                 (*pfn_gr_direct_context_unref)(gr_direct_context_t *);
+typedef void                 (*pfn_gr_direct_context_flush)(gr_direct_context_t *);
+typedef void                 (*pfn_gr_direct_context_flush_and_submit)(gr_direct_context_t *, int sync);
+
+/* Wrap the window's default framebuffer as a GrBackendRenderTarget. Owned:
+ * gr_backendrendertarget_delete. */
+typedef gr_backendrendertarget_t *(*pfn_gr_backendrendertarget_new_gl)(int width, int height,
+        int samples, int stencils, const gr_gl_framebufferinfo_t *glInfo);
+typedef void (*pfn_gr_backendrendertarget_delete)(gr_backendrendertarget_t *);
+
+/* Create a GPU-backed SkSurface that renders into the backend render target.
+ * origin = bottom-left for a GL window; colortype = RGBA_8888. NULL on failure.
+ * Released with the usual sk_surface_unref. */
+typedef sk_surface_t *(*pfn_surface_new_backend_render_target)(gr_recording_context_t *ctx,
+        const gr_backendrendertarget_t *rt, int origin, int colortype,
+        sk_colorspace_t *cs, const void *props);
+
 /* ---- the resolved loader ---- */
 typedef struct {
     int available;    /* 1 iff the .so loaded and all required symbols resolved */
@@ -286,6 +360,19 @@ typedef struct {
     pfn_path_close         path_close;
     pfn_path_set_filltype  path_set_filltype;
     pfn_canvas_draw_path   canvas_draw_path;
+
+    /* Ganesh GL backend (OPTIONAL; absence disables only the GPU rung). */
+    pfn_gr_glinterface_assemble_gl       gr_glinterface_assemble_gl;
+    pfn_gr_glinterface_create_native     gr_glinterface_create_native;
+    pfn_gr_glinterface_unref             gr_glinterface_unref;
+    pfn_gr_direct_context_make_gl        gr_direct_context_make_gl;
+    pfn_gr_direct_context_unref          gr_direct_context_unref;
+    pfn_gr_direct_context_flush          gr_direct_context_flush;
+    pfn_gr_direct_context_flush_and_submit gr_direct_context_flush_and_submit;
+    pfn_gr_backendrendertarget_new_gl    gr_backendrendertarget_new_gl;
+    pfn_gr_backendrendertarget_delete    gr_backendrendertarget_delete;
+    pfn_surface_new_backend_render_target surface_new_backend_render_target;
+    int gpu_gl_ok;   /* 1 iff every required GPU-GL symbol resolved */
 } RxSkia;
 
 /* Lazily dlopen()s libSkiaSharp and resolves the table on first call; returns

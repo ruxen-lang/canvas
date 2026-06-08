@@ -179,8 +179,34 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(path_close,                "sk_path_close");
     RX_SK_OPTIONAL(path_set_filltype,         "sk_path_set_filltype");
     RX_SK_OPTIONAL(canvas_draw_path,          "sk_canvas_draw_path");
+
+    /* Ganesh GL backend (docs/GPU.md). OPTIONAL: a miss leaves gpu_gl_ok = 0,
+     * disabling only the GPU rung — the raster backend is untouched. */
+    RX_SK_OPTIONAL(gr_glinterface_assemble_gl,    "gr_glinterface_assemble_gl_interface");
+    RX_SK_OPTIONAL(gr_glinterface_create_native,  "gr_glinterface_create_native_interface");
+    RX_SK_OPTIONAL(gr_glinterface_unref,          "gr_glinterface_unref");
+    RX_SK_OPTIONAL(gr_direct_context_make_gl,     "gr_direct_context_make_gl");
+    RX_SK_OPTIONAL(gr_direct_context_unref,       "gr_direct_context_unref");
+    RX_SK_OPTIONAL(gr_direct_context_flush,       "gr_direct_context_flush");
+    RX_SK_OPTIONAL(gr_direct_context_flush_and_submit, "gr_direct_context_flush_and_submit");
+    RX_SK_OPTIONAL(gr_backendrendertarget_new_gl, "gr_backendrendertarget_new_gl");
+    RX_SK_OPTIONAL(gr_backendrendertarget_delete, "gr_backendrendertarget_delete");
+    RX_SK_OPTIONAL(surface_new_backend_render_target, "sk_surface_new_backend_render_target");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
+
+    /* The GPU-GL rung needs: a way to build the GL interface (assemble OR
+     * native), make a direct context, wrap the FBO, and create the surface.
+     * flush/unref are needed for correct teardown. If any is absent, the GPU
+     * path is unavailable and rx_host_canvas falls back to raster. */
+    skia.gpu_gl_ok =
+        (skia.gr_glinterface_assemble_gl || skia.gr_glinterface_create_native) &&
+        skia.gr_direct_context_make_gl &&
+        skia.gr_direct_context_unref &&
+        skia.gr_backendrendertarget_new_gl &&
+        skia.gr_backendrendertarget_delete &&
+        skia.surface_new_backend_render_target &&
+        skia.surface_unref ? 1 : 0;
 
     /* Keep the handle open for the process lifetime (no dlclose): the resolved
      * pointers must stay valid. */
@@ -192,8 +218,25 @@ const RxSkia *rx_skia(void) {
  * host's own 0xAARRGGBB framebuffer, and return its canvas — or NULL when Skia
  * is unavailable / creation failed. The surface is cached on the host and torn
  * down in host_drop before the pixels are freed. */
+static sk_canvas_t *rx_host_gpu_canvas(RxHost *h);   /* fwd: GPU rung below */
+
 static sk_canvas_t *rx_host_canvas(RxHost *h) {
     if (!h) return NULL;
+    /* GPU rung (top of the ladder, docs/GPU.md): a host put into GPU mode draws
+     * into its GPU-backed surface. Every drawing wrapper funnels through here,
+     * so routing all draws to the GPU canvas is exactly this one line — the
+     * ruxen_canvas_* ABI above is unchanged. If GPU mode is requested but the
+     * surface could not be built, we have already torn GPU mode down in
+     * enable_gpu, so gpu_requested is 0 here and we fall through to raster. */
+    if (h->is_gpu) {
+        if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+        return NULL;   /* GPU active flag but no surface: refuse (no wrong CPU draw) */
+    }
+    if (h->gpu_requested) {
+        sk_canvas_t *g = rx_host_gpu_canvas(h);
+        if (g) return g;
+        /* GPU build failed mid-flight: fall through to raster below. */
+    }
     if (h->sk_canvas) return (sk_canvas_t *)h->sk_canvas;
     if (h->sk_tried) return NULL;
     h->sk_tried = 1;
@@ -217,6 +260,147 @@ static sk_canvas_t *rx_host_canvas(RxHost *h) {
     h->sk_surface = surf;
     h->sk_canvas  = canvas;
     return canvas;
+}
+
+
+/* ---- GPU (Ganesh GL) backend (docs/GPU.md) ----
+ *
+ * The GPU rung of the backend-selection ladder. It is attempted ONLY when the
+ * host was put into GPU mode (gpu_requested, set by ruxen_canvas_host_enable_gpu
+ * after a GL window + context exist). On ANY failure we leave the GPU fields
+ * NULL and the caller falls back to the raster path — a GPU op that can't run
+ * must fall back cleanly, never produce wrong pixels (the non-negotiable
+ * invariant).
+ *
+ * These prototypes are the GL-context seam in runtime/sdl_window.c (both TUs
+ * always compile together). The GL context must be current before any gr_*
+ * call; create_gl makes it current and it stays so for this single-thread,
+ * single-window host. */
+int64_t ruxen_canvas_window_create_gl(int64_t self);
+int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
+int64_t ruxen_canvas_window_gl_drawable_size(int64_t self);
+int64_t ruxen_canvas_window_gl_present(int64_t self);
+
+/* The proc-loader trampoline Skia calls to resolve each GL entry point. It
+ * forwards to SDL_GL_GetProcAddress via the shim's window seam. ctx is unused
+ * (the current GL context is implicit in SDL). */
+static void *rx_gl_get_proc(void *ctx, const char *name) {
+    (void)ctx;
+    return (void *)(intptr_t)ruxen_canvas_window_gl_get_proc((int64_t)name);
+}
+
+/* Build the GrGLInterface for the current GL context: prefer the explicit
+ * proc-loader assembly, fall back to the native (current-context) interface.
+ * Returns an owned interface (gr_glinterface_unref) or NULL. */
+static gr_glinterface_t *rx_make_gl_interface(const RxSkia *sk) {
+    gr_glinterface_t *gi = NULL;
+    if (sk->gr_glinterface_assemble_gl) {
+        gi = sk->gr_glinterface_assemble_gl(NULL, rx_gl_get_proc);
+    }
+    if (!gi && sk->gr_glinterface_create_native) {
+        gi = sk->gr_glinterface_create_native();
+    }
+    return gi;
+}
+
+/* Lazily create (once per host) the GPU-backed Skia surface over this host's GL
+ * window, and return its canvas — or NULL on any failure (caller falls back to
+ * raster). Caches gr_context / gr_target / gpu_surface / gl_interface and sets
+ * is_gpu on success. Only ever called for a gpu_requested host. */
+static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
+    if (!h || !h->gpu_requested) return NULL;
+    if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+    if (h->gpu_tried) return NULL;
+    h->gpu_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_gl_ok) return NULL;
+
+    /* The GL context must already be current (create_gl did that). Drawable
+     * size is the HiDPI-correct backbuffer size; 0 means no GL window. */
+    int64_t packed = ruxen_canvas_window_gl_drawable_size((int64_t)h);
+    if (packed == 0) return NULL;
+    int gw = (int)(uint32_t)(packed >> 32);
+    int gh = (int)(uint32_t)(packed & 0xFFFFFFFF);
+    if (gw <= 0 || gh <= 0) return NULL;
+
+    gr_glinterface_t *gi = rx_make_gl_interface(sk);
+    if (!gi) return NULL;
+
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_gl(gi);
+    if (!ctx) {
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    /* Wrap the window's default framebuffer (FBO 0 on desktop GL, RGBA8). The
+     * struct may have a trailing field in some SkiaSharp builds; we declare the
+     * two ABI-stable leading fields and zero the rest implicitly. */
+    gr_gl_framebufferinfo_t fbo;
+    fbo.fFBOID  = 0;                 /* window default framebuffer */
+    fbo.fFormat = RX_GR_GL_RGBA8;
+    gr_backendrendertarget_t *rt =
+        sk->gr_backendrendertarget_new_gl(gw, gh, /*samples*/0, /*stencils*/8, &fbo);
+    if (!rt) {
+        sk->gr_direct_context_unref(ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    sk_surface_t *surf = sk->surface_new_backend_render_target(
+        (gr_recording_context_t *)ctx, rt,
+        RX_GR_SURFACE_ORIGIN_BOTTOM_LEFT, RX_SK_COLORTYPE_RGBA_8888, NULL, NULL);
+    if (!surf) {
+        sk->gr_backendrendertarget_delete(rt);
+        sk->gr_direct_context_unref(ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_backendrendertarget_delete(rt);
+        sk->gr_direct_context_unref(ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    h->gr_context   = ctx;
+    h->gr_target    = rt;
+    h->gpu_surface  = surf;
+    h->gl_interface = gi;
+    h->sk_surface   = NULL;       /* GPU host has no raster-direct surface */
+    h->sk_canvas    = canvas;
+    h->is_gpu       = 1;
+    return canvas;
+}
+
+/* Release the GPU objects in the correct order (surface -> target -> context ->
+ * interface), BEFORE the GL context/window are destroyed by sdl_window.c. Safe
+ * to call on a non-GPU host (all NULL). */
+static void rx_host_gpu_teardown(RxHost *h) {
+    if (!h) return;
+    const RxSkia *sk = rx_skia();
+    if (h->gpu_surface) {
+        if (sk->surface_unref) sk->surface_unref((sk_surface_t *)h->gpu_surface);
+        h->gpu_surface = NULL;
+    }
+    if (h->gr_target) {
+        if (sk->gr_backendrendertarget_delete)
+            sk->gr_backendrendertarget_delete((gr_backendrendertarget_t *)h->gr_target);
+        h->gr_target = NULL;
+    }
+    if (h->gr_context) {
+        if (sk->gr_direct_context_unref)
+            sk->gr_direct_context_unref((gr_direct_context_t *)h->gr_context);
+        h->gr_context = NULL;
+    }
+    if (h->gl_interface) {
+        if (sk->gr_glinterface_unref)
+            sk->gr_glinterface_unref((gr_glinterface_t *)h->gl_interface);
+        h->gl_interface = NULL;
+    }
+    if (h->is_gpu) { h->sk_canvas = NULL; h->is_gpu = 0; }
 }
 
 
@@ -257,6 +441,11 @@ void ruxen_canvas_window_note_host_dropped(int64_t self);
 void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
+    /* GPU objects reference the GL context, so they MUST be released before the
+     * GL context/window are torn down. Order: GPU surface stack first, then the
+     * window (note_host_dropped deletes the GL context + window), then the
+     * raster surface + pixels. */
+    rx_host_gpu_teardown(h);
     ruxen_canvas_window_note_host_dropped(self);
     /* The Skia surface wraps h->pixels — unref it before freeing the buffer.
      * (sk_canvas is owned by the surface; no separate release.) */
@@ -288,6 +477,62 @@ int64_t ruxen_canvas_skia_active(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return 0;
     return rx_host_canvas(h) != NULL ? 1 : 0;
+}
+
+/* True (1) when the GPU (Ganesh GL) backend COULD run in this process: Skia is
+ * loaded AND every required gr_ / backend-render-target symbol resolved. A
+ * capability probe: it does NOT prove a GL context or a GPU surface exists for
+ * any host (use ruxen_canvas_gpu_active for that). Mirrors skia_available. */
+int64_t ruxen_canvas_gpu_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    return (sk->available && sk->gpu_gl_ok) ? 1 : 0;
+}
+
+/* Put this host into GPU mode: create a GL window + current context for it,
+ * then build the GPU-backed Skia surface. Returns RXC_OK when the GPU surface
+ * is live (subsequent draws target it and present is a GL swap), or a clean
+ * RXC_ERR_* on ANY failure — in which case the host is left in its prior
+ * (raster/software) state, NOT half-GPU. The caller (Window) falls back to the
+ * raster show path on error. Idempotent once GPU is active. */
+int64_t ruxen_canvas_host_enable_gpu(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;                 /* already on GPU */
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_gl_ok) return RXC_ERR_NO_SKIA;
+    /* A GPU host cannot have already created a raster-direct surface for this
+     * frame's pixels — that would mean draws already went to the CPU buffer.
+     * Require GPU to be enabled before any frame/draw. */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    /* Create the GL window + make its context current. Bounded + clean on a
+     * headless / no-SDL / no-GL host (returns an Err, never blocks). */
+    int64_t wc = ruxen_canvas_window_create_gl(self);
+    if (wc != RXC_OK) return wc;
+
+    h->gpu_requested = 1;
+    h->gpu_tried     = 0;     /* allow the build attempt now */
+    sk_canvas_t *canvas = rx_host_gpu_canvas(h);
+    if (!canvas) {
+        /* GPU surface creation failed AFTER the GL window came up: tear the GL
+         * window back down so the host can fall back to the raster window path
+         * cleanly (no orphaned GL window). */
+        h->gpu_requested = 0;
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_NO_SKIA;
+    }
+    return RXC_OK;
+}
+
+/* True (1) only when THIS host has a live GPU-backed Skia surface — the GL
+ * context + GrDirectContext + backend-render-target surface all exist and draws
+ * genuinely go through the GPU. The unambiguous "GPU is rendering into me"
+ * signal (mirrors skia_active for the raster surface). */
+int64_t ruxen_canvas_gpu_active(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    return (h->is_gpu && h->gpu_surface) ? 1 : 0;
 }
 
 int64_t ruxen_canvas_host_width(int64_t self) {

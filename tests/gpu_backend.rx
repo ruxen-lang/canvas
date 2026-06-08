@@ -1,0 +1,97 @@
+# Capability / smoke pin for the GPU (Ganesh GL) backend (docs/GPU.md).
+#
+# This host (and CI) has no usable GL surface, so GPU output cannot be
+# pixel-verified here — full pixel verification is deferred to a GL-capable
+# desktop, the same posture as the Skia-on-Linux-CI note in docs/SKIA.md. What
+# IS asserted here is the contract that must hold on EVERY host:
+#
+#   * gpu_available? / gpu_active? are total and safe (never crash, return a
+#     definite Bool) — the capability probe story mirroring skia_available?.
+#   * The backend-selection ladder is sound: when the GPU backend cannot run
+#     (no Ganesh symbols / no GL context), the canvas falls back cleanly to the
+#     raster (or software) path and STILL produces correct readback. A GPU op
+#     that can't run must fall back, never produce silently-wrong pixels.
+#   * gpu_active? implies gpu_available? (you can't be rendering on a GPU the
+#     process can't even reach), and an offscreen canvas is never GPU-active
+#     (GPU needs a GL window — offscreen test canvases stay on raster, the
+#     deterministic oracle).
+
+Tester.describe("Canvas.gpu_available?") do |t: &var Tester|
+  t.it("is total and safe to query") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # We don't pin the value (it depends on whether libSkiaSharp + its gr_*
+    # symbols are present); only that querying it is safe and total.
+    let avail = c.gpu_available?
+    t.expect(avail == true || avail == false).to_eq(true)
+  end
+
+  t.it("an offscreen canvas is never GPU-active") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # Offscreen canvases have no GL window, so they are never on the GPU rung —
+    # they render on the raster/software path, which is the test oracle.
+    t.expect(c.gpu_active?).to_eq(false)
+  end
+
+  t.it("gpu_active? implies gpu_available?") do
+    var c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # If the canvas were GPU-active, the GPU backend must be available. The
+    # converse need not hold (available but no GL window -> not active). On this
+    # offscreen canvas active? is false, so the implication holds vacuously; the
+    # point is the relationship never inverts.
+    let active = c.gpu_active?
+    let avail = c.gpu_available?
+    if active
+      t.expect(avail).to_eq(true)
+    else
+      t.expect(active).to_eq(false)
+    end
+  end
+end
+
+Tester.describe("GPU backend falls back cleanly to raster") do |t: &var Tester|
+  t.it("clear + draw_rect read back correctly with GPU unavailable") do
+    # The non-negotiable invariant: when the GPU path is not taken, drawing is
+    # byte-exact on the fallback. This is the exact same contract skia_backend.rx
+    # asserts, re-asserted from the GPU-probe side so a future GPU regression
+    # that silently corrupted the fallback would fail here too.
+    var c = match Canvas.create(8, 6)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # An offscreen canvas must NOT be GPU-active (no GL window).
+    t.expect(c.gpu_active?).to_eq(false)
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match c.draw_rect(Rect.new(2.0f32, 1.0f32, 3.0f32, 2.0f32), Color.rgb(0u8, 128u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let fill = Color.rgb(0u8, 128u8, 255u8).to_argb as Int
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    t.expect(c.read_pixel(2, 1)).to_eq(fill)
+    t.expect(c.read_pixel(4, 2)).to_eq(fill)
+    t.expect(c.read_pixel(5, 1)).to_eq(bg)
+    t.expect(c.read_pixel(0, 0)).to_eq(bg)
+  end
+end
