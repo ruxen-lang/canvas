@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Proper text entry — `Event.TextInput(codepoint)`.** Printable typing now
+  flows through the OS text path (`SDL_StartTextInput` + `SDL_TEXTINPUT`), which
+  is layout/shift-correct and composition-aware, instead of raw keysyms. The
+  pump decodes the event's UTF-8 (ASCII fast-path + 2–4-byte sequences) to a
+  Unicode codepoint and emits `Event.TextInput(Int)` (kind 7). `Event.KeyDown`
+  is now **control keys only** (editing/navigation allowlist) with auto-repeat
+  filtered. So: printable characters → `TextInput`; Backspace/arrows/Enter/Delete/
+  Tab/Home/End/Esc → `KeyDown` (once per press). Wired through
+  `Window#poll_event` / `#push_event`; pinned headless in `tests/text_input.rx`.
 - **Scroll + Resize events for windowed apps.**
   - `Event.Scroll(dx, dy)` — mouse-wheel deltas (+y up / away, +x right), emitted
     from `SDL_MOUSEWHEEL`; deltas are wheel "clicks", not coordinates (not
@@ -411,6 +420,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pointer).
 
 ### Fixed
+- **Typing produced wrong/duplicate characters + stray spaces.** The pump
+  forwarded raw `SDL_KEYDOWN` keysyms as if they were characters — no shift /
+  layout, unfiltered auto-repeat, and some keysyms in the printable range
+  inserting garbage. Switched to the OS text path (see `Event.TextInput` above):
+  printable characters now come from `SDL_TEXTINPUT` (layout/shift-correct UTF-8),
+  `KeyDown` is restricted to a control-key allowlist, and key auto-repeat is
+  dropped. (ABI note: the `SDL_KeyboardEvent` repeat flag is at offset **13**
+  (`state@12`, `repeat@13`), verified against `SDL_events.h`.)
 - **Windowed pointer coordinates landed ~N× too low (interaction broken).** With
   `show_gpu_scaled(N)` / `show_scaled(N)` the OS window is N× the design size and
   SDL reports the mouse in window POINTS, but the **Metal/GL windowed create

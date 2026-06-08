@@ -21,7 +21,8 @@ implemented over the deterministic software raster backend (the exact
    Metal surface slot in behind the same ABI later). ✅
 2. Canvas FFI: `begin_frame` / `end_frame`, `clear(color)`, `draw_rect`,
    `draw_text` (one embedded 5x7 font) + `measure_text` + `read_pixel`. ✅
-3. Event stream: pointer move/down/up, key, resize, close, **scroll** — over a C
+3. Event stream: pointer move/down/up, scroll, resize, close, **control keys**
+   (`KeyDown`) + **printable text** (`TextInput`, via `SDL_TEXTINPUT`) — over a C
    ring buffer with `push_event`/`poll_event`. Windowed pointer coords are mapped
    window-points → design coords by the show factor; windows are resizable and
    emit `Event.Resize` (GPU surface re-created at the new backing size). ✅
