@@ -13,6 +13,8 @@ class RawHost
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
     def save_raw as "ruxen_canvas_save"(self) -> Int
     def restore_raw as "ruxen_canvas_restore"(self) -> Int
+    def save_layer_raw as "ruxen_canvas_save_layer"(self) -> Int
+    def save_layer_alpha_raw as "ruxen_canvas_save_layer_alpha"(self, alpha: Int) -> Int
     def restore_to_count_raw as "ruxen_canvas_restore_to_count"(self, count: Int) -> Int
     def save_count_raw as "ruxen_canvas_save_count"(self) -> Int
     def translate_raw as "ruxen_canvas_translate"(self, dx: Float, dy: Float) -> Int

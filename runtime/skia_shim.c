@@ -142,6 +142,8 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(maskfilter_unref,          "sk_maskfilter_unref");
     RX_SK_OPTIONAL(canvas_save,               "sk_canvas_save");
     RX_SK_OPTIONAL(canvas_restore,            "sk_canvas_restore");
+    RX_SK_OPTIONAL(canvas_save_layer,         "sk_canvas_save_layer");
+    RX_SK_OPTIONAL(canvas_save_layer_alpha,   "sk_canvas_save_layer_alpha");
     RX_SK_OPTIONAL(canvas_get_save_count,     "sk_canvas_get_save_count");
     RX_SK_OPTIONAL(canvas_restore_to_count,   "sk_canvas_restore_to_count");
     RX_SK_OPTIONAL(canvas_translate,          "sk_canvas_translate");
@@ -368,6 +370,45 @@ int64_t ruxen_canvas_restore(int64_t self) {
     const RxSkia *sk = rx_skia();
     if (canvas && sk->canvas_restore) sk->canvas_restore(canvas);
     return RXC_OK;
+}
+
+/* ---- offscreen layers (Skia-only) ----
+ *
+ * save_layer pushes an offscreen layer onto the same save stack as save();
+ * subsequent draws accumulate into it, and the matching restore() composites
+ * the whole layer down at once — the basis for group opacity and blended
+ * overlays (fade transitions, translucent panels). Unlike the matrix/clip
+ * save ops (which no-op on the software fallback to keep the stack balanced),
+ * a layer that silently failed to composite would yield WRONG pixels, not just
+ * unstyled ones — so these are strictly Skia-only and report the failure.
+ *
+ * Both return the layer's save count (>= 1) on success, to pair with restore /
+ * restore_to. Failure is signalled as a NEGATIVE value: -RXC_ERR_* (the Ruxen
+ * side maps any negative back to the matching Err, non-negative to Ok(count)).
+ * Skia save counts are always >= 1, so the sign is an unambiguous channel. */
+
+/* Push a whole-canvas offscreen layer (bounds = NULL). */
+int64_t ruxen_canvas_save_layer(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer) return -RXC_ERR_NO_SKIA;
+    return (int64_t)sk->canvas_save_layer(canvas, NULL, NULL);
+}
+
+/* Push a whole-canvas offscreen layer composited with a uniform group opacity
+ * `alpha` (0..255). Out-of-range alpha is clamped to the byte. */
+int64_t ruxen_canvas_save_layer_alpha(int64_t self, int64_t alpha) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (alpha < 0 || alpha > 255) return -RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer_alpha) return -RXC_ERR_NO_SKIA;
+    return (int64_t)sk->canvas_save_layer_alpha(canvas, NULL, (uint8_t)alpha);
 }
 
 /* Restore down to a save count from a prior save (unwinds nested saves). */

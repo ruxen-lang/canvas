@@ -58,7 +58,25 @@ class Canvas
     self.raw.save_raw
   end
 
-  ## Pop the last `save`, restoring the previous transform + clip.
+  ## Push an offscreen layer onto the state stack; subsequent drawing
+  ## accumulates into it, and the matching `restore` composites the whole layer
+  ## down at once. The basis for group opacity and blended overlays. Returns the
+  ## layer's save count (pass to `restore_to`) on `Ok`. Skia-only — `Err` when
+  ## the backend is absent (a layer can't be faked in software without producing
+  ## wrong pixels).
+  def var save_layer -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_raw, "save_layer")
+  end
+
+  ## Like `save_layer`, but composites the layer with a uniform group `alpha`
+  ## (0 = transparent, 255 = opaque) on `restore` — fade transitions and
+  ## translucent panels. Returns the layer's save count on `Ok`. Skia-only.
+  def var save_layer_alpha(alpha: Int) -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_alpha_raw(alpha), "save_layer_alpha")
+  end
+
+  ## Pop the last `save` / `save_layer`, restoring the previous state and
+  ## compositing any pushed layer down.
   def var restore -> Result[nil, String]
     self.status_to_result(self.raw.restore_raw, "restore")
   end
@@ -344,6 +362,20 @@ class Canvas
       Err(String.from("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
     else
       Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+    end
+  end
+
+  ## Map a `save_layer*` return onto `Result[Int, String]`. The shim returns the
+  ## layer's save count (>= 1) on success, or a NEGATIVE `-RXC_ERR_*` on failure
+  ## (Skia save counts are always >= 1, so the sign is an unambiguous channel).
+  def layer_result(code: Int, what: &str) -> Result[Int, String]
+    if code >= 0
+      Ok(code)
+    else
+      match self.status_to_result(0 - code, what)
+        Ok(_)  -> Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+        Err(e) -> Err(e)
+      end
     end
   end
 end

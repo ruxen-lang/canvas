@@ -1,0 +1,110 @@
+# Pin tests for offscreen layers: Canvas#save_layer and #save_layer_alpha,
+# composited down by the existing #restore. These are Skia-only — with no
+# library they must return a clean Err (RXC_ERR_NO_SKIA), never crash. When
+# Skia is active we assert the composited pixels: a plain layer round-trips its
+# content opaquely; an alpha layer applies group opacity so opaque red drawn at
+# 50% layer alpha composites to a mid-range red over black (distinct from both
+# full-opacity 255 and absent 0).
+
+Tester.describe("Canvas.save_layer") do |t: &var Tester|
+  t.it("composites its content down opaquely on restore") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let res = c.save_layer
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("save_layer failed")
+      end
+      match c.draw_rect(Rect.new(2.0f32, 2.0f32, 8.0f32, 8.0f32), Color.rgb(255u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_rect failed")
+      end
+      match c.restore
+        Ok(_)  -> nil
+        Err(_) -> panic!("restore failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      t.expect(c.read_pixel(5, 5)).to_eq(red)      # layer content composited
+      t.expect(c.read_pixel(14, 14)).to_eq(black)  # outside the rect, untouched
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.save_layer_alpha") do |t: &var Tester|
+  t.it("applies group opacity to the layer content") do
+    var c = match Canvas.create(16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let res = c.save_layer_alpha(128)
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("save_layer_alpha failed")
+      end
+      # opaque red drawn into a 50%-alpha layer -> ~50% red once composited
+      match c.draw_rect(Rect.new(2.0f32, 2.0f32, 8.0f32, 8.0f32), Color.rgb(255u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_rect failed")
+      end
+      match c.restore
+        Ok(_)  -> nil
+        Err(_) -> panic!("restore failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let px = c.read_pixel(5, 5)
+      let pr = (px >> 16) & 0xFF
+      let pg = (px >> 8) & 0xFF
+      let pb = px & 0xFF
+      t.expect(pr > 100).to_eq(true)     # red present but dimmed by the layer
+      t.expect(pr < 160).to_eq(true)     # not full-opacity (would be 255)
+      t.expect(pg).to_eq(0)              # red layer: no green
+      t.expect(pb).to_eq(0)              # red layer: no blue
+      t.expect(c.read_pixel(14, 14)).to_eq(black)  # outside the rect, untouched
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

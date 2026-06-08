@@ -7,6 +7,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Offscreen layers** — `Canvas#save_layer` / `#save_layer_alpha`, composited
+  down by the existing `#restore` (group opacity + blended overlays: fade
+  transitions, translucent panels, scrolling lists):
+  - `save_layer` pushes a whole-canvas offscreen layer onto the same save stack
+    as `save`; `save_layer_alpha(alpha)` (0..255) applies a uniform group
+    opacity to the layer's content. Both return the layer's save count (for
+    `restore_to`) on `Ok`; `restore` composites the layer down.
+  - Strictly Skia-only — a clear `Err` when the backend is absent (unlike the
+    matrix/clip save ops, a layer can't no-op in software without producing
+    wrong pixels). Over the flat-Int ABI the count (>= 1) is the success value
+    and a negative `-RXC_ERR_*` is the failure channel
+    (`runtime/skia_shim.c` `ruxen_canvas_save_layer` / `_save_layer_alpha`,
+    `sk_canvas_save_layer` / `sk_canvas_save_layer_alpha`).
+  - Pin tests: `tests/canvas_layers.rx` (a plain layer round-trips its content;
+    a 50%-alpha layer dims opaque red to a mid-range red, by pixel readback;
+    clean `Err` when Skia is inactive).
 - **Arbitrary paths** — `draw_path` / `stroke_path` over a `Path2D` builder
   (the highest-value missing L1 primitive: icons, custom containers, any
   non-rect/rrect shape):

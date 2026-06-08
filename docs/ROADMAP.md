@@ -82,10 +82,11 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       missing primitive: it's what L2 needs for icons, custom containers, and any
       non-rect/rrect shape. Done: `Path2D` builder + `Canvas#draw_path` /
       `#stroke_path`; pin tests in `tests/canvas_path.rx`.
-- [ ] **Layers — `save_layer` / `save_layer_alpha`** (`sk_canvas_save_layer`):
-      offscreen compositing for group opacity + blended overlays (the basis for
-      fade transitions and translucent panels). Pairs with the existing
-      save/restore stack.
+- [x] **Layers — `save_layer` / `save_layer_alpha`** (`sk_canvas_save_layer` /
+      `sk_canvas_save_layer_alpha`): offscreen compositing for group opacity +
+      blended overlays (fade transitions, translucent panels). Done:
+      `Canvas#save_layer` / `#save_layer_alpha` return the layer save count and
+      pair with the existing `#restore`; pin tests in `tests/canvas_layers.rx`.
 - [ ] **Configurable font *family*** — `draw_text_sized` resizes the shared
       default typeface today; add family selection (`sk_typeface_*` /
       `sk_fontmgr_*`) so widgets can pick a font, not just a size.

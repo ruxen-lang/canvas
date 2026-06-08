@@ -115,6 +115,14 @@ typedef void (*pfn_canvas_draw_simple_text)(sk_canvas_t *, const void *text, siz
 /* canvas state stack + transforms + clipping */
 typedef int  (*pfn_canvas_save)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore)(sk_canvas_t *);
+/* save_layer pushes an offscreen layer (bounds NULL = whole canvas); the
+ * matching restore composites it down. The _alpha variant composites the
+ * layer with a uniform 0..255 group opacity. Both return the save count
+ * (>= 1) to pair with restore / restore_to. */
+typedef int  (*pfn_canvas_save_layer)(sk_canvas_t *, const sk_rect_t *bounds,
+        const sk_paint_t *paint);
+typedef int  (*pfn_canvas_save_layer_alpha)(sk_canvas_t *, const sk_rect_t *bounds,
+        uint8_t alpha);
 typedef int  (*pfn_canvas_get_save_count)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore_to_count)(sk_canvas_t *, int save_count);
 typedef void (*pfn_canvas_translate)(sk_canvas_t *, float dx, float dy);
@@ -208,6 +216,8 @@ typedef struct {
 
     pfn_canvas_save             canvas_save;
     pfn_canvas_restore          canvas_restore;
+    pfn_canvas_save_layer       canvas_save_layer;
+    pfn_canvas_save_layer_alpha canvas_save_layer_alpha;
     pfn_canvas_get_save_count   canvas_get_save_count;
     pfn_canvas_restore_to_count canvas_restore_to_count;
     pfn_canvas_translate        canvas_translate;
