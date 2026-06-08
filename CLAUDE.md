@@ -64,3 +64,18 @@ Milestone 1 (docs/ROADMAP.md): the minimal counter-app slice — SDL window + Sk
 
 - Update `CHANGELOG.md` (Keep a Changelog format) for notable changes.
 - Doc comments use `##`.
+
+## Task tracking & keeping context current
+
+- **Canonical task list: [`docs/ROADMAP.md`](docs/ROADMAP.md)** — milestones and
+  what's in/out of each slice. This is the single place open canvas work is
+  tracked; the workspace umbrella (`../CLAUDE.md`) links it but doesn't duplicate it.
+- Every change updates docs in the same commit: tick/extend `docs/ROADMAP.md`,
+  add a `CHANGELOG.md` entry, and — since this is the FFI layer — keep `docs/FFI.md`
+  and the `lib "C"` surface in `src/lib.rx` in sync (a newly bound method gets a
+  pin test, per the test discipline above).
+- A compiler/toolchain quirk hit while binding Skia/SDL is a **language task**:
+  add a `Q##` entry to `../ruxen/docs/dev/gui-stack-v1-issues.md` (repro + severity)
+  and list it in `../ruxen/docs/TASKS.md` — don't just silently work around it.
+- A `Stop` hook in `.claude/settings.json` reminds you of the above when a session
+  touched source.
