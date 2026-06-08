@@ -52,26 +52,32 @@ class Window
     end
   end
 
-  ## Put a real OS window on screen for this canvas, backed by the GPU
-  ## (Ganesh GL) surface when it can be created (docs/GPU.md). Attempts the GPU
-  ## backend first: an SDL GL window + context, then a GPU-backed Skia surface.
-  ## On ANY failure (no display, no SDL, no GL, no Ganesh symbols — e.g. headless
-  ## CI) it falls back cleanly to the raster `show` path, so drawing always works
-  ## and never produces wrong pixels. After a successful `show_gpu`,
-  ## `canvas.gpu_active?` is true and `present` swaps the GL back buffer instead
-  ## of blitting the raster framebuffer.
+  ## Put a real OS window on screen for this canvas, backed by the GPU when it
+  ## can be created (docs/GPU.md). Backend-selection ladder (top rung first):
+  ## on Apple, **on-screen Metal** (SDL_WINDOW_METAL + CAMetalLayer + a per-frame
+  ## drawable surface); then the **GL window** (SDL_WINDOW_OPENGL + Ganesh GL);
+  ## then the **raster** window blit. On ANY failure at a rung it falls through to
+  ## the next, and a fully headless / no-display host lands on raster (or stays
+  ## headless) — drawing always works and never produces wrong pixels. After a
+  ## successful GPU `show_gpu`, `canvas.gpu_active?` is true and `present` presents
+  ## the GPU frame (Metal drawable present / GL buffer swap) instead of the raster
+  ## blit; `canvas.gpu_backend_kind` reports which (2 Metal / 1 GL).
   def var show_gpu -> Result[nil, String]
     if self.windowed
       return Ok(nil)
     end
-    let code = self.canvas.raw.enable_gpu_raw
-    if code == 0
+    # Rung 1: on-screen Metal (Apple). Needs SDL + a display + Ganesh Metal.
+    if self.canvas.raw.enable_gpu_windowed_raw == 0
       self.windowed = true
       return Ok(nil)
     end
-    # GPU unavailable / failed: fall back to the raster window path. The host was
-    # torn back down to its raster state by enable_gpu on failure, so this is a
-    # clean retry, not a half-GPU window.
+    # Rung 2: GL window. enable_gpu_windowed tore any partial Metal window back
+    # down on failure, so this is a clean attempt.
+    if self.canvas.raw.enable_gpu_raw == 0
+      self.windowed = true
+      return Ok(nil)
+    end
+    # Rung 3: raster window blit (or clean headless failure).
     self.show
   end
 
@@ -95,12 +101,14 @@ class Window
     end
   end
 
-  ## Present the canvas to the OS window (call after `end_frame`). On the GPU
-  ## backend this swaps the GL back buffer (the frame was flushed to the GL
-  ## context in `end_frame`); on the raster backend it blits the framebuffer.
-  ## Errs when the window is not shown.
+  ## Present the canvas to the OS window (call after `end_frame`). Routes by the
+  ## active backend: on-screen **Metal** presents the frame's CAMetalLayer drawable;
+  ## **GL** swaps the back buffer; **raster** blits the framebuffer. The frame was
+  ## already flushed/submitted in `end_frame`. Errs when the window is not shown.
   def var present -> Result[nil, String]
-    let code = if self.canvas.gpu_active?
+    let code = if self.canvas.raw.window_is_metal == 1
+      self.canvas.raw.window_metal_present
+    elsif self.canvas.gpu_active?
       self.canvas.raw.window_gl_present
     else
       self.canvas.raw.window_present

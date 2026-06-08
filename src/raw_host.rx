@@ -61,6 +61,7 @@ class RawHost
     def gpu_backend_kind_raw as "ruxen_canvas_gpu_backend_kind"(self) -> Int
     def enable_gpu_raw as "ruxen_canvas_host_enable_gpu"(self) -> Int
     def enable_gpu_offscreen_raw as "ruxen_canvas_host_enable_gpu_offscreen"(self) -> Int
+    def enable_gpu_windowed_raw as "ruxen_canvas_host_enable_gpu_windowed"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int

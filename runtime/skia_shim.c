@@ -228,6 +228,7 @@ const RxSkia *rx_skia(void) {
      * OPTIONAL: a miss leaves gpu_metal_ok = 0, disabling only the Metal rung. */
     RX_SK_OPTIONAL(gr_direct_context_make_metal,  "gr_direct_context_make_metal");
     RX_SK_OPTIONAL(surface_new_render_target,     "sk_surface_new_render_target");
+    RX_SK_OPTIONAL(gr_backendrendertarget_new_metal, "gr_backendrendertarget_new_metal");
     RX_SK_OPTIONAL(surface_read_pixels,           "sk_surface_read_pixels");
 
     /* Positioned-glyph rendering for shaped text (docs/SHAPING.md). OPTIONAL:
@@ -263,6 +264,16 @@ const RxSkia *rx_skia(void) {
         skia.gr_direct_context_make_metal &&
         skia.surface_new_render_target &&
         skia.surface_read_pixels &&
+        skia.gr_recording_context_unref &&
+        skia.surface_unref ? 1 : 0;
+
+    /* On-screen Metal additionally needs: wrap a drawable's texture as a backend
+     * render target and create a surface over it. */
+    skia.gpu_metal_window_ok =
+        skia.gr_direct_context_make_metal &&
+        skia.gr_backendrendertarget_new_metal &&
+        skia.gr_backendrendertarget_delete &&
+        skia.surface_new_backend_render_target &&
         skia.gr_recording_context_unref &&
         skia.surface_unref ? 1 : 0;
 
@@ -472,6 +483,11 @@ int64_t ruxen_canvas_window_create_gl(int64_t self);
 int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
 int64_t ruxen_canvas_window_gl_drawable_size(int64_t self);
 int64_t ruxen_canvas_window_gl_present(int64_t self);
+/* on-screen Metal seam (runtime/sdl_window.c) */
+int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue);
+int64_t ruxen_canvas_window_metal_next_drawable(int64_t self);
+int64_t ruxen_canvas_window_metal_drawable_size(int64_t self);
+int64_t ruxen_canvas_window_metal_present(int64_t self);
 
 /* The proc-loader trampoline Skia calls to resolve each GL entry point. It
  * forwards to SDL_GL_GetProcAddress via the shim's window seam. ctx is unused
@@ -629,6 +645,97 @@ static sk_canvas_t *rx_host_metal_offscreen_canvas(RxHost *h) {
     return canvas;
 }
 
+/* ---- on-screen Metal: per-frame drawable surface (docs/GPU.md) ----
+ *
+ * Unlike the offscreen path (one persistent surface), an on-screen Metal frame
+ * renders into the CAMetalLayer's NEXT drawable, which is fresh each frame and
+ * consumed by present. So the GrDirectContext is persistent (built once at
+ * enable, stored in gr_context), but the SkSurface + GrBackendRenderTarget are
+ * PER-FRAME: begin_frame acquires the drawable and builds them; end_frame
+ * flushes; present presents the drawable; then the per-frame surface + target
+ * are released. This matches Skia's documented Metal swapchain flow. */
+
+/* Build (or return) the persistent GrDirectContext for a windowed-Metal host. */
+static gr_direct_context_t *rx_metal_window_context(RxHost *h) {
+    if (h->gr_context) return (gr_direct_context_t *)h->gr_context;
+    const RxSkia *sk = rx_skia();
+    const RxMetal *mtl = rx_metal();
+    if (!sk->available || !sk->gpu_metal_window_ok || !mtl->available) return NULL;
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_metal(mtl->device, mtl->queue);
+    if (!ctx) return NULL;
+    h->gr_context = ctx;
+    return ctx;
+}
+
+/* Acquire this frame's drawable and build a GPU surface over its texture; set it
+ * as the host's live canvas. Returns the canvas, or NULL when no drawable is
+ * available (headless / no display — the frame then draws nothing and present is
+ * a clean no-op, never wrong pixels). Per-frame: gr_target + gpu_surface are the
+ * frame's, released in rx_metal_window_end_frame. */
+static void rx_metal_window_end_frame(RxHost *h);   /* fwd */
+
+static sk_canvas_t *rx_metal_window_begin_frame(RxHost *h) {
+    const RxSkia *sk = rx_skia();
+    /* Release the PRIOR frame's drawable surface + target before acquiring the
+     * next (present consumed the drawable; the wrapping surface/RT are stale).
+     * Doing it here, not in shim end_frame, keeps the drawable alive through the
+     * Window#present that runs between end_frame and the next begin_frame. */
+    rx_metal_window_end_frame(h);
+
+    gr_direct_context_t *ctx = rx_metal_window_context(h);
+    if (!ctx) return NULL;
+
+    /* acquire the layer's next drawable -> its MTLTexture (0/NULL headless). */
+    int64_t tex = ruxen_canvas_window_metal_next_drawable((int64_t)h);
+    if (!tex) return NULL;
+
+    int64_t packed = ruxen_canvas_window_metal_drawable_size((int64_t)h);
+    int dw = packed ? (int)(uint32_t)(packed >> 32) : h->width;
+    int dh = packed ? (int)(uint32_t)(packed & 0xFFFFFFFF) : h->height;
+    if (dw <= 0 || dh <= 0) return NULL;
+
+    gr_mtl_textureinfo_t mtlinfo;
+    mtlinfo.fTexture = (const void *)(intptr_t)tex;
+    gr_backendrendertarget_t *rt = sk->gr_backendrendertarget_new_metal(dw, dh, &mtlinfo);
+    if (!rt) return NULL;
+
+    /* The drawable's texture is BGRA8 (we set the layer's pixelFormat), top-left
+     * origin for a Metal layer. */
+    sk_surface_t *surf = sk->surface_new_backend_render_target(
+        (gr_recording_context_t *)ctx, rt,
+        RX_GR_SURFACE_ORIGIN_TOP_LEFT, RX_SK_COLORTYPE_BGRA_8888, NULL, NULL);
+    if (!surf) {
+        sk->gr_backendrendertarget_delete(rt);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_backendrendertarget_delete(rt);
+        return NULL;
+    }
+    h->gr_target   = rt;
+    h->gpu_surface = surf;
+    h->sk_canvas   = canvas;
+    return canvas;
+}
+
+/* Release this frame's drawable surface + render target (after flush/present).
+ * The GrDirectContext (gr_context) persists across frames. */
+static void rx_metal_window_end_frame(RxHost *h) {
+    const RxSkia *sk = rx_skia();
+    if (h->gpu_surface) {
+        if (sk->surface_unref) sk->surface_unref((sk_surface_t *)h->gpu_surface);
+        h->gpu_surface = NULL;
+    }
+    if (h->gr_target) {
+        if (sk->gr_backendrendertarget_delete)
+            sk->gr_backendrendertarget_delete((gr_backendrendertarget_t *)h->gr_target);
+        h->gr_target = NULL;
+    }
+    h->sk_canvas = NULL;
+}
+
 /* Release the GPU objects in the correct order (surface -> target -> context ->
  * interface), BEFORE the GL context/window are destroyed by sdl_window.c. Safe
  * to call on a non-GPU host (all NULL). */
@@ -661,6 +768,7 @@ static void rx_host_gpu_teardown(RxHost *h) {
     if (h->is_gpu) { h->sk_canvas = NULL; h->is_gpu = 0; }
     h->gpu_backend_kind = RX_GPU_KIND_NONE;
     h->gpu_offscreen = 0;
+    h->gpu_windowed = 0;
 }
 
 
@@ -826,6 +934,57 @@ int64_t ruxen_canvas_host_enable_gpu_offscreen(int64_t self) {
     return RXC_OK;
 }
 
+/* Put this host into ON-SCREEN Metal GPU mode (docs/GPU.md): open a
+ * SDL_WINDOW_METAL window with a CAMetalLayer configured for the system Metal
+ * device, and a persistent GrDirectContext over it. Per frame, begin_frame
+ * acquires the layer's next drawable + builds a GPU surface over it; end_frame
+ * flushes; Window#present presents the drawable. Returns RXC_OK when the window
+ * + layer + context + a first drawable are live, or a clean RXC_ERR_* on ANY
+ * failure — in which case the host is torn back down (NOT half-GPU) so the
+ * caller falls back to the GL-window / raster path. Needs SDL + a display.
+ *
+ * The "first drawable" check is the gate that distinguishes a real display from
+ * a headless host: nextDrawable is nil without a window-server-backed layer, so
+ * a headless host fails here and falls back cleanly. */
+int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_window_ok) return RXC_ERR_NO_SKIA;
+    const RxMetal *mtl = rx_metal();
+    if (!mtl->available) return RXC_ERR_NO_SKIA;          /* no GPU device */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    /* Open the Metal window + layer, configured with our device + queue. Bounded
+     * + clean on a headless / no-SDL host (returns an Err, never blocks). */
+    int64_t wc = ruxen_canvas_window_create_metal(
+        self, (int64_t)(intptr_t)mtl->device, (int64_t)(intptr_t)mtl->queue);
+    if (wc != RXC_OK) return wc;
+
+    /* Build the persistent GrDirectContext and prove a drawable can be acquired
+     * (real display). On failure, tear the window back down for a clean fallback. */
+    if (!rx_metal_window_context(h)) {
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_NO_SKIA;
+    }
+    int64_t tex = ruxen_canvas_window_metal_next_drawable(self);
+    if (!tex) {
+        /* no drawable -> headless / no display: fall back to GL/raster. */
+        rx_host_gpu_teardown(h);
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_PRESENT;
+    }
+
+    h->gpu_requested    = 1;
+    h->gpu_windowed     = 1;
+    h->is_gpu           = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_METAL;
+    /* The drawable we just acquired to gate is released when the first
+     * begin_frame acquires its own; nothing rendered into it. */
+    return RXC_OK;
+}
+
 /* True (1) only when THIS host has a live GPU-backed Skia surface — a
  * GrDirectContext + GPU surface exist and draws genuinely go through the GPU
  * (GL window backend OR offscreen Metal). The unambiguous "GPU is rendering into
@@ -867,11 +1026,20 @@ int64_t ruxen_canvas_read_pixel(int64_t self, int64_t x, int64_t y) {
 
 /* ---- frame discipline ---- */
 
+static sk_canvas_t *rx_metal_window_begin_frame(RxHost *h);   /* fwd */
+
 int64_t ruxen_canvas_begin_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->in_frame) return RXC_ERR_IN_FRAME;
     h->in_frame = 1;
+    /* On-screen Metal: acquire this frame's drawable + build the per-frame GPU
+     * surface BEFORE any drawing. If no drawable (headless/no display), the
+     * frame has no GPU canvas and draws are skipped — a clean no-op, never wrong
+     * pixels (present is then also a no-op). */
+    if (h->gpu_windowed) {
+        rx_metal_window_begin_frame(h);   /* sets h->sk_canvas, or leaves NULL */
+    }
     /* Reset canvas state so NOTHING (transform or clip) leaks across frames.
      * restore_to_count(1) pops everything above the pristine base; reset_matrix
      * clears any base-level matrix change. Then we push one save so the whole

@@ -103,6 +103,12 @@ typedef struct RxHost {
      * command queue are a process-wide singleton (rx_metal), NOT per-host. */
     int32_t   gpu_backend_kind;
     int32_t   gpu_offscreen;  /* 1 iff this GPU host renders offscreen + reads back */
+    /* 1 iff this GPU host renders to an ON-SCREEN Metal CAMetalLayer: each frame
+     * acquires the layer's next drawable, builds a per-frame GPU surface over the
+     * drawable's texture, flush+submits, and presents the drawable. The surface +
+     * backend-render-target are per-frame (a fresh drawable each frame), unlike
+     * the offscreen path's persistent surface. docs/GPU.md. */
+    int32_t   gpu_windowed;
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */

@@ -317,6 +317,21 @@ typedef sk_surface_t *(*pfn_surface_new_render_target)(gr_recording_context_t *c
         int budgeted, const sk_imageinfo_t *info, int sample_count, int origin,
         const void *props, int should_create_with_mips);
 
+/* ON-SCREEN Metal: wrap a CAMetalDrawable's MTLTexture as a backend render
+ * target, so a GPU SkSurface renders directly into the window's drawable
+ * (docs/GPU.md). gr_mtl_textureinfo_t is just { const void* fTexture } — the
+ * drawable's texture pointer (from window_metal_next_drawable). The resulting
+ * render target feeds sk_surface_new_backend_render_target. Released per frame
+ * (gr_backendrendertarget_delete) since each frame wraps a fresh drawable. */
+typedef struct { const void *fTexture; } gr_mtl_textureinfo_t;
+typedef gr_backendrendertarget_t *(*pfn_gr_backendrendertarget_new_metal)(int width, int height,
+        const gr_mtl_textureinfo_t *mtlInfo);
+
+/* GPU -> CPU readback: copy the surface's pixels into dst (described by dstInfo)
+ * at (srcX, srcY). Returns nonzero on success. */
+typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
+        void *dst_pixels, size_t dst_row_bytes, int src_x, int src_y);
+
 /* GPU -> CPU readback: copy the surface's pixels into dst (described by dstInfo)
  * at (srcX, srcY). Returns nonzero on success. */
 typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
@@ -503,11 +518,14 @@ typedef struct {
     int gpu_gl_ok;   /* 1 iff every required GPU-GL symbol resolved */
 
     /* Ganesh Metal backend + offscreen GPU surface + readback (OPTIONAL;
-     * absence disables only the Metal rung). */
+     * absence disables only the Metal rung). gr_backendrendertarget_new_metal
+     * wraps an on-screen drawable's texture; offscreen uses surface_new_render_target. */
     pfn_gr_direct_context_make_metal     gr_direct_context_make_metal;
     pfn_surface_new_render_target        surface_new_render_target;
+    pfn_gr_backendrendertarget_new_metal gr_backendrendertarget_new_metal;
     pfn_surface_read_pixels              surface_read_pixels;
-    int gpu_metal_ok;  /* 1 iff every required GPU-Metal/readback symbol resolved */
+    int gpu_metal_ok;  /* 1 iff offscreen GPU-Metal/readback symbols resolved */
+    int gpu_metal_window_ok;  /* 1 iff on-screen drawable-wrap symbols also resolved */
 
     /* Positioned-glyph rendering for shaped text (OPTIONAL; absence disables
      * only shaping — the non-shaped text path is untouched). */
