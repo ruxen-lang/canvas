@@ -154,7 +154,7 @@ class Window
 
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
-  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested.
+  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested, 6 Scroll.
   def var poll_event -> Event?
     if self.windowed
       let _ = self.canvas.raw.window_pump
@@ -175,6 +175,8 @@ class Window
       Event.KeyDown(ia)
     elsif kind == 4
       Event.Resize(ia, ib)
+    elsif kind == 6
+      Event.Scroll(ia, ib)
     else
       Event.CloseRequested
     end
@@ -190,6 +192,7 @@ class Window
       Event.KeyDown(k)        -> self.canvas.raw.push_event_i_raw(3, k, 0)
       Event.Resize(w, h)      -> self.canvas.raw.push_event_i_raw(4, w, h)
       Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
+      Event.Scroll(dx, dy)    -> self.canvas.raw.push_event_i_raw(6, dx, dy)
     end
     if Rxc.is_ok(code)
       Ok(nil)

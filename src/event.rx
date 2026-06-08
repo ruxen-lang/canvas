@@ -15,8 +15,11 @@ enum Event
   PointerUp(Int, Int)
   ## A key was pressed (platform keycode).
   KeyDown(Int)
-  ## The window was resized to (width, height).
+  ## The window was resized to (width, height) in DESIGN coordinates.
   Resize(Int, Int)
+  ## The mouse wheel scrolled by (dx, dy) in wheel "clicks" (+y = up / away from
+  ## the user, +x = right). L2 routes this to scroll the hovered widget.
+  Scroll(Int, Int)
   ## The application/window was asked to close.
   CloseRequested
 end

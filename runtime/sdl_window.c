@@ -59,6 +59,7 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define RX_EV_KEY_DOWN     3
 #define RX_EV_RESIZE       4
 #define RX_EV_CLOSE        5
+#define RX_EV_SCROLL       6
 
 /* ---- SDL2 constants (from the stable public ABI) ---- */
 #define SDL_INIT_VIDEO            0x00000020u
@@ -68,10 +69,17 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define SDL_PIXELFORMAT_ARGB8888  0x16362004u
 #define SDL_TEXTUREACCESS_STREAMING 1
 #define SDL_QUIT_EV               0x100u
+#define SDL_WINDOWEVENT_EV        0x200u
 #define SDL_KEYDOWN_EV            0x300u
 #define SDL_MOUSEMOTION_EV        0x400u
 #define SDL_MOUSEBUTTONDOWN_EV    0x401u
 #define SDL_MOUSEBUTTONUP_EV      0x402u
+#define SDL_MOUSEWHEEL_EV         0x403u
+/* SDL_WindowEventID subtype (SDL_WindowEvent.event @ byte 12, Uint8). */
+#define SDL_WINDOWEVENT_RESIZED   5
+/* SDL_WINDOW_RESIZABLE — let the user resize the window; we re-create the GPU
+ * surface/drawable at the new backing size and emit Event.Resize. */
+#define SDL_WINDOW_RESIZABLE      0x00000020u
 
 /* SDL_GLattr (from SDL_video.h — stable ABI) used to request a GL context the
  * Ganesh GL backend can render into. We ask for a core-profile context with a
@@ -339,7 +347,7 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     s_win = s_CreateWindow(t,
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
                            h->width * s_scale, h->height * s_scale,
-                           SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+                           SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_ren = s_CreateRenderer(s_win, -1, 0);
     if (!s_ren) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_NO_SDL; }
@@ -444,7 +452,7 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
     s_win = s_CreateWindow("ruxen-gl",
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
                            h->width * ws, h->height * ws,
-                           SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+                           SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_glctx = s_GL_CreateContext(s_win);
     if (!s_glctx) {
@@ -457,7 +465,12 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
         return RXC_ERR_PRESENT;
     }
     if (s_GL_SetSwapInterval) s_GL_SetSwapInterval(1);   /* vsync; best-effort */
-    s_scale = 1;
+    /* s_scale is the DESIGN->window-point factor (the show_gpu_scaled factor),
+     * used by the pump to map mouse POINTS (0..width*ws) back to design coords
+     * (/ ws). NOT the backing/dpr scale — SDL reports mouse in logical points
+     * under ALLOW_HIGHDPI; the backing drawable size is tracked separately for
+     * the render surface. */
+    s_scale = ws;
     s_tex_w = h->width;     /* reuse the size guard fields for the GL window */
     s_tex_h = h->height;
     s_owner = (void *)h;
@@ -564,9 +577,13 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
     mtl_msg_u(s_mtl_layer, "setFramebufferOnly:", 0);
     mtl_set_drawable_size(s_mtl_layer, (double)dpw, (double)dph);
 
-    /* Track the NATIVE backing size — window_metal_drawable_size returns this, so
-     * the shim builds the GPU surface at native resolution (crisp by construction). */
-    s_scale = 1;
+    /* s_scale = the DESIGN->window-point factor (the show_gpu_scaled factor), so
+     * the pump maps mouse POINTS (0..width*ws) back to design coords (/ ws). This
+     * is SEPARATE from the backing/dpr scale: s_tex_w/h track the native backing
+     * (drawable) size for the render surface; the pump never uses them. SDL
+     * reports mouse in logical points under ALLOW_HIGHDPI, so the dpr does not
+     * enter the pump. */
+    s_scale = ws;
     s_tex_w = dpw;
     s_tex_h = dph;
     s_owner = (void *)h;
@@ -639,16 +656,45 @@ int64_t ruxen_canvas_window_metal_present(int64_t self) {
     return RXC_OK;
 }
 
-/* Drain SDL's event queue into the host's RxEvent ring. Returns the
- * number of events forwarded (>= 0), or a negative status on bad args.
- * Unknown SDL event types are skipped.
- *
- * HiDPI note: SDL2 reports mouse coordinates in LOGICAL window points (not
- * backing pixels) even with ALLOW_HIGHDPI, so mapping a point to framebuffer
- * coords is framebuffer_size / logical_window_size = h->width / (h->width *
- * s_scale) = 1 / s_scale. The integer divide below is therefore the correct
- * device-point -> framebuffer-coord ratio; the Retina backing scale does not
- * enter here (SDL already accounts for it in the point coordinates). */
+/* Coordinate mapping (the pump): SDL2 reports mouse in LOGICAL window POINTS
+ * (0..width*ws), not backing pixels, even under ALLOW_HIGHDPI. The app works in
+ * DESIGN coords (0..width). The window opens at width*ws (the show /
+ * show_scaled / show_gpu_scaled factor), so point -> design is point / ws =
+ * point / s_scale. s_scale is set to the show factor by EVERY windowed backend
+ * (raster, GL, Metal), so this maps points to design coords on all of them. The
+ * Retina backing/dpr does NOT enter here (SDL accounts for it in the point
+ * coordinates; the backing size is tracked separately, only for the render
+ * surface). Factored out so the headless pump-mapping test exercises the EXACT
+ * arithmetic the pump uses. */
+static double rx_map_point(int32_t window_point) {
+    return (double)window_point / (double)(s_scale > 0 ? s_scale : 1);
+}
+
+/* shim hook: invalidate a windowed GL host's persistent GPU surface so the next
+ * begin_frame rebuilds it at the new backing size (defined in skia_shim.c). */
+void ruxen_canvas_host_gl_invalidate_surface(int64_t self);
+
+/* On a window resize: the design->point factor s_scale is unchanged (the design
+ * stays h->width), but the backing drawable grows/shrinks. For Metal, update the
+ * layer's drawableSize to the new backing pixels so the next frame's drawable +
+ * GPU surface are the new size (begin_frame picks them up via the drawable). For
+ * GL (persistent surface), tell the shim to drop + rebuild the surface at the new
+ * size on the next frame. */
+static void rx_window_on_resized(int64_t self) {
+    if (s_mtl_layer && s_Metal_GetDrawableSize) {
+        int dpw = 0, dph = 0;
+        s_Metal_GetDrawableSize(s_win, &dpw, &dph);
+        if (dpw > 0 && dph > 0) {
+            mtl_set_drawable_size(s_mtl_layer, (double)dpw, (double)dph);
+            s_tex_w = dpw;   /* window_metal_drawable_size now returns the new size */
+            s_tex_h = dph;
+        }
+    } else if (s_glctx) {
+        /* GL: the drawable size is queried fresh each rebuild; just invalidate. */
+        ruxen_canvas_host_gl_invalidate_surface(self);
+    }
+}
+
 int64_t ruxen_canvas_window_pump(int64_t self) {
     if (!self) return -RXC_ERR_BAD_ARGS;
     if (!s_win || s_owner != (void *)self) return 0;
@@ -662,19 +708,27 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
         case SDL_MOUSEMOTION_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_MOVE,
-                                    (double)xi / s_scale, (double)yi / s_scale);
+                                    rx_map_point(xi), rx_map_point(yi));
             forwarded++;
             break;
         case SDL_MOUSEBUTTONDOWN_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
-                                    (double)xi / s_scale, (double)yi / s_scale);
+                                    rx_map_point(xi), rx_map_point(yi));
             forwarded++;
             break;
         case SDL_MOUSEBUTTONUP_EV:
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
             ruxen_canvas_push_event(self, RX_EV_POINTER_UP,
-                                    (double)xi / s_scale, (double)yi / s_scale);
+                                    rx_map_point(xi), rx_map_point(yi));
+            forwarded++;
+            break;
+        case SDL_MOUSEWHEEL_EV:
+            /* SDL_MouseWheelEvent: Sint32 x @ 16, y @ 20 (wheel deltas; +y = up,
+             * +x = right). Wheel deltas are integer "clicks", not coords — NOT
+             * scaled by s_scale. Forwarded as Event.Scroll(dx, dy). */
+            memcpy(&xi, ev + 16, 4); memcpy(&yi, ev + 20, 4);
+            ruxen_canvas_push_event(self, RX_EV_SCROLL, (double)xi, (double)yi);
             forwarded++;
             break;
         case SDL_KEYDOWN_EV:
@@ -682,6 +736,21 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
             ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
             forwarded++;
             break;
+        case SDL_WINDOWEVENT_EV: {
+            /* SDL_WindowEvent: Uint8 event @ 12, Sint32 data1 @ 16, data2 @ 20.
+             * On RESIZED, data1/data2 are the new window size in POINTS; we emit
+             * Resize in DESIGN coords (/ s_scale) and re-size the backing surface. */
+            unsigned char subtype = ev[12];
+            if (subtype == SDL_WINDOWEVENT_RESIZED) {
+                int32_t w1, h1;
+                memcpy(&w1, ev + 16, 4); memcpy(&h1, ev + 20, 4);
+                rx_window_on_resized(self);
+                ruxen_canvas_push_event(self, RX_EV_RESIZE,
+                                        rx_map_point(w1), rx_map_point(h1));
+                forwarded++;
+            }
+            break;
+        }
         case SDL_QUIT_EV:
             ruxen_canvas_push_event(self, RX_EV_CLOSE, 0.0, 0.0);
             forwarded++;
@@ -691,6 +760,25 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
         }
     }
     return forwarded;
+}
+
+/* ---- test seam for the pump's coordinate mapping (headless) ----
+ *
+ * The real pump only runs with a live SDL window (gated off in the test
+ * harness), so we cannot drive it with synthetic SDL events headless. This seam
+ * sets s_scale directly and runs the EXACT mapping the pump uses (rx_map_point)
+ * on a synthetic window-point pointer event, pushing the design-mapped result
+ * into the host's ring. The test then polls it back and asserts point / scale.
+ * Test-only; mirrors the pump's arithmetic so a regression in either is caught. */
+int64_t ruxen_canvas_window_pump_test_pointer(int64_t self, int64_t show_scale,
+                                              int64_t win_x, int64_t win_y) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    int saved = s_scale;
+    s_scale = (show_scale >= 1) ? (int)show_scale : 1;
+    ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
+                            rx_map_point((int32_t)win_x), rx_map_point((int32_t)win_y));
+    s_scale = saved;
+    return RXC_OK;
 }
 
 /* Tear the window down (idempotent). The dlopen handle stays cached.

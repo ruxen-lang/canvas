@@ -31,7 +31,7 @@
 /* ---- events ---- */
 
 #define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 5  /* CloseRequested — keep in sync with Event in src/lib.rx */
+#define RXC_EVENT_KIND_MAX 6  /* Scroll — keep in sync with Event in src/lib.rx */
 
 typedef struct {
     int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */

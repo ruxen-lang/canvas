@@ -97,5 +97,9 @@ class RawHost
     def window_metal_drawable_size as "ruxen_canvas_window_metal_drawable_size"(self) -> Int
     def self.sdl_available as "ruxen_canvas_sdl_available" -> Int
     def self.window_metal_available as "ruxen_canvas_window_metal_available" -> Int
+    # Test seam: run the pump's exact point->design mapping (/ show_scale) on a
+    # synthetic window-point pointer event, pushing the design-mapped result into
+    # the ring — so the coord math is headless-verifiable without a live window.
+    def window_pump_test_pointer as "ruxen_canvas_window_pump_test_pointer"(self, show_scale: Int, win_x: Int, win_y: Int) -> Int
   end
 end

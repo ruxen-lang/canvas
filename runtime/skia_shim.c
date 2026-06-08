@@ -584,6 +584,27 @@ static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
     return canvas;
 }
 
+static void rx_host_gpu_teardown(RxHost *h);   /* fwd */
+
+/* Invalidate a windowed GL host's persistent GPU surface after a window resize,
+ * so the NEXT begin_frame rebuilds it at the new backing (drawable) size. The GL
+ * default framebuffer was resized by the driver; we drop the now-wrongly-sized
+ * GrBackendRenderTarget + surface (+ context/interface) and clear the gpu_tried
+ * guard, leaving the host gpu_requested so rx_host_canvas rebuilds. Metal does
+ * not need this (its surface is per-frame). Called from the SDL resize handler. */
+void ruxen_canvas_host_gl_invalidate_surface(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return;
+    if (!h->is_gpu || h->gpu_windowed || h->gpu_offscreen) return;  /* GL windowed only */
+    if (h->gpu_backend_kind != RX_GPU_KIND_GL) return;
+    rx_host_gpu_teardown(h);     /* drops surface->target->context->interface;
+                                  * sets is_gpu=0, gpu_backend_kind=NONE. */
+    /* gpu_requested stays 1, so rx_host_canvas's gpu_requested branch calls
+     * rx_host_gpu_canvas to REBUILD the surface at the new drawable size on the
+     * next frame. Clearing gpu_tried re-arms that builder. */
+    h->gpu_tried = 0;
+}
+
 /* ---- Metal offscreen GPU surface (the headless pixel-verified path) ----
  *
  * Create (once per host) a GrDirectContext over the process-wide Metal device +

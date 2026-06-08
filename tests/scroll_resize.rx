@@ -1,0 +1,59 @@
+# Pin tests for the new Scroll event + the Resize round-trip through the ring.
+# Both are additive event variants the pump emits (SDL_MOUSEWHEEL -> Scroll,
+# SDL_WINDOWEVENT_RESIZED -> Resize). Verified via the push/poll ring round-trip
+# (the live SDL pump is gated off in the harness; the ring is the same path).
+
+Tester.describe("Event.Scroll") do |t: &var Tester|
+  t.it("round-trips Scroll(dx, dy) through the queue") do
+    var w = match Window.open(String.from("scroll"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.Scroll(-1, 3))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event Scroll failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.Scroll(dx, dy)) -> ok = dx == -1 && dy == 3
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("a positive y scroll (wheel up) round-trips") do
+    var w = match Window.open(String.from("scroll2"), 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.Scroll(0, 5))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var dy = 0
+    match w.poll_event
+      Some(Event.Scroll(_, y)) -> dy = y
+      _ -> dy = 0
+    end
+    t.expect(dy).to_eq(5)
+  end
+end
+
+Tester.describe("Event.Resize") do |t: &var Tester|
+  t.it("round-trips Resize(w, h) through the queue") do
+    var w = match Window.open(String.from("resize"), 32, 24)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.Resize(400, 300))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event Resize failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.Resize(rw, rh)) -> ok = rw == 400 && rh == 300
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+end
