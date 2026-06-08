@@ -518,6 +518,27 @@ class Canvas
     self.status_to_result(self.raw.enable_gpu_offscreen_raw, "enable_gpu_offscreen")
   end
 
+  ## Set this canvas's **design size** — the logical coordinate space the app
+  ## draws in. `begin_frame` then applies a base content-scale = surface(backing)
+  ## pixel size / design size, so design-coordinate draws fill the native backing
+  ## surface at native resolution (crisp HiDPI). Windowed canvases set this
+  ## automatically; you only call this to opt an offscreen canvas into the same
+  ## content-scale (e.g. render a design-size UI into a larger backing buffer).
+  ## Pass `0, 0` to disable (scale 1). Call before the first `begin_frame`.
+  def var set_design_size(design_w: Int, design_h: Int) -> Result[nil, String]
+    self.status_to_result(self.raw.set_design_size_raw(design_w, design_h), "set_design_size")
+  end
+
+  ## The active design->backing content scale as `(sx, sy)` Float32 (1.0 when no
+  ## content scale is set). Lets L2/tests read the density a logical-coord frame
+  ## renders at — e.g. a 320-design canvas on a 640-backing surface reports 2.0.
+  def content_scale -> (Float32, Float32)
+    let packed = self.raw.content_scale_raw
+    let fx = (packed >> 32) & 0xFFFFFFFF
+    let fy = packed & 0xFFFFFFFF
+    ((fx as Float32) / 65536.0f32, (fy as Float32) / 65536.0f32)
+  end
+
   ## INTERNAL (used by Window.open): attach the live OS window. Mirrors
   ## draw_text's exact FFI calling shape — an owned String parameter
   ## borrowed at the call — which is the one &String form that lowers

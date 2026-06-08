@@ -109,6 +109,22 @@ typedef struct RxHost {
      * backend-render-target are per-frame (a fresh drawable each frame), unlike
      * the offscreen path's persistent surface. docs/GPU.md. */
     int32_t   gpu_windowed;
+
+    /* ---- HiDPI design->backing content scale (docs/GPU.md) ----
+     * The app draws at DESIGN coordinates (e.g. Window.open(320,360) -> draws a
+     * 320x360 UI), but the windowed surface is sized to the native BACKING pixels
+     * (e.g. 640x720 on a 2x display). To render design content crisp at native
+     * resolution, begin_frame applies a base transform scale = surface_size /
+     * design_size as the FIRST canvas transform, so all design-coord draws fill
+     * the backing surface and Skia rasterizes glyphs/shapes at native density.
+     *
+     * design_w/design_h == 0 means "no content scale" — the default for offscreen
+     * / test surfaces, which draw at explicit pixel sizes (scale 1). Windowed
+     * hosts set this to their logical (design) size at enable; an offscreen host
+     * can set it explicitly to make the content-scale logic headless-testable
+     * (a backing-sized framebuffer with a smaller design size). */
+    int32_t   design_w;
+    int32_t   design_h;
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */

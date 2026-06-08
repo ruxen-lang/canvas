@@ -901,6 +901,11 @@ int64_t ruxen_canvas_host_enable_gpu(int64_t self) {
         ruxen_canvas_window_note_host_dropped(self);
         return RXC_ERR_NO_SKIA;
     }
+    /* DESIGN size = the logical framebuffer size; begin_frame scales design->
+     * backing so logical-coord apps fill the native GL drawable at native
+     * density (crisp). Same as the Metal windowed path. */
+    h->design_w = h->width;
+    h->design_h = h->height;
     return RXC_OK;
 }
 
@@ -980,6 +985,11 @@ int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self) {
     h->gpu_windowed     = 1;
     h->is_gpu           = 1;
     h->gpu_backend_kind = RX_GPU_KIND_METAL;
+    /* DESIGN size = the logical framebuffer size (what Window.open allocated).
+     * begin_frame scales design->backing so a logical-coord app fills the native
+     * drawable at native density (crisp), no per-app wiring. */
+    h->design_w = h->width;
+    h->design_h = h->height;
     /* The drawable we just acquired to gate is released when the first
      * begin_frame acquires its own; nothing rendered into it. */
     return RXC_OK;
@@ -993,6 +1003,38 @@ int64_t ruxen_canvas_gpu_active(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return 0;
     return (h->is_gpu && h->gpu_surface) ? 1 : 0;
+}
+
+static void rx_host_content_scale(RxHost *h, double *sx, double *sy);  /* fwd */
+
+/* Set the DESIGN size for this host — the logical coordinate space the app draws
+ * in. begin_frame then applies a base content-scale = surface(backing) size /
+ * design size, so design-coordinate draws fill the native backing surface at
+ * native resolution. Windowed hosts set this automatically at enable; this entry
+ * lets an OFFSCREEN surface opt into the same content-scale (e.g. a backing-sized
+ * framebuffer with a smaller design size — the headless content-scale test).
+ * Pass 0,0 to disable (back to scale 1). Returns RXC_OK. */
+int64_t ruxen_canvas_host_set_design_size(int64_t self, int64_t design_w, int64_t design_h) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (design_w < 0 || design_h < 0) return RXC_ERR_BAD_ARGS;
+    h->design_w = (int32_t)design_w;
+    h->design_h = (int32_t)design_h;
+    return RXC_OK;
+}
+
+/* The content scale applied to design coordinates this frame, packed as two
+ * 16.16 fixed-point ratios: (sx << 32) | sy, each = round(scale * 65536). 1.0 ==
+ * 0x10000. Lets L2/tests read the active design->backing scale (1.0 when none).
+ * Sized fields probe — not part of the draw ABI. */
+int64_t ruxen_canvas_content_scale(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return ((int64_t)0x10000 << 32) | 0x10000;
+    double sx = 1.0, sy = 1.0;
+    rx_host_content_scale(h, &sx, &sy);
+    int64_t fx = (int64_t)(sx * 65536.0 + 0.5);
+    int64_t fy = (int64_t)(sy * 65536.0 + 0.5);
+    return (fx << 32) | (fy & 0xFFFFFFFF);
 }
 
 /* Which GPU backend is live for this host: RX_GPU_KIND_NONE (0, raster),
@@ -1028,6 +1070,44 @@ int64_t ruxen_canvas_read_pixel(int64_t self, int64_t x, int64_t y) {
 
 static sk_canvas_t *rx_metal_window_begin_frame(RxHost *h);   /* fwd */
 
+/* The PIXEL size of the host's active rendering surface. For an ON-SCREEN GPU
+ * host (windowed Metal OR windowed GL) this is the window's drawable (backing)
+ * size; otherwise it is the framebuffer size (h->width/height — which for the
+ * offscreen content-scale test IS the backing size). Used to derive the
+ * design->backing content scale. */
+static void rx_host_surface_size(RxHost *h, int *out_w, int *out_h) {
+    int sw = h->width, sh = h->height;
+    int64_t packed = 0;
+    if (h->gpu_windowed) {
+        /* windowed Metal: per-frame drawable */
+        packed = ruxen_canvas_window_metal_drawable_size((int64_t)h);
+    } else if (h->is_gpu && !h->gpu_offscreen && h->gpu_backend_kind == RX_GPU_KIND_GL) {
+        /* windowed GL: the GL default-framebuffer drawable */
+        packed = ruxen_canvas_window_gl_drawable_size((int64_t)h);
+    }
+    if (packed != 0) {
+        int dw = (int)(uint32_t)(packed >> 32);
+        int dh = (int)(uint32_t)(packed & 0xFFFFFFFF);
+        if (dw > 0 && dh > 0) { sw = dw; sh = dh; }
+    }
+    *out_w = sw;
+    *out_h = sh;
+}
+
+/* The HiDPI design->backing content scale for this host: surface(backing) size /
+ * design size. Returns 1.0/1.0 (no scale) when design_w/h is unset (offscreen /
+ * test surfaces draw at explicit pixel sizes). Applied as the base transform in
+ * begin_frame so DESIGN-coordinate draws fill the backing surface at native
+ * resolution (crisp glyphs/shapes). docs/GPU.md. */
+static void rx_host_content_scale(RxHost *h, double *sx, double *sy) {
+    *sx = 1.0; *sy = 1.0;
+    if (h->design_w <= 0 || h->design_h <= 0) return;   /* no content scale */
+    int sw = 0, sh = 0;
+    rx_host_surface_size(h, &sw, &sh);
+    if (sw > 0 && h->design_w > 0) *sx = (double)sw / (double)h->design_w;
+    if (sh > 0 && h->design_h > 0) *sy = (double)sh / (double)h->design_h;
+}
+
 int64_t ruxen_canvas_begin_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
@@ -1042,16 +1122,26 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     }
     /* Reset canvas state so NOTHING (transform or clip) leaks across frames.
      * restore_to_count(1) pops everything above the pristine base; reset_matrix
-     * clears any base-level matrix change. Then we push one save so the whole
-     * frame runs at depth >= 2 — this is what lets the NEXT begin_frame's
-     * restore_to_count(1) discard even a clip the caller applied WITHOUT a save
-     * (a base-level clip is not undone by restore_to_count alone, and there is
-     * no reset-clip call). Same approach Flutter uses (an outer per-frame save). */
+     * clears any base-level matrix change.
+     *
+     * Then apply the HiDPI content scale (design->backing) as the FIRST transform
+     * — so DESIGN-coordinate draws fill the native-pixel backing surface and Skia
+     * rasterizes at native density (crisp). This is a no-op (scale 1) for
+     * offscreen/test surfaces (design_w/h unset). Finally push one save so the
+     * whole frame runs at depth >= 2 — letting the NEXT begin_frame's
+     * restore_to_count(1) discard even a base-level clip the caller applied
+     * without a save. The content scale lives BELOW that save, so it is the
+     * pristine base every frame re-establishes (and save/restore can't lose it). */
     sk_canvas_t *canvas = rx_host_canvas(h);
     if (canvas) {
         const RxSkia *sk = rx_skia();
         if (sk->canvas_restore_to_count) sk->canvas_restore_to_count(canvas, 1);
         if (sk->canvas_reset_matrix) sk->canvas_reset_matrix(canvas);
+        double sx = 1.0, sy = 1.0;
+        rx_host_content_scale(h, &sx, &sy);
+        if ((sx != 1.0 || sy != 1.0) && sk->canvas_scale) {
+            sk->canvas_scale(canvas, (float)sx, (float)sy);
+        }
         if (sk->canvas_save) sk->canvas_save(canvas);
     }
     return RXC_OK;
