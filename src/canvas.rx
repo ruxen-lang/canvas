@@ -362,13 +362,42 @@ class Canvas
     self.raw.gpu_available_raw
   end
 
-  ## True only when THIS canvas has a live GPU-backed Skia surface — a GL context
-  ## plus a GrDirectContext plus a backend-render-target surface all exist and
-  ## draws genuinely go through the GPU. The unambiguous "GPU is rendering into
-  ## me" signal (mirrors `skia_active?` for the raster surface). False on a
-  ## headless / no-GL / no-Ganesh host, where drawing falls back cleanly.
+  ## True only when THIS canvas has a live GPU-backed Skia surface — a
+  ## GrDirectContext plus a GPU surface exist and draws genuinely go through the
+  ## GPU (GL window backend OR offscreen Metal). The unambiguous "GPU is
+  ## rendering into me" signal (mirrors `skia_active?` for the raster surface).
+  ## False on a host where no GPU surface could be built, where drawing falls
+  ## back cleanly.
   def gpu_active? -> Bool
     self.raw.gpu_active_raw
+  end
+
+  ## True when the **Metal** GPU backend specifically can run here: the Metal
+  ## Skia symbols resolved AND a system Metal device + command queue were
+  ## created. This gates `enable_gpu_offscreen` — the headless, no-window GPU
+  ## render+readback path on Apple. Always false off Apple / where no GPU device
+  ## is present.
+  def gpu_metal_available? -> Bool
+    self.raw.gpu_metal_available_raw
+  end
+
+  ## Which GPU backend is live for this canvas: 0 = none (raster/software),
+  ## 1 = OpenGL (Ganesh GL), 2 = Metal. The `gpu_backend_kind` slot, so callers
+  ## can tell which rung the selection ladder landed on.
+  def gpu_backend_kind -> Int
+    self.raw.gpu_backend_kind_raw
+  end
+
+  ## Put THIS canvas onto an **offscreen Metal GPU surface** (Apple): subsequent
+  ## draws render on the GPU and `end_frame` reads the result back into the
+  ## framebuffer, so `read_pixel` observes real GPU output — no window or display
+  ## needed. The headless GPU pixel-verification path (docs/GPU.md). Returns
+  ## `Ok(nil)` when the Metal surface is live (`gpu_active?` then true,
+  ## `gpu_backend_kind == 2`), or a clean `Err` when Metal is unavailable — in
+  ## which case the canvas stays on the raster/software path (never half-GPU,
+  ## never wrong pixels). Must be called before the first `begin_frame`/draw.
+  def var enable_gpu_offscreen -> Result[nil, String]
+    self.status_to_result(self.raw.enable_gpu_offscreen_raw, "enable_gpu_offscreen")
   end
 
   ## INTERNAL (used by Window.open): attach the live OS window. Mirrors

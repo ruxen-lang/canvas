@@ -93,6 +93,16 @@ typedef struct RxHost {
     int32_t   gpu_requested;  /* caller asked for the GPU backend on this host */
     int32_t   gpu_tried;      /* GPU surface creation attempted (success or not) */
     int32_t   is_gpu;         /* 1 iff sk_canvas currently targets the GPU surface */
+
+    /* Which GPU backend is live for this host (RX_GPU_KIND_*; 0 = raster). The
+     * Metal rung reuses gr_context (its GrDirectContext) + gpu_surface (an
+     * OFFSCREEN GPU surface) but has no gr_target / gl_interface. For the Metal
+     * offscreen path, gpu_offscreen marks that end_frame must read the GPU
+     * surface's pixels back into `pixels` so read_pixel observes real GPU output
+     * (the headless pixel-verification path — docs/GPU.md). The Metal device +
+     * command queue are a process-wide singleton (rx_metal), NOT per-host. */
+    int32_t   gpu_backend_kind;
+    int32_t   gpu_offscreen;  /* 1 iff this GPU host renders offscreen + reads back */
 } RxHost;
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */

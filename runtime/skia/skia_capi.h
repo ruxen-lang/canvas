@@ -85,6 +85,11 @@ enum { RX_GR_GL_RGBA8 = 0x8058 };
 /* sk_colortype_t for the GPU surface — RGBA_8888 == 4 (BGRA_8888 == 6 above). */
 enum { RX_SK_COLORTYPE_RGBA_8888 = 4 };
 
+/* Which GPU backend a host's surface is rendered by — the gpu_backend_kind slot.
+ * 0 when the host is on the raster/software path. Probed via
+ * ruxen_canvas_gpu_backend_kind so L2/tests can tell GL from Metal. */
+enum { RX_GPU_KIND_NONE = 0, RX_GPU_KIND_GL = 1, RX_GPU_KIND_METAL = 2 };
+
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
     sk_colorspace_t *colorspace;   /* NULL = sRGB/unmanaged */
@@ -288,6 +293,33 @@ typedef sk_surface_t *(*pfn_surface_new_backend_render_target)(gr_recording_cont
         const gr_backendrendertarget_t *rt, int origin, int colortype,
         sk_colorspace_t *cs, const void *props);
 
+/* ---- Ganesh Metal backend + offscreen GPU surface + readback (docs/GPU.md) ----
+ *
+ * Metal is the native Apple GPU path (this build is SK_METAL=1 — verified). The
+ * device + command queue come from Metal.framework / the objc runtime (created
+ * in skia_shim.c, not by Skia); gr_direct_context_make_metal consumes them.
+ *
+ * The headless prize: sk_surface_new_render_target makes an OFFSCREEN GPU
+ * surface (Skia allocates its own MTLTexture — no window, no CAMetalLayer), and
+ * sk_surface_read_pixels copies the rendered GPU pixels back to CPU memory. With
+ * a BGRA_8888 surface the readback is byte-identical to the host's 0xAARRGGBB
+ * framebuffer, so the existing read_pixel oracle observes real GPU output. */
+
+/* device + queue are id<MTLDevice> / id<MTLCommandQueue> (opaque). */
+typedef gr_direct_context_t *(*pfn_gr_direct_context_make_metal)(void *device, void *queue);
+
+/* Offscreen GPU surface: Skia allocates the render target. budgeted!=0 lets the
+ * context recycle it; sampleCount 0 = no MSAA; origin top-left for offscreen;
+ * mips!=0 builds mipmaps (0 here). NULL on failure. sk_surface_unref to free. */
+typedef sk_surface_t *(*pfn_surface_new_render_target)(gr_recording_context_t *ctx,
+        int budgeted, const sk_imageinfo_t *info, int sample_count, int origin,
+        const void *props, int should_create_with_mips);
+
+/* GPU -> CPU readback: copy the surface's pixels into dst (described by dstInfo)
+ * at (srcX, srcY). Returns nonzero on success. */
+typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
+        void *dst_pixels, size_t dst_row_bytes, int src_x, int src_y);
+
 /* ---- the resolved loader ---- */
 typedef struct {
     int available;    /* 1 iff the .so loaded and all required symbols resolved */
@@ -377,6 +409,13 @@ typedef struct {
     pfn_gr_backendrendertarget_delete    gr_backendrendertarget_delete;
     pfn_surface_new_backend_render_target surface_new_backend_render_target;
     int gpu_gl_ok;   /* 1 iff every required GPU-GL symbol resolved */
+
+    /* Ganesh Metal backend + offscreen GPU surface + readback (OPTIONAL;
+     * absence disables only the Metal rung). */
+    pfn_gr_direct_context_make_metal     gr_direct_context_make_metal;
+    pfn_surface_new_render_target        surface_new_render_target;
+    pfn_surface_read_pixels              surface_read_pixels;
+    int gpu_metal_ok;  /* 1 iff every required GPU-Metal/readback symbol resolved */
 } RxSkia;
 
 /* Lazily dlopen()s libSkiaSharp and resolves the table on first call; returns

@@ -223,6 +223,12 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(gr_backendrendertarget_new_gl, "gr_backendrendertarget_new_gl");
     RX_SK_OPTIONAL(gr_backendrendertarget_delete, "gr_backendrendertarget_delete");
     RX_SK_OPTIONAL(surface_new_backend_render_target, "sk_surface_new_backend_render_target");
+
+    /* Ganesh Metal backend + offscreen GPU surface + readback (docs/GPU.md).
+     * OPTIONAL: a miss leaves gpu_metal_ok = 0, disabling only the Metal rung. */
+    RX_SK_OPTIONAL(gr_direct_context_make_metal,  "gr_direct_context_make_metal");
+    RX_SK_OPTIONAL(surface_new_render_target,     "sk_surface_new_render_target");
+    RX_SK_OPTIONAL(surface_read_pixels,           "sk_surface_read_pixels");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
 
@@ -239,10 +245,74 @@ const RxSkia *rx_skia(void) {
         skia.surface_new_backend_render_target &&
         skia.surface_unref ? 1 : 0;
 
+    /* The GPU-Metal rung needs: make a direct context from a device+queue,
+     * create the offscreen render-target surface, read it back, unref the
+     * context + surface. (The device/queue themselves come from Metal.framework
+     * via rx_metal(), resolved separately below.) */
+    skia.gpu_metal_ok =
+        skia.gr_direct_context_make_metal &&
+        skia.surface_new_render_target &&
+        skia.surface_read_pixels &&
+        skia.gr_recording_context_unref &&
+        skia.surface_unref ? 1 : 0;
+
     /* Keep the handle open for the process lifetime (no dlclose): the resolved
      * pointers must stay valid. */
     skia.available = ok;
     return &skia;
+}
+
+/* ---- Metal device + command queue (Apple GPU, docs/GPU.md) ----
+ *
+ * The GrDirectContext for Metal needs an id<MTLDevice> + id<MTLCommandQueue>.
+ * These come from Metal.framework + the Objective-C runtime, reached by dlopen
+ * (no link-time dependency — same discipline as Skia/SDL). The device + queue
+ * are a PROCESS-WIDE singleton: there is one GPU, and a device outlives any one
+ * surface (the same never-freed-singleton model as the default font). They are
+ * created on first use and cached; a host's GrDirectContext + surface are the
+ * per-host objects torn down in host_drop, NOT the device/queue.
+ *
+ * MTLCreateSystemDefaultDevice() returns the system GPU WITHOUT any window or
+ * display — this is what makes offscreen, headless Metal rendering possible. */
+typedef struct {
+    int   tried;
+    int   available;   /* 1 iff device + queue were created */
+    void *device;      /* id<MTLDevice> */
+    void *queue;       /* id<MTLCommandQueue> */
+} RxMetal;
+
+static const RxMetal *rx_metal(void) {
+    static RxMetal m;
+    if (m.tried) return &m;
+    m.tried = 1;
+
+    /* Metal.framework: MTLCreateSystemDefaultDevice is a plain C function (it
+     * does not appear in nm's exported list but dlsym resolves it). */
+    void *mtl = dlopen("/System/Library/Frameworks/Metal.framework/Metal",
+                       RTLD_NOW | RTLD_GLOBAL);
+    if (!mtl) return &m;
+    void *(*create_device)(void) = (void *(*)(void))dlsym(mtl, "MTLCreateSystemDefaultDevice");
+    if (!create_device) return &m;
+
+    /* Objective-C runtime: we need one no-arg message send ([device
+     * newCommandQueue]). On arm64/x86_64 a simple id-returning, no-struct
+     * objc_msgSend is called through a plain function-pointer cast. */
+    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) return &m;
+    void *(*msg_send)(void *, void *) = (void *(*)(void *, void *))dlsym(objc, "objc_msgSend");
+    void *(*sel_reg)(const char *)    = (void *(*)(const char *))dlsym(objc, "sel_registerName");
+    if (!msg_send || !sel_reg) return &m;
+
+    void *device = create_device();
+    if (!device) return &m;                 /* no GPU available */
+    void *queue = msg_send(device, sel_reg("newCommandQueue"));
+    if (!queue) return &m;
+
+    m.device    = device;
+    m.queue     = queue;
+    m.available = 1;
+    return &m;
 }
 
 /* Lazily create (once per host) a raster-direct Skia surface that wraps the
@@ -396,13 +466,75 @@ static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
         return NULL;
     }
 
-    h->gr_context   = ctx;
-    h->gr_target    = rt;
-    h->gpu_surface  = surf;
-    h->gl_interface = gi;
-    h->sk_surface   = NULL;       /* GPU host has no raster-direct surface */
-    h->sk_canvas    = canvas;
-    h->is_gpu       = 1;
+    h->gr_context       = ctx;
+    h->gr_target        = rt;
+    h->gpu_surface      = surf;
+    h->gl_interface     = gi;
+    h->sk_surface       = NULL;   /* GPU host has no raster-direct surface */
+    h->sk_canvas        = canvas;
+    h->is_gpu           = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_GL;
+    return canvas;
+}
+
+/* ---- Metal offscreen GPU surface (the headless pixel-verified path) ----
+ *
+ * Create (once per host) a GrDirectContext over the process-wide Metal device +
+ * queue, and an OFFSCREEN BGRA_8888 GPU surface sized to the host. Skia
+ * allocates the backing MTLTexture — no window, no CAMetalLayer, no display.
+ * Returns the surface's canvas, or NULL on any failure (caller falls back to
+ * raster — a Metal op that can't run must fall back cleanly, never wrong pixels).
+ *
+ * BGRA_8888 is deliberate: end_frame reads this surface back into h->pixels with
+ * a BGRA dst info, so the bytes land in the host's 0xAARRGGBB order and the
+ * existing read_pixel oracle observes the real GPU output byte-identically.
+ *
+ * The GrDirectContext is cached in gr_context and unref'd in host_drop. The
+ * device + queue are NOT per-host (rx_metal singleton). */
+static sk_canvas_t *rx_host_metal_offscreen_canvas(RxHost *h) {
+    if (!h || !h->gpu_requested) return NULL;
+    if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+    if (h->gpu_tried) return NULL;
+    h->gpu_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return NULL;
+    const RxMetal *mtl = rx_metal();
+    if (!mtl->available) return NULL;
+
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_metal(mtl->device, mtl->queue);
+    if (!ctx) return NULL;
+
+    sk_imageinfo_t info;
+    info.colorspace = NULL;
+    info.width      = h->width;
+    info.height     = h->height;
+    info.colorType  = RX_SK_COLORTYPE_BGRA_8888;   /* readback matches 0xAARRGGBB */
+    info.alphaType  = RX_SK_ALPHA_PREMUL;
+
+    sk_surface_t *surf = sk->surface_new_render_target(
+        (gr_recording_context_t *)ctx, /*budgeted*/1, &info, /*samples*/0,
+        RX_GR_SURFACE_ORIGIN_TOP_LEFT, NULL, /*mips*/0);
+    if (!surf) {
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        return NULL;
+    }
+
+    h->gr_context       = ctx;
+    h->gr_target        = NULL;   /* offscreen: Skia owns the texture */
+    h->gpu_surface      = surf;
+    h->gl_interface     = NULL;
+    h->sk_surface       = NULL;
+    h->sk_canvas        = canvas;
+    h->is_gpu           = 1;
+    h->gpu_offscreen    = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_METAL;
     return canvas;
 }
 
@@ -431,7 +563,13 @@ static void rx_host_gpu_teardown(RxHost *h) {
             sk->gr_glinterface_unref((gr_glinterface_t *)h->gl_interface);
         h->gl_interface = NULL;
     }
+    /* The Metal device + command queue are a process-wide singleton (rx_metal),
+     * not per-host — a device outlives any one surface, so they are NOT released
+     * here (same lifetime as the default font). Only the per-host GrDirectContext
+     * + surface above are torn down. */
     if (h->is_gpu) { h->sk_canvas = NULL; h->is_gpu = 0; }
+    h->gpu_backend_kind = RX_GPU_KIND_NONE;
+    h->gpu_offscreen = 0;
 }
 
 
@@ -510,14 +648,25 @@ int64_t ruxen_canvas_skia_active(int64_t self) {
     return rx_host_canvas(h) != NULL ? 1 : 0;
 }
 
-/* True (1) when the GPU (Ganesh GL) backend COULD run in this process: Skia is
- * loaded AND every required gr_ / backend-render-target symbol resolved. A
- * capability probe: it does NOT prove a GL context or a GPU surface exists for
- * any host (use ruxen_canvas_gpu_active for that). Mirrors skia_available. */
+/* True (1) when SOME GPU backend (Ganesh GL or Metal) COULD run in this process:
+ * Skia is loaded AND the required gr_* symbols for at least one backend resolved.
+ * A capability probe: it does NOT prove a context or surface exists for any host
+ * (use ruxen_canvas_gpu_active for that). Mirrors skia_available. */
 int64_t ruxen_canvas_gpu_available(int64_t self) {
     (void)self;
     const RxSkia *sk = rx_skia();
-    return (sk->available && sk->gpu_gl_ok) ? 1 : 0;
+    if (!sk->available) return 0;
+    return (sk->gpu_gl_ok || sk->gpu_metal_ok) ? 1 : 0;
+}
+
+/* True (1) when the Metal GPU backend specifically could run: the Metal Skia
+ * symbols resolved AND a Metal device + queue could be created (rx_metal). This
+ * is what gates the headless offscreen render+readback path. */
+int64_t ruxen_canvas_gpu_metal_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return 0;
+    return rx_metal()->available ? 1 : 0;
 }
 
 /* Put this host into GPU mode: create a GL window + current context for it,
@@ -556,14 +705,53 @@ int64_t ruxen_canvas_host_enable_gpu(int64_t self) {
     return RXC_OK;
 }
 
-/* True (1) only when THIS host has a live GPU-backed Skia surface — the GL
- * context + GrDirectContext + backend-render-target surface all exist and draws
- * genuinely go through the GPU. The unambiguous "GPU is rendering into me"
- * signal (mirrors skia_active for the raster surface). */
+/* Put this host into OFFSCREEN Metal GPU mode (the headless, pixel-verified
+ * path — docs/GPU.md): build a GrDirectContext over the system Metal device and
+ * an offscreen BGRA GPU surface sized to the host. No window / display needed.
+ * Subsequent draws target the GPU surface; end_frame flushes + reads the pixels
+ * back into the host framebuffer so read_pixel observes real GPU output.
+ *
+ * Returns RXC_OK when the Metal surface is live, or a clean RXC_ERR_* on ANY
+ * failure — in which case the host is left in its prior (raster/software) state,
+ * NOT half-GPU (a Metal op that can't run falls back cleanly). Idempotent once
+ * a GPU surface is active. Unlike enable_gpu, this needs NO SDL/window. */
+int64_t ruxen_canvas_host_enable_gpu_offscreen(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;                 /* already on GPU */
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return RXC_ERR_NO_SKIA;
+    if (!rx_metal()->available) return RXC_ERR_NO_SKIA;   /* no GPU device */
+    /* Must be enabled before any frame/draw created a raster-direct surface. */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    h->gpu_requested = 1;
+    h->gpu_tried     = 0;     /* allow the build attempt now */
+    sk_canvas_t *canvas = rx_host_metal_offscreen_canvas(h);
+    if (!canvas) {
+        h->gpu_requested = 0;     /* fall back to raster cleanly */
+        return RXC_ERR_NO_SKIA;
+    }
+    return RXC_OK;
+}
+
+/* True (1) only when THIS host has a live GPU-backed Skia surface — a
+ * GrDirectContext + GPU surface exist and draws genuinely go through the GPU
+ * (GL window backend OR offscreen Metal). The unambiguous "GPU is rendering into
+ * me" signal (mirrors skia_active for the raster surface). */
 int64_t ruxen_canvas_gpu_active(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return 0;
     return (h->is_gpu && h->gpu_surface) ? 1 : 0;
+}
+
+/* Which GPU backend is live for this host: RX_GPU_KIND_NONE (0, raster),
+ * RX_GPU_KIND_GL (1), or RX_GPU_KIND_METAL (2). The gpu_backend_kind slot, so
+ * L2/tests can tell which rung selection landed on. */
+int64_t ruxen_canvas_gpu_backend_kind(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RX_GPU_KIND_NONE;
+    return (h->is_gpu && h->gpu_surface) ? h->gpu_backend_kind : RX_GPU_KIND_NONE;
 }
 
 int64_t ruxen_canvas_host_width(int64_t self) {
@@ -626,10 +814,30 @@ int64_t ruxen_canvas_end_frame(int64_t self) {
     h->in_frame = 0;
     if (h->is_gpu && h->gr_context) {
         const RxSkia *sk = rx_skia();
+        /* Flush + submit the batched GPU draws to the device. flush_and_submit
+         * (sync=1 for the offscreen path) guarantees the work is done before we
+         * read it back; for the windowed path it precedes the buffer swap. */
+        int sync = h->gpu_offscreen ? 1 : 0;
         if (sk->gr_direct_context_flush_and_submit) {
-            sk->gr_direct_context_flush_and_submit((gr_direct_context_t *)h->gr_context, 0);
+            sk->gr_direct_context_flush_and_submit((gr_direct_context_t *)h->gr_context, sync);
         } else if (sk->gr_direct_context_flush) {
             sk->gr_direct_context_flush((gr_direct_context_t *)h->gr_context);
+        }
+        /* Offscreen Metal: copy the GPU pixels back into the host framebuffer so
+         * read_pixel observes the real GPU output. The surface is BGRA_8888, so
+         * a BGRA dst info lands the bytes in the host's 0xAARRGGBB order — the
+         * raster oracle is byte-identical to the GPU result. A failed readback
+         * is reported (never leaves a stale/garbage buffer silently). */
+        if (h->gpu_offscreen && h->gpu_surface && sk->surface_read_pixels) {
+            sk_imageinfo_t dst;
+            dst.colorspace = NULL;
+            dst.width      = h->width;
+            dst.height     = h->height;
+            dst.colorType  = RX_SK_COLORTYPE_BGRA_8888;
+            dst.alphaType  = RX_SK_ALPHA_PREMUL;
+            int ok = sk->surface_read_pixels((sk_surface_t *)h->gpu_surface, &dst,
+                                             h->pixels, (size_t)h->width * 4, 0, 0);
+            if (!ok) return RXC_ERR_PRESENT;
         }
     }
     return RXC_OK;
