@@ -479,12 +479,12 @@ static sk_canvas_t *rx_host_canvas(RxHost *h) {
  * always compile together). The GL context must be current before any gr_*
  * call; create_gl makes it current and it stays so for this single-thread,
  * single-window host. */
-int64_t ruxen_canvas_window_create_gl(int64_t self);
+int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale);
 int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
 int64_t ruxen_canvas_window_gl_drawable_size(int64_t self);
 int64_t ruxen_canvas_window_gl_present(int64_t self);
 /* on-screen Metal seam (runtime/sdl_window.c) */
-int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue);
+int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue, int64_t win_scale);
 int64_t ruxen_canvas_window_metal_next_drawable(int64_t self);
 int64_t ruxen_canvas_window_metal_drawable_size(int64_t self);
 int64_t ruxen_canvas_window_metal_present(int64_t self);
@@ -874,7 +874,7 @@ int64_t ruxen_canvas_gpu_metal_available(int64_t self) {
  * RXC_ERR_* on ANY failure — in which case the host is left in its prior
  * (raster/software) state, NOT half-GPU. The caller (Window) falls back to the
  * raster show path on error. Idempotent once GPU is active. */
-int64_t ruxen_canvas_host_enable_gpu(int64_t self) {
+int64_t ruxen_canvas_host_enable_gpu(int64_t self, int64_t win_scale) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->is_gpu) return RXC_OK;                 /* already on GPU */
@@ -885,9 +885,9 @@ int64_t ruxen_canvas_host_enable_gpu(int64_t self) {
      * Require GPU to be enabled before any frame/draw. */
     if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
 
-    /* Create the GL window + make its context current. Bounded + clean on a
-     * headless / no-SDL / no-GL host (returns an Err, never blocks). */
-    int64_t wc = ruxen_canvas_window_create_gl(self);
+    /* Create the GL window (win_scale × design for on-screen size) + make its
+     * context current. Bounded + clean on a headless host (Err, never blocks). */
+    int64_t wc = ruxen_canvas_window_create_gl(self, win_scale);
     if (wc != RXC_OK) return wc;
 
     h->gpu_requested = 1;
@@ -951,7 +951,7 @@ int64_t ruxen_canvas_host_enable_gpu_offscreen(int64_t self) {
  * The "first drawable" check is the gate that distinguishes a real display from
  * a headless host: nextDrawable is nil without a window-server-backed layer, so
  * a headless host fails here and falls back cleanly. */
-int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self) {
+int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self, int64_t win_scale) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->is_gpu) return RXC_OK;
@@ -961,10 +961,10 @@ int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self) {
     if (!mtl->available) return RXC_ERR_NO_SKIA;          /* no GPU device */
     if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
 
-    /* Open the Metal window + layer, configured with our device + queue. Bounded
-     * + clean on a headless / no-SDL host (returns an Err, never blocks). */
+    /* Open the Metal window + layer (win_scale × design for on-screen size),
+     * configured with our device + queue. Bounded + clean on a headless host. */
     int64_t wc = ruxen_canvas_window_create_metal(
-        self, (int64_t)(intptr_t)mtl->device, (int64_t)(intptr_t)mtl->queue);
+        self, (int64_t)(intptr_t)mtl->device, (int64_t)(intptr_t)mtl->queue, win_scale);
     if (wc != RXC_OK) return wc;
 
     /* Build the persistent GrDirectContext and prove a drawable can be acquired

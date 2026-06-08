@@ -59,9 +59,9 @@ class RawHost
     def gpu_metal_available_raw as "ruxen_canvas_gpu_metal_available"(self) -> Bool
     def gpu_active_raw as "ruxen_canvas_gpu_active"(self) -> Bool
     def gpu_backend_kind_raw as "ruxen_canvas_gpu_backend_kind"(self) -> Int
-    def enable_gpu_raw as "ruxen_canvas_host_enable_gpu"(self) -> Int
+    def enable_gpu_raw as "ruxen_canvas_host_enable_gpu"(self, win_scale: Int) -> Int
     def enable_gpu_offscreen_raw as "ruxen_canvas_host_enable_gpu_offscreen"(self) -> Int
-    def enable_gpu_windowed_raw as "ruxen_canvas_host_enable_gpu_windowed"(self) -> Int
+    def enable_gpu_windowed_raw as "ruxen_canvas_host_enable_gpu_windowed"(self, win_scale: Int) -> Int
     def set_design_size_raw as "ruxen_canvas_host_set_design_size"(self, design_w: Int, design_h: Int) -> Int
     def content_scale_raw as "ruxen_canvas_content_scale"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
@@ -81,7 +81,7 @@ class RawHost
     # GL-context seam for the GPU backend (docs/GPU.md). create_gl opens an
     # SDL_WINDOW_OPENGL window + current GL context (clean Err on headless/no
     # SDL); gl_present swaps the back buffer; is_gl reports the active mode.
-    def window_create_gl as "ruxen_canvas_window_create_gl"(self) -> Int
+    def window_create_gl as "ruxen_canvas_window_create_gl"(self, win_scale: Int) -> Int
     def window_is_gl as "ruxen_canvas_window_is_gl"(self) -> Int
     def window_gl_present as "ruxen_canvas_window_gl_present"(self) -> Int
     def window_gl_drawable_size as "ruxen_canvas_window_gl_drawable_size"(self) -> Int
@@ -90,7 +90,7 @@ class RawHost
     # queue; metal_next_drawable acquires the frame's drawable texture; metal_present
     # presents + commits it. is_metal reports the active mode. SDL/Metal capability
     # probes prove the host-aware loader resolves SDL2 even when headless.
-    def window_create_metal as "ruxen_canvas_window_create_metal"(self, device: Int, queue: Int) -> Int
+    def window_create_metal as "ruxen_canvas_window_create_metal"(self, device: Int, queue: Int, win_scale: Int) -> Int
     def window_is_metal as "ruxen_canvas_window_is_metal"(self) -> Int
     def window_metal_next_drawable as "ruxen_canvas_window_metal_next_drawable"(self) -> Int
     def window_metal_present as "ruxen_canvas_window_metal_present"(self) -> Int

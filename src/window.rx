@@ -63,22 +63,33 @@ class Window
   ## the GPU frame (Metal drawable present / GL buffer swap) instead of the raster
   ## blit; `canvas.gpu_backend_kind` reports which (2 Metal / 1 GL).
   def var show_gpu -> Result[nil, String]
+    self.show_gpu_scaled(1)
+  end
+
+  ## `show_gpu` opening the on-screen window at `scale` × the design (logical)
+  ## size, so a 320×360 UI can appear in a 640×720-point window — while the
+  ## design→backing content scale (canvas L1) still fills it crisply at native
+  ## density. This is the crisp replacement for `show_scaled`: an app draws at
+  ## design coordinates and gets a `scale`-sized window with native-resolution
+  ## text/shapes, no per-app coordinate scaling. Ladder: on-screen Metal → GL
+  ## window → raster (the raster rung uses the same `scale`).
+  def var show_gpu_scaled(scale: Int) -> Result[nil, String]
     if self.windowed
       return Ok(nil)
     end
     # Rung 1: on-screen Metal (Apple). Needs SDL + a display + Ganesh Metal.
-    if self.canvas.raw.enable_gpu_windowed_raw == 0
+    if self.canvas.raw.enable_gpu_windowed_raw(scale) == 0
       self.windowed = true
       return Ok(nil)
     end
     # Rung 2: GL window. enable_gpu_windowed tore any partial Metal window back
     # down on failure, so this is a clean attempt.
-    if self.canvas.raw.enable_gpu_raw == 0
+    if self.canvas.raw.enable_gpu_raw(scale) == 0
       self.windowed = true
       return Ok(nil)
     end
-    # Rung 3: raster window blit (or clean headless failure).
-    self.show
+    # Rung 3: raster window blit at the same scale (or clean headless failure).
+    self.show_scaled(scale)
   end
 
   ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window

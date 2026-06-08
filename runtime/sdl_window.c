@@ -406,9 +406,12 @@ int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
  * RXC_ERR_BUSY / RXC_ERR_PRESENT on a clean failure. Idempotent for the owning
  * host. On ANY failure the window state is left torn down so the caller can
  * fall back to the raster show path. */
-int64_t ruxen_canvas_window_create_gl(int64_t self) {
+int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
+    int ws = (int)win_scale;
+    if (ws < 1) ws = 1;
+    if (ws > 8) ws = 8;
     if (s_win) {
         /* a window already exists: only OK if it is THIS host's GL window */
         if (s_owner == (void *)h && s_glctx) return RXC_OK;
@@ -435,10 +438,12 @@ int64_t ruxen_canvas_window_create_gl(int64_t self) {
     }
 
     /* ALLOW_HIGHDPI: SDL_GL_GetDrawableSize then returns the true Retina backing
-     * size, which we size the Ganesh GL surface to — native-resolution, crisp. */
+     * size, which we size the Ganesh GL surface to — native-resolution, crisp.
+     * win_scale opens a larger on-screen window; the design->backing content
+     * scale fills it crisply (see window_create_metal). */
     s_win = s_CreateWindow("ruxen-gl",
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width, h->height,
+                           h->width * ws, h->height * ws,
                            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_glctx = s_GL_CreateContext(s_win);
@@ -503,9 +508,13 @@ int64_t ruxen_canvas_window_gl_present(int64_t self) {
  * failure the window is left torn down so the caller can fall back to GL/raster.
  * Bounded + clean on a headless / no-SDL / no-Metal host (no display => no
  * layer/drawable, returns an Err, never blocks). */
-int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue) {
+int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue,
+                                         int64_t win_scale) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     if (!h || !device || !queue) return RXC_ERR_BAD_ARGS;
+    int ws = (int)win_scale;
+    if (ws < 1) ws = 1;
+    if (ws > 8) ws = 8;
     if (s_win) {
         if (s_owner == (void *)h && s_mtl_layer) return RXC_OK;
         return RXC_ERR_BUSY;
@@ -518,10 +527,14 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
 
     /* ALLOW_HIGHDPI so the view's backing store is the true Retina pixel size;
      * we render the Skia Metal surface at THAT size (queried below) and present
-     * 1:1 — crisp by construction, no upscaling a small buffer. */
+     * 1:1 — crisp by construction. win_scale opens a LARGER window (win_scale ×
+     * the logical/design size) for on-screen size; the design->backing content
+     * scale (begin_frame) then fills it crisply at native density — so a 2x
+     * window of a 320-design UI is 640 logical points, 1280 backing pixels on a
+     * 2x display, content scale 4. */
     s_win = s_CreateWindow("ruxen-metal",
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width, h->height,
+                           h->width * ws, h->height * ws,
                            SDL_WINDOW_METAL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_win) return RXC_ERR_NO_SDL;
 
