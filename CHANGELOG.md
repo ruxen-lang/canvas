@@ -35,6 +35,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     logical-point → framebuffer mapping (`/ s_scale`) is already correct since
     SDL reports mouse in logical points. (`examples/metal_window_verify.c` reports
     `logical 320x240 -> backing 640x480 (dpr ~2.0)`.)
+  - **Design→backing content scale (auto, no per-app wiring).** Sizing the
+    surface to backing pixels isn't enough: an app draws at DESIGN coordinates,
+    so without a transform its content lands at design size in a larger backing
+    surface (small / cornered). `begin_frame` now applies a base transform
+    `scale = backing / design` as the first canvas transform (re-established each
+    frame, below the outer per-frame save), so design-coord `draw_*` fill the
+    backing surface and Skia rasterizes at native density. Design size = the
+    logical framebuffer size, set automatically when a windowed GPU host is
+    enabled (Metal + GL). **Additive** — offscreen / test surfaces leave it unset
+    (scale 1.0), so the existing suite is untouched. `Canvas#set_design_size`
+    opts an offscreen canvas in; `Canvas#content_scale` reports `(sx, sy)`.
+    Headless-verified (`tests/hidpi_content_scale.rx`): a 320×240-design draw
+    fills a 640×480 backing buffer; text under 2× scale inks more rows.
   - **SDL loader fix (load-bearing):** `load_sdl()` only `dlopen`'d the Linux SO
     name, so SDL never loaded on macOS and every `Window.show` fell back headless.
     Now host-aware — a candidate list (macOS dylib names, Homebrew full paths at

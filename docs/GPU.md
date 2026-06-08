@@ -63,6 +63,23 @@ Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md
 >     (the prior double blur: our scale × Retina). GL/raster paths likewise add
 >     `ALLOW_HIGHDPI` + query the backing size (`SDL_GL_GetDrawableSize` /
 >     `SDL_GetRendererOutputSize`).
+>   - **Design→backing content scale (auto, no per-app wiring):** sizing the
+>     surface to backing pixels is necessary but NOT sufficient — an app draws at
+>     DESIGN coordinates (e.g. a 320×360 UI), so without a transform its content
+>     lands at design size in a much larger backing surface (small / cornered).
+>     So `begin_frame` applies a base transform `scale = surface(backing) size /
+>     design size` as the FIRST canvas transform (after `reset_matrix`, below the
+>     outer per-frame save), re-established each frame. Design-coord `draw_*` then
+>     fill the backing surface and Skia rasterizes glyphs/shapes at native
+>     density. The design size is the logical framebuffer size, set automatically
+>     when a windowed GPU host is enabled (Metal + GL). It is **additive**:
+>     offscreen / test surfaces leave the design size unset → scale 1.0 (the input
+>     pump is unchanged — SDL reports mouse in logical points, `/ s_scale` already
+>     maps point→design; the backing scale is purely render-side).
+>     `Canvas#set_design_size` lets an offscreen canvas opt in (the headless
+>     content-scale test); `Canvas#content_scale` reports the active `(sx, sy)`.
+>     Verified headless on raster Skia (`tests/hidpi_content_scale.rx`): a
+>     320×240-design draw fills a 640×480 backing buffer.
 >   - **Not verifiable in the test harness:** macOS forbids CoreFoundation /
 >     Metal / AppKit windowing after `fork()` without `exec()`, and the harness
 >     forks per case + fans out in parallel (real windows race the WindowServer).
