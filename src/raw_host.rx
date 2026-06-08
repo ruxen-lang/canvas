@@ -82,5 +82,17 @@ class RawHost
     def window_is_gl as "ruxen_canvas_window_is_gl"(self) -> Int
     def window_gl_present as "ruxen_canvas_window_gl_present"(self) -> Int
     def window_gl_drawable_size as "ruxen_canvas_window_gl_drawable_size"(self) -> Int
+    # On-screen Metal present seam (docs/GPU.md). create_metal opens a
+    # SDL_WINDOW_METAL window + CAMetalLayer configured with the given device +
+    # queue; metal_next_drawable acquires the frame's drawable texture; metal_present
+    # presents + commits it. is_metal reports the active mode. SDL/Metal capability
+    # probes prove the host-aware loader resolves SDL2 even when headless.
+    def window_create_metal as "ruxen_canvas_window_create_metal"(self, device: Int, queue: Int) -> Int
+    def window_is_metal as "ruxen_canvas_window_is_metal"(self) -> Int
+    def window_metal_next_drawable as "ruxen_canvas_window_metal_next_drawable"(self) -> Int
+    def window_metal_present as "ruxen_canvas_window_metal_present"(self) -> Int
+    def window_metal_drawable_size as "ruxen_canvas_window_metal_drawable_size"(self) -> Int
+    def self.sdl_available as "ruxen_canvas_sdl_available" -> Int
+    def self.window_metal_available as "ruxen_canvas_window_metal_available" -> Int
   end
 end

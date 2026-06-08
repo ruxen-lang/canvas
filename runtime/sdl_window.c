@@ -30,6 +30,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 #include <string.h>
 
@@ -96,6 +97,13 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
  * render-target color type from this. We use RGBA8 (0x8058 == GL_RGBA8). */
 #define GL_RGBA8                  0x8058
 
+/* SDL_WINDOW_METAL — request a window backed by a Metal-capable view (so
+ * SDL_Metal_CreateView / SDL_Metal_GetLayer give us a CAMetalLayer). */
+#define SDL_WINDOW_METAL          0x20000000u
+/* MTLPixelFormatBGRA8Unorm = 80 — the CAMetalLayer pixel format; matches the
+ * host 0xAARRGGBB packing so Skia's BGRA surface renders correctly. */
+#define MTL_PIXELFORMAT_BGRA8     80
+
 /* ---- dlsym'd entry points ---- */
 static void *s_lib = NULL;
 static int   (*s_Init)(uint32_t);
@@ -125,6 +133,23 @@ static void  (*s_GL_GetDrawableSize)(void *window, int *w, int *h);
 static int   (*s_GL_SetSwapInterval)(int interval);
 static void  (*s_GL_DeleteContext)(void *context);
 
+/* SDL Metal-view entry points (resolved best-effort; a miss only forecloses the
+ * windowed-Metal path). SDL_Metal_CreateView attaches a Metal-backed view to a
+ * SDL_WINDOW_METAL window; SDL_Metal_GetLayer returns its CAMetalLayer (docs/GPU.md).
+ * The Apple side of the rx_gpu_context seam: SDL owns the view + layer, Skia's
+ * gr_* renders into the layer's drawable texture. */
+static void *(*s_Metal_CreateView)(void *window);
+static void *(*s_Metal_GetLayer)(void *view);
+static void  (*s_Metal_DestroyView)(void *view);
+
+/* Objective-C runtime + Metal device, for the CAMetalLayer drawable lifecycle
+ * (configure the layer, acquire the next drawable, present it). Resolved lazily
+ * in metal_objc_init(); a miss forecloses windowed Metal. */
+static void *(*s_objc_msgSend)(void *, void *);
+static void *(*s_sel)(const char *);
+static int   s_metal_have_fns = 0;
+static int   s_metal_objc_ok = 0;
+
 /* ---- single-window state ---- */
 static void *s_win = NULL;
 static void *s_ren = NULL;
@@ -141,11 +166,41 @@ static void *s_owner = NULL; /* the RxHost the window belongs to */
 static void *s_glctx = NULL;   /* SDL_GLContext for s_win, or NULL */
 static int   s_gl_have_fns = 0;
 
+/* ---- Metal-window state (the on-screen Metal presenter; mutually exclusive
+ * with the GL/raster paths for a given window). s_mtl_layer != NULL means this
+ * window is a SDL_WINDOW_METAL window whose CAMetalLayer we render into per
+ * frame. s_mtl_drawable is the drawable currently acquired for the in-flight
+ * frame (NULL between frames). docs/GPU.md. */
+static void *s_mtl_view     = NULL;   /* SDL_MetalView */
+static void *s_mtl_layer    = NULL;   /* CAMetalLayer (id) */
+static void *s_mtl_device   = NULL;   /* id<MTLDevice> (the rx_metal singleton) */
+static void *s_mtl_queue    = NULL;   /* id<MTLCommandQueue> (rx_metal singleton) */
+static void *s_mtl_drawable = NULL;   /* the frame's CAMetalDrawable, or NULL */
+
 static void *sym(const char *name) { return dlsym(s_lib, name); }
 
 static int load_sdl(void) {
     if (s_lib) return 1;
-    s_lib = dlopen("libSDL2-2.0.so.0", RTLD_NOW | RTLD_LOCAL);
+    /* Host-aware: try a candidate list, first that dlopen()s wins. macOS does
+     * NOT have a standalone SDL2 on the default loader path and dlopen does not
+     * search Homebrew dirs, so we list the macOS dylib names + the Homebrew full
+     * paths (arm64 /opt/homebrew, x86_64 /usr/local) + the framework, and keep
+     * the Linux SO name. $RUXEN_CANVAS_SDL2 overrides with an explicit path. A
+     * miss on ALL candidates → return 0 → clean headless fallback (the
+     * framebuffer/event path keeps working). */
+    static const char *const sdl_candidates[] = {
+        "libSDL2-2.0.0.dylib",                          /* macOS, on the path */
+        "libSDL2.dylib",
+        "/opt/homebrew/lib/libSDL2-2.0.0.dylib",        /* arm64 Homebrew */
+        "/usr/local/lib/libSDL2-2.0.0.dylib",           /* x86_64 Homebrew */
+        "/Library/Frameworks/SDL2.framework/SDL2",      /* framework install */
+        "libSDL2-2.0.so.0",                             /* Linux */
+    };
+    const char *env = getenv("RUXEN_CANVAS_SDL2");
+    if (env && env[0]) s_lib = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+    for (size_t i = 0; !s_lib && i < sizeof(sdl_candidates) / sizeof(sdl_candidates[0]); i++) {
+        s_lib = dlopen(sdl_candidates[i], RTLD_NOW | RTLD_LOCAL);
+    }
     if (!s_lib) return 0;
     s_Init           = (int (*)(uint32_t))sym("SDL_Init");
     s_CreateWindow   = (void *(*)(const char *, int, int, int, int, uint32_t))sym("SDL_CreateWindow");
@@ -182,7 +237,52 @@ static int load_sdl(void) {
     s_GL_DeleteContext  = (void (*)(void *))sym("SDL_GL_DeleteContext");
     s_gl_have_fns = (s_GL_CreateContext && s_GL_MakeCurrent && s_GL_GetProcAddress &&
                      s_GL_SwapWindow) ? 1 : 0;
+
+    /* SDL Metal-view entry points are OPTIONAL too (a miss only forecloses the
+     * windowed-Metal path; present as of SDL 2.0.8+, macOS). */
+    s_Metal_CreateView  = (void *(*)(void *))sym("SDL_Metal_CreateView");
+    s_Metal_GetLayer    = (void *(*)(void *))sym("SDL_Metal_GetLayer");
+    s_Metal_DestroyView = (void (*)(void *))sym("SDL_Metal_DestroyView");
+    s_metal_have_fns = (s_Metal_CreateView && s_Metal_GetLayer) ? 1 : 0;
     return 1;
+}
+
+/* Resolve the Objective-C runtime (objc_msgSend / sel_registerName) once — the
+ * CAMetalLayer drawable lifecycle (configure / nextDrawable / present) is driven
+ * through message sends. A miss forecloses windowed Metal. */
+static int metal_objc_init(void) {
+    if (s_metal_objc_ok) return 1;
+    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) return 0;
+    s_objc_msgSend = (void *(*)(void *, void *))dlsym(objc, "objc_msgSend");
+    s_sel          = (void *(*)(const char *))dlsym(objc, "sel_registerName");
+    /* QuartzCore must be loaded so CAMetalLayer + its selectors are present. */
+    dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW | RTLD_GLOBAL);
+    s_metal_objc_ok = (s_objc_msgSend && s_sel) ? 1 : 0;
+    return s_metal_objc_ok;
+}
+
+/* Tiny objc message-send wrappers, cast per signature for the arm64/x86_64 ABI
+ * (no struct returns, no variadics in this set). */
+static void *mtl_msg(void *obj, const char *selname) {
+    return s_objc_msgSend(obj, s_sel(selname));
+}
+static void mtl_msg_p(void *obj, const char *selname, void *arg) {
+    void (*m)(void *, void *, void *) = (void (*)(void *, void *, void *))s_objc_msgSend;
+    m(obj, s_sel(selname), arg);
+}
+static void mtl_msg_u(void *obj, const char *selname, unsigned long arg) {
+    void (*m)(void *, void *, unsigned long) =
+        (void (*)(void *, void *, unsigned long))s_objc_msgSend;
+    m(obj, s_sel(selname), arg);
+}
+/* [layer setDrawableSize:(CGSize){w,h}] — CGSize is two doubles by value, passed
+ * in the SIMD/float regs on arm64, so we need the matching cast. */
+static void mtl_set_drawable_size(void *layer, double w, double h) {
+    void (*m)(void *, void *, double, double) =
+        (void (*)(void *, void *, double, double))s_objc_msgSend;
+    m(layer, s_sel("setDrawableSize:"), w, h);
 }
 
 /* Create the OS window at scale x the host framebuffer (the renderer
@@ -345,6 +445,124 @@ int64_t ruxen_canvas_window_gl_present(int64_t self) {
     return RXC_OK;
 }
 
+/* ---- on-screen Metal: CAMetalLayer + drawable lifecycle (docs/GPU.md) ----
+ *
+ * Create a SDL_WINDOW_METAL window for this host, attach a Metal view, get its
+ * CAMetalLayer, and configure it with the (caller-provided) Metal device +
+ * command queue — the rx_metal() singleton in skia_shim.c. Per frame the shim
+ * calls next_drawable (acquire the layer's next CAMetalDrawable + its MTLTexture
+ * for Skia to wrap), renders, then present (presentDrawable + commit). On ANY
+ * failure the window is left torn down so the caller can fall back to GL/raster.
+ * Bounded + clean on a headless / no-SDL / no-Metal host (no display => no
+ * layer/drawable, returns an Err, never blocks). */
+int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue) {
+    RxHostPrefix *h = (RxHostPrefix *)self;
+    if (!h || !device || !queue) return RXC_ERR_BAD_ARGS;
+    if (s_win) {
+        if (s_owner == (void *)h && s_mtl_layer) return RXC_OK;
+        return RXC_ERR_BUSY;
+    }
+    if (!load_sdl()) return RXC_ERR_NO_SDL;
+    if (!s_metal_have_fns) return RXC_ERR_NO_SDL;   /* no SDL_Metal_* */
+    if (!metal_objc_init()) return RXC_ERR_NO_SDL;  /* no objc runtime */
+    if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
+
+    s_win = s_CreateWindow("ruxen-metal",
+                           (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
+                           h->width, h->height, SDL_WINDOW_METAL | SDL_WINDOW_SHOWN);
+    if (!s_win) return RXC_ERR_NO_SDL;
+
+    s_mtl_view = s_Metal_CreateView(s_win);
+    if (!s_mtl_view) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_PRESENT; }
+    s_mtl_layer = s_Metal_GetLayer(s_mtl_view);
+    if (!s_mtl_layer) {
+        s_Metal_DestroyView(s_mtl_view); s_mtl_view = NULL;
+        s_DestroyWindow(s_win); s_win = NULL;
+        return RXC_ERR_PRESENT;
+    }
+
+    s_mtl_device = (void *)device;
+    s_mtl_queue  = (void *)queue;
+    /* Configure the layer: our device, BGRA8 (matches the host packing), and
+     * framebufferOnly=NO so Skia may render into the drawable's texture. */
+    mtl_msg_p(s_mtl_layer, "setDevice:", s_mtl_device);
+    mtl_msg_u(s_mtl_layer, "setPixelFormat:", MTL_PIXELFORMAT_BGRA8);
+    mtl_msg_u(s_mtl_layer, "setFramebufferOnly:", 0);
+    mtl_set_drawable_size(s_mtl_layer, (double)h->width, (double)h->height);
+
+    s_scale = 1;
+    s_tex_w = h->width;
+    s_tex_h = h->height;
+    s_owner = (void *)h;
+    return RXC_OK;
+}
+
+/* Whether the current window is a Metal window owned by `self` (0/1). */
+int64_t ruxen_canvas_window_is_metal(int64_t self) {
+    return (s_mtl_layer && s_owner == (void *)self) ? 1 : 0;
+}
+
+/* True (1) when SDL2 itself could be dlopen'd on this host (the host-aware
+ * loader found a usable libSDL2). A capability probe that does NOT open a window
+ * — it proves the loader resolves SDL2 here even when the harness is headless.
+ * 0 when no SDL2 is installed anywhere on the candidate paths. */
+int64_t ruxen_canvas_sdl_available(void) {
+    return load_sdl() ? 1 : 0;
+}
+
+/* True (1) when the on-screen Metal present path COULD run: SDL2 loaded AND its
+ * SDL_Metal_CreateView/GetLayer resolved AND the objc runtime is reachable. Does
+ * NOT prove a display exists (nextDrawable may still be nil headless). */
+int64_t ruxen_canvas_window_metal_available(void) {
+    if (!load_sdl() || !s_metal_have_fns) return 0;
+    return metal_objc_init() ? 1 : 0;
+}
+
+/* Acquire the layer's next drawable for this frame and return its MTLTexture as
+ * an int64 handle (0 on failure — e.g. headless, no display, so nextDrawable is
+ * nil). The caller (skia_shim) wraps this texture in a Metal backend render
+ * target. The drawable is held in s_mtl_drawable until present releases it; a
+ * second call without a present releases the prior unpresented drawable first
+ * (no leak). */
+int64_t ruxen_canvas_window_metal_next_drawable(int64_t self) {
+    if (!s_mtl_layer || s_owner != (void *)self) return 0;
+    /* a prior unpresented drawable would leak — drop our reference to it. */
+    s_mtl_drawable = NULL;
+    void *drawable = mtl_msg(s_mtl_layer, "nextDrawable");
+    if (!drawable) return 0;                  /* no display / off-screen */
+    void *texture = mtl_msg(drawable, "texture");
+    if (!texture) return 0;
+    s_mtl_drawable = drawable;
+    return (int64_t)texture;
+}
+
+/* The drawable pixel size of the Metal layer (HiDPI-correct). Packs width<<32 |
+ * height. 0 when no Metal window. We track it from drawableSize set at create;
+ * the layer's drawableSize is authoritative on HiDPI. */
+int64_t ruxen_canvas_window_metal_drawable_size(int64_t self) {
+    if (!s_mtl_layer || s_owner != (void *)self) return 0;
+    int w = s_tex_w, hh = s_tex_h;
+    if (w <= 0 || hh <= 0) return 0;
+    return ((int64_t)(uint32_t)w << 32) | (int64_t)(uint32_t)hh;
+}
+
+/* Present the frame's acquired drawable: enqueue a command buffer on the queue
+ * that presents the drawable, then commit it. Returns RXC_OK, or RXC_ERR_PRESENT
+ * when there is no Metal window / no acquired drawable. After present the
+ * drawable is consumed (next frame acquires a fresh one). */
+int64_t ruxen_canvas_window_metal_present(int64_t self) {
+    if (!s_mtl_layer || s_owner != (void *)self) return RXC_ERR_PRESENT;
+    if (!s_mtl_drawable || !s_mtl_queue) return RXC_ERR_PRESENT;
+    /* id cmdbuf = [queue commandBuffer]; [cmdbuf presentDrawable:drawable];
+     * [cmdbuf commit]; */
+    void *cmdbuf = mtl_msg(s_mtl_queue, "commandBuffer");
+    if (!cmdbuf) { s_mtl_drawable = NULL; return RXC_ERR_PRESENT; }
+    mtl_msg_p(cmdbuf, "presentDrawable:", s_mtl_drawable);
+    mtl_msg(cmdbuf, "commit");
+    s_mtl_drawable = NULL;     /* consumed; next frame acquires a fresh drawable */
+    return RXC_OK;
+}
+
 /* Drain SDL's event queue into the host's RxEvent ring. Returns the
  * number of events forwarded (>= 0), or a negative status on bad args.
  * Unknown SDL event types are skipped. */
@@ -403,6 +621,16 @@ int64_t ruxen_canvas_window_destroy(void) {
     if (s_tex) { s_DestroyTexture(s_tex); s_tex = NULL; }
     if (s_ren) { s_DestroyRenderer(s_ren); s_ren = NULL; }
     if (s_glctx) { if (s_GL_DeleteContext) s_GL_DeleteContext(s_glctx); s_glctx = NULL; }
+    /* Metal: the GPU surface + gr_context referencing the layer are released by
+     * skia_shim's host_drop BEFORE this runs. Any in-flight drawable was already
+     * consumed at present (or is dropped here). Order: drawable -> layer (owned
+     * by the view) -> view -> window — the reverse of creation. We do not own
+     * the device/queue (rx_metal singleton), so they are not destroyed here. */
+    s_mtl_drawable = NULL;
+    s_mtl_layer    = NULL;   /* owned by the view; freed with it */
+    if (s_mtl_view) { if (s_Metal_DestroyView) s_Metal_DestroyView(s_mtl_view); s_mtl_view = NULL; }
+    s_mtl_device = NULL;
+    s_mtl_queue  = NULL;
     if (s_win) { s_DestroyWindow(s_win); s_win = NULL; }
     s_tex_w = s_tex_h = 0;
     s_scale = 1;
