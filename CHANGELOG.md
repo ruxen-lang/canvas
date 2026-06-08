@@ -7,6 +7,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Skia is now ACTIVE on macOS (real local pixel verification).**
+  `runtime/fetch_skia.sh` is host-aware: on macOS it fetches + SHA-256-pins the
+  **`SkiaSharp.NativeAssets.macOS`** package and installs its **universal**
+  `runtimes/osx/native/libSkiaSharp.dylib` (arm64 + x86_64) into the same
+  `$HOME/.cache/ruxen-canvas/` cache; Linux keeps fetching the Linux `.so`
+  (no CI change). The shim's loader (`rx_skia_dlopen`) probes both
+  `libSkiaSharp.{dylib,so}` basenames, native-name-first per platform. Result:
+  `skia_available?` / `skia_active?` report **true** on this macOS host, so the
+  entire Skia-only surface (`draw_path`, gradients, soft shadows, circles /
+  rounded-rects, sized text, configurable font family, image decode/scale,
+  transforms / clips, offscreen layers + group opacity) now runs its **real
+  Skia branch** locally and is pixel-verified — not only the software-fallback /
+  `Err` branch. The software fallback remains intact and is still exercised when
+  the binary is absent (Skia is not mandatory). The macOS dylib links
+  `Metal.framework` (`SK_METAL=1`), which unblocks the Metal backend next
+  (`docs/GPU.md`).
 - **GPU surface backend (Ganesh GL)** — the top rung of the backend-selection
   ladder, behind the **unchanged `ruxen_canvas_*` ABI** (`docs/GPU.md`,
   GL-first; Metal/Vulkan deferred):
@@ -212,6 +228,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pointer).
 
 ### Fixed
+- **`save_layer_alpha` group opacity now works on real Skia.** This Skia build
+  does not export `sk_canvas_save_layer_alpha` (the convenience wrapper was
+  removed upstream; only `sk_canvas_save_layer` / `_rec` exist), so the call was
+  bound to a non-existent symbol and returned `Err` whenever Skia was actually
+  active — masked until now because the binary was never present locally.
+  Reimplemented via `sk_canvas_save_layer` with an alpha-carrying paint
+  (`SkCanvas` applies the layer paint's alpha as whole-layer opacity); the
+  group-opacity readback pin (`tests/canvas_layers.rx`) now passes through real
+  Skia.
+- **GPU-GL capability probe could never be true.** The GL rung required a
+  `gr_direct_context_unref` symbol that does not exist in this Skia C API (a
+  `GrDirectContext` *is-a* `GrRecordingContext`; the real release is
+  `gr_recording_context_unref`). Rebound to `gr_recording_context_unref`
+  (upcasting the context), so `gpu_available?` now reports true where the Ganesh
+  GL symbols resolve. Both bugs were surfaced by bringing Skia live on macOS and
+  verified against the fetched binary with `nm` + the SkiaSharp C header.
 - `Color.white`/`black`/`transparent` named constructors restored — the
   zero-arg struct-static and closure-inference compiler bugs they were
   blocked on are fixed upstream (ruxen `18df435`).

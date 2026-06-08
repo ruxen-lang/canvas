@@ -35,7 +35,10 @@ with the software raster kept as a fallback (`docs/SKIA.md`):
 
 1. **Skia brought in by fetch + dlopen, not vendor + link** — `fetch_skia.sh`
    SHA-pins `libSkiaSharp` (the prebuilt Skia behind Avalonia/Uno/MAUI, flat
-   `sk_*` C API); the shim `dlopen`s it like SDL2. ✅
+   `sk_*` C API); the shim `dlopen`s it like SDL2. ✅ **Host-aware:** Linux
+   `.so` + macOS universal `.dylib` (`SkiaSharp.NativeAssets.macOS`), both
+   SHA-pinned. Skia is now **active locally on macOS arm64**, so the full
+   Skia-only surface is pixel-verified on-host (not just the software branch). ✅
 2. Skia draws straight into the existing `0xAARRGGBB` framebuffer
    (`sk_surface_new_raster_direct`, `kBGRA_8888`), so the SDL presenter is
    untouched. `clear`, `draw_rect` routed through Skia. ✅
@@ -117,8 +120,19 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
         headless — same posture as the Skia-on-Linux-CI note in `docs/SKIA.md`);
         the smoke pin (`tests/gpu_backend.rx`) asserts the capability + clean
         fallback contract.
-      - **Still deferred:** Metal on Apple (`gr_direct_context_make_metal` +
-        `CAMetalLayer`) and Vulkan — additive behind the same seam, per the ADR.
+      - **GL-on-macOS status (with Skia now active):** `gpu_available?` is
+        **true** on macOS — the Ganesh GL symbols resolve (this was previously
+        blocked by a non-existent `gr_direct_context_unref` binding, now fixed to
+        `gr_recording_context_unref`). A live GL **surface** still does not come
+        up here because there is no SDL2 / display on this host, so `gpu_active?`
+        stays false and drawing falls back cleanly. macOS GL is deprecated by
+        Apple anyway — **Metal is the real Apple path**.
+      - **Metal: now UNBLOCKED.** The macOS `libSkiaSharp.dylib` we now fetch is
+        built `SK_METAL=1` (links `Metal.framework` / `MetalKit.framework`) and
+        exports real `gr_direct_context_make_metal` / `gr_backendrendertarget_new_metal`
+        (verified by `nm`). The earlier feasibility gate (blocked on the Linux
+        `.so`'s `nullptr` Metal stubs) is cleared on this binary. Next task.
+      - **Still deferred:** Vulkan — additive behind the same seam, per the ADR.
 
 ### Later cycles (large, sequenced)
 
