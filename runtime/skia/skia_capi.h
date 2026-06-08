@@ -141,13 +141,12 @@ typedef void (*pfn_canvas_draw_simple_text)(sk_canvas_t *, const void *text, siz
 typedef int  (*pfn_canvas_save)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore)(sk_canvas_t *);
 /* save_layer pushes an offscreen layer (bounds NULL = whole canvas); the
- * matching restore composites it down. The _alpha variant composites the
- * layer with a uniform 0..255 group opacity. Both return the save count
- * (>= 1) to pair with restore / restore_to. */
+ * matching restore composites it down. Returns the save count (>= 1) to pair
+ * with restore / restore_to. Group opacity is done via save_layer with an
+ * alpha-carrying paint (this build has no sk_canvas_save_layer_alpha — the
+ * convenience wrapper was removed upstream; see ruxen_canvas_save_layer_alpha). */
 typedef int  (*pfn_canvas_save_layer)(sk_canvas_t *, const sk_rect_t *bounds,
         const sk_paint_t *paint);
-typedef int  (*pfn_canvas_save_layer_alpha)(sk_canvas_t *, const sk_rect_t *bounds,
-        uint8_t alpha);
 typedef int  (*pfn_canvas_get_save_count)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore_to_count)(sk_canvas_t *, int save_count);
 typedef void (*pfn_canvas_translate)(sk_canvas_t *, float dx, float dy);
@@ -264,9 +263,15 @@ typedef gr_glinterface_t *(*pfn_gr_glinterface_create_native)(void);
 typedef void              (*pfn_gr_glinterface_unref)(gr_glinterface_t *);
 
 /* Build a GPU device context over the (current) GL context described by the
- * interface. NULL on failure. Owned: gr_direct_context_unref. */
+ * interface. NULL on failure.
+ *
+ * Releasing it: there is NO `gr_direct_context_unref` in this Skia C API — a
+ * GrDirectContext is-a GrRecordingContext, and the canonical release is
+ * `gr_recording_context_unref(gr_recording_context_t*)` (verified absent vs
+ * present by `nm` on the fetched libSkiaSharp; the header confirms it). We
+ * upcast the direct context to gr_recording_context_t* to unref it. */
 typedef gr_direct_context_t *(*pfn_gr_direct_context_make_gl)(const gr_glinterface_t *);
-typedef void                 (*pfn_gr_direct_context_unref)(gr_direct_context_t *);
+typedef void                 (*pfn_gr_recording_context_unref)(gr_recording_context_t *);
 typedef void                 (*pfn_gr_direct_context_flush)(gr_direct_context_t *);
 typedef void                 (*pfn_gr_direct_context_flush_and_submit)(gr_direct_context_t *, int sync);
 
@@ -302,7 +307,6 @@ typedef struct {
     pfn_canvas_save             canvas_save;
     pfn_canvas_restore          canvas_restore;
     pfn_canvas_save_layer       canvas_save_layer;
-    pfn_canvas_save_layer_alpha canvas_save_layer_alpha;
     pfn_canvas_get_save_count   canvas_get_save_count;
     pfn_canvas_restore_to_count canvas_restore_to_count;
     pfn_canvas_translate        canvas_translate;
@@ -366,7 +370,7 @@ typedef struct {
     pfn_gr_glinterface_create_native     gr_glinterface_create_native;
     pfn_gr_glinterface_unref             gr_glinterface_unref;
     pfn_gr_direct_context_make_gl        gr_direct_context_make_gl;
-    pfn_gr_direct_context_unref          gr_direct_context_unref;
+    pfn_gr_recording_context_unref       gr_recording_context_unref;
     pfn_gr_direct_context_flush          gr_direct_context_flush;
     pfn_gr_direct_context_flush_and_submit gr_direct_context_flush_and_submit;
     pfn_gr_backendrendertarget_new_gl    gr_backendrendertarget_new_gl;

@@ -59,28 +59,58 @@ static int rxc_finite_pixels(double v) {
  * if the library or any required symbol is missing, ->available stays 0 and
  * every drawing op falls back to the software raster path below. */
 
+/* The native-library basenames to try, in platform-preference order. The
+ * fetch script installs the platform's convention into the cache (.dylib on
+ * macOS, .so on Linux — see runtime/fetch_skia.sh); we try the native name
+ * first but always try both, so a cross-named or system-installed copy still
+ * resolves. The system-loader (no path) form uses the same names. */
+#if defined(__APPLE__)
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.dylib", "libSkiaSharp.so" };
+#else
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.so", "libSkiaSharp.dylib" };
+#endif
+#define RX_SKIA_NBASENAMES (int)(sizeof(rx_skia_basenames) / sizeof(rx_skia_basenames[0]))
+
+/* dlopen each basename inside `dir` (absolute), returning the first that loads
+ * or NULL. dlopen of an absolute path is CWD-independent. */
+static void *rx_skia_dlopen_in_dir(const char *dir) {
+    char path[4096];
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, rx_skia_basenames[i]);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
+}
+
 static void *rx_skia_dlopen(void) {
-    /* Search order: explicit override, the fetch-script cache, then the system
-     * loader. dlopen of an absolute path is CWD-independent. */
+    /* Search order: explicit override, the fetch-script cache (env override,
+     * then $HOME/.cache), then the system loader. Each cache location tries the
+     * platform's library basenames (.dylib on macOS, .so on Linux). */
     const char *env = getenv("RUXEN_CANVAS_SKIA");
     if (env && env[0]) {
+        /* An explicit override is a full path (no basename guessing). */
         void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
-    char path[4096];
     const char *cache = getenv("RUXEN_CANVAS_CACHE");
     if (cache && cache[0]) {
-        snprintf(path, sizeof(path), "%s/libSkiaSharp.so", cache);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_skia_dlopen_in_dir(cache);
         if (h) return h;
     }
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libSkiaSharp.so", home);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s/.cache/ruxen-canvas", home);
+        void *h = rx_skia_dlopen_in_dir(dir);
         if (h) return h;
     }
-    return dlopen("libSkiaSharp.so", RTLD_NOW | RTLD_LOCAL);
+    /* Fall back to the system loader (LD_LIBRARY_PATH / DYLD path / ldconfig). */
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        void *h = dlopen(rx_skia_basenames[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
 }
 
 const RxSkia *rx_skia(void) {
@@ -143,7 +173,6 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(canvas_save,               "sk_canvas_save");
     RX_SK_OPTIONAL(canvas_restore,            "sk_canvas_restore");
     RX_SK_OPTIONAL(canvas_save_layer,         "sk_canvas_save_layer");
-    RX_SK_OPTIONAL(canvas_save_layer_alpha,   "sk_canvas_save_layer_alpha");
     RX_SK_OPTIONAL(canvas_get_save_count,     "sk_canvas_get_save_count");
     RX_SK_OPTIONAL(canvas_restore_to_count,   "sk_canvas_restore_to_count");
     RX_SK_OPTIONAL(canvas_translate,          "sk_canvas_translate");
@@ -186,7 +215,9 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(gr_glinterface_create_native,  "gr_glinterface_create_native_interface");
     RX_SK_OPTIONAL(gr_glinterface_unref,          "gr_glinterface_unref");
     RX_SK_OPTIONAL(gr_direct_context_make_gl,     "gr_direct_context_make_gl");
-    RX_SK_OPTIONAL(gr_direct_context_unref,       "gr_direct_context_unref");
+    /* A GrDirectContext is-a GrRecordingContext; this build exports only the
+     * recording-context unref (there is no gr_direct_context_unref). */
+    RX_SK_OPTIONAL(gr_recording_context_unref,    "gr_recording_context_unref");
     RX_SK_OPTIONAL(gr_direct_context_flush,       "gr_direct_context_flush");
     RX_SK_OPTIONAL(gr_direct_context_flush_and_submit, "gr_direct_context_flush_and_submit");
     RX_SK_OPTIONAL(gr_backendrendertarget_new_gl, "gr_backendrendertarget_new_gl");
@@ -202,7 +233,7 @@ const RxSkia *rx_skia(void) {
     skia.gpu_gl_ok =
         (skia.gr_glinterface_assemble_gl || skia.gr_glinterface_create_native) &&
         skia.gr_direct_context_make_gl &&
-        skia.gr_direct_context_unref &&
+        skia.gr_recording_context_unref &&
         skia.gr_backendrendertarget_new_gl &&
         skia.gr_backendrendertarget_delete &&
         skia.surface_new_backend_render_target &&
@@ -342,7 +373,7 @@ static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
     gr_backendrendertarget_t *rt =
         sk->gr_backendrendertarget_new_gl(gw, gh, /*samples*/0, /*stencils*/8, &fbo);
     if (!rt) {
-        sk->gr_direct_context_unref(ctx);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
         if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
         return NULL;
     }
@@ -352,7 +383,7 @@ static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
         RX_GR_SURFACE_ORIGIN_BOTTOM_LEFT, RX_SK_COLORTYPE_RGBA_8888, NULL, NULL);
     if (!surf) {
         sk->gr_backendrendertarget_delete(rt);
-        sk->gr_direct_context_unref(ctx);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
         if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
         return NULL;
     }
@@ -360,7 +391,7 @@ static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
     if (!canvas) {
         sk->surface_unref(surf);
         sk->gr_backendrendertarget_delete(rt);
-        sk->gr_direct_context_unref(ctx);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
         if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
         return NULL;
     }
@@ -391,8 +422,8 @@ static void rx_host_gpu_teardown(RxHost *h) {
         h->gr_target = NULL;
     }
     if (h->gr_context) {
-        if (sk->gr_direct_context_unref)
-            sk->gr_direct_context_unref((gr_direct_context_t *)h->gr_context);
+        if (sk->gr_recording_context_unref)
+            sk->gr_recording_context_unref((gr_recording_context_t *)h->gr_context);
         h->gr_context = NULL;
     }
     if (h->gl_interface) {
@@ -662,7 +693,15 @@ int64_t ruxen_canvas_save_layer(int64_t self) {
 }
 
 /* Push a whole-canvas offscreen layer composited with a uniform group opacity
- * `alpha` (0..255). Out-of-range alpha is clamped to the byte. */
+ * `alpha` (0..255). Out-of-range alpha is rejected.
+ *
+ * This build's libSkiaSharp does NOT export sk_canvas_save_layer_alpha (verified
+ * by nm — only sk_canvas_save_layer / _rec exist; the _alpha convenience wrapper
+ * was removed upstream). We implement group opacity the canonical way instead:
+ * sk_canvas_save_layer(bounds=NULL, paint) where the paint carries only the
+ * group alpha — SkCanvas applies the layer paint's alpha as the whole-layer
+ * opacity on restore, which is exactly what saveLayerAlpha did internally. The
+ * paint's RGB is irrelevant for this (alpha-only) use. */
 int64_t ruxen_canvas_save_layer_alpha(int64_t self, int64_t alpha) {
     RxHost *h = (RxHost *)self;
     if (!h) return -RXC_ERR_BAD_ARGS;
@@ -670,8 +709,17 @@ int64_t ruxen_canvas_save_layer_alpha(int64_t self, int64_t alpha) {
     if (alpha < 0 || alpha > 255) return -RXC_ERR_BAD_ARGS;
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    if (!canvas || !sk->canvas_save_layer_alpha) return -RXC_ERR_NO_SKIA;
-    return (int64_t)sk->canvas_save_layer_alpha(canvas, NULL, (uint8_t)alpha);
+    if (!canvas || !sk->canvas_save_layer || !sk->paint_new ||
+        !sk->paint_set_color || !sk->paint_delete) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    sk_paint_t *paint = sk->paint_new();
+    if (!paint) return -RXC_ERR_BAD_ARGS;
+    /* alpha in the high byte; RGB ignored for layer group opacity. */
+    sk->paint_set_color(paint, (sk_color_t)((uint32_t)alpha << 24));
+    int count = sk->canvas_save_layer(canvas, NULL, paint);
+    sk->paint_delete(paint);   /* saveLayer copies the paint; safe to free now */
+    return (int64_t)count;
 }
 
 /* Restore down to a save count from a prior save (unwinds nested saves). */
