@@ -323,6 +323,49 @@ class Canvas
     self.raw.text_height_font_raw(size as Float, &family)
   end
 
+  ## Draw a **word-wrapped, aligned paragraph** of `text` into a `max_width`
+  ## column. `(x, y)` is the origin: `x` is the column's left edge, `y` is the
+  ## FIRST line's baseline; wrapped lines stack one line-height below. `align`:
+  ## 0 = left, 1 = center, 2 = right (within the column). An unknown `family`
+  ## falls back to the default typeface. Returns `Ok(total_height)` in pixels —
+  ## the laid-out block height, so L2 can size a text block — or `Err`.
+  ##
+  ## Skia-only: greedy whitespace word-wrap on real font metrics (an explicit
+  ## `\n` forces a break; a single word wider than `max_width` renders on its own
+  ## line rather than looping). A wrapped paragraph can't be faked on the bitmap
+  ## face, so this returns `Err` when the Skia backend is absent. Proper
+  ## international shaping (bidi / complex scripts) is a later HarfBuzz follow-up.
+  def var draw_paragraph(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, family: String, align: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_raw(&text, x as Float, y as Float, max_width as Float, size as Float, &family, align, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph")
+  end
+
+  ## Measure a **word-wrapped paragraph** WITHOUT drawing: returns the laid-out
+  ## block's total height in pixels (n_lines × line-height) for layout. Returns 0
+  ## when the Skia backend is absent (no real wrap possible). Pair with
+  ## `draw_paragraph` to reserve space for a wrapping label/text block.
+  def measure_paragraph(text: String, max_width: Float32, size: Float32, family: String) -> Int
+    let packed = self.raw.measure_paragraph_raw(&text, max_width as Float, size as Float, &family)
+    if packed < 0
+      0
+    else
+      # shim packs (max_line_width << 32) | total_height; height is the low 32 bits.
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest wrapped line of a paragraph in pixels (the block's content
+  ## width), for layout that shrink-wraps a text block to its longest line.
+  ## 0 when the Skia backend is absent.
+  def measure_paragraph_width(text: String, max_width: Float32, size: Float32, family: String) -> Int
+    let packed = self.raw.measure_paragraph_raw(&text, max_width as Float, size as Float, &family)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String

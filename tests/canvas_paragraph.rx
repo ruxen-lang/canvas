@@ -1,0 +1,221 @@
+# Pin tests for word-wrapped, aligned paragraphs: Canvas#draw_paragraph /
+# #measure_paragraph.
+#
+# The fetched libSkiaSharp ships no SkParagraph/SkShaper, so wrapping is done in
+# the shim (greedy whitespace word-wrap on real font metrics). These are
+# Skia-only — with no library they return a clean Err / 0. Skia is active locally
+# (macOS dylib), so the `active` branch here runs REAL wrapping + pixel readback;
+# the `else` branch pins the clean-Err contract when Skia is absent.
+#
+# Structural invariants (backend-font-independent): text wider than max_width
+# wraps to multiple rows (height grows, ink on multiple rows); a short string
+# stays one line; center/right alignment shift the ink rightward; a single long
+# unbreakable word still renders (and does not loop forever).
+
+Tester.describe("Canvas.draw_paragraph wrapping") do |t: &var Tester|
+  t.it("wraps long text to multiple lines (taller block, ink on many rows)") do
+    var c = match Canvas.create(120, 80)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let active = c.skia_active?
+    let white = Color.rgb(255u8, 255u8, 255u8)
+    let black = Color.rgb(0u8, 0u8, 0u8)
+    let bg = black.to_argb as Int
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(black)
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let para = String.from("the quick brown fox jumps over the lazy dog again and again")
+    let res = c.draw_paragraph(para, 4.0f32, 14.0f32, 90.0f32, 14.0f32, String.from(""), 0, white)
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    # count rows that have any ink
+    var rows = 0
+    var y = 0
+    while y < 80
+      var x = 0
+      var inked = false
+      while x < 120
+        if c.read_pixel(x, y) != bg
+          inked = true
+        end
+        x += 1
+      end
+      if inked
+        rows += 1
+      end
+      y += 1
+    end
+
+    if active
+      let h = match res
+        Ok(v)  -> v
+        Err(_) -> panic!("draw_paragraph failed on active Skia")
+      end
+      t.expect(h > 16).to_eq(true)       # more than one line of height
+      t.expect(rows > 14).to_eq(true)    # ink spread across multiple wrapped rows
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+
+  t.it("a narrower column wraps to a taller block than a wide one") do
+    var c = match Canvas.create(200, 80)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let active = c.skia_active?
+    if active
+      let one = c.measure_paragraph(String.from("hello world"), 190.0f32, 14.0f32, String.from(""))
+      let many = c.measure_paragraph(String.from("hello world"), 30.0f32, 14.0f32, String.from(""))
+      t.expect(one > 0).to_eq(true)
+      t.expect(many > one).to_eq(true)   # narrower column => more lines => taller
+    else
+      let z = c.measure_paragraph(String.from("hello world"), 190.0f32, 14.0f32, String.from(""))
+      t.expect(z).to_eq(0)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_paragraph alignment") do |t: &var Tester|
+  t.it("center and right shift the ink rightward vs left") do
+    var cl = match Canvas.create(160, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var cc = match Canvas.create(160, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var cr = match Canvas.create(160, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = cl.skia_active?
+    let white = Color.rgb(255u8, 255u8, 255u8)
+    let black = Color.rgb(0u8, 0u8, 0u8)
+    let bg = black.to_argb as Int
+
+    let _a = cl.begin_frame
+    let _b = cl.clear(black)
+    let _c = cl.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 0, white)
+    let _d = cl.end_frame
+    let _e = cc.begin_frame
+    let _f = cc.clear(black)
+    let _g = cc.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 1, white)
+    let _h = cc.end_frame
+    let _i = cr.begin_frame
+    let _j = cr.clear(black)
+    let _k = cr.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 2, white)
+    let _l = cr.end_frame
+
+    if active
+      # leftmost ink x for each alignment
+      var lx = -1
+      var y = 0
+      while y < 30
+        var x = 0
+        while x < 160
+          if lx < 0 && cl.read_pixel(x, y) != bg
+            lx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      var cx = -1
+      y = 0
+      while y < 30
+        var x = 0
+        while x < 160
+          if cx < 0 && cc.read_pixel(x, y) != bg
+            cx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      var rx = -1
+      y = 0
+      while y < 30
+        var x = 0
+        while x < 160
+          if rx < 0 && cr.read_pixel(x, y) != bg
+            rx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(lx >= 0).to_eq(true)
+      t.expect(cx > lx).to_eq(true)     # centered starts further right than left
+      t.expect(rx > cx).to_eq(true)     # right starts further right than centered
+    else
+      t.expect(true).to_eq(true)        # Err path covered by the wrapping test
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_paragraph degenerate input") do |t: &var Tester|
+  t.it("a single word wider than the column still renders (no infinite loop)") do
+    var c = match Canvas.create(60, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let active = c.skia_active?
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
+    let res = c.draw_paragraph(String.from("Supercalifragilistic"), 2.0f32, 18.0f32, 20.0f32, 14.0f32, String.from(""), 0, Color.rgb(255u8, 255u8, 255u8))
+    let _2 = c.end_frame
+
+    var rows = 0
+    var y = 0
+    while y < 30
+      var x = 0
+      var inked = false
+      while x < 60
+        if c.read_pixel(x, y) != bg
+          inked = true
+        end
+        x += 1
+      end
+      if inked
+        rows += 1
+      end
+      y += 1
+    end
+
+    if active
+      match res
+        Ok(h)  -> t.expect(h > 0).to_eq(true)
+        Err(_) -> panic!("long word should still render, not Err")
+      end
+      t.expect(rows > 0).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

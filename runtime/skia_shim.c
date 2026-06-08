@@ -2026,6 +2026,221 @@ int64_t ruxen_canvas_text_height_font(int64_t self, double size, int64_t family)
     return rx_text_height_with_font(rx_font_for_family((const char *)family, size));
 }
 
+/* ---- paragraphs: multi-line, word-wrapped, aligned text ----
+ *
+ * The fetched libSkiaSharp does NOT ship SkParagraph / SkShaper (verified by
+ * nm — that needs a separate HarfBuzzSharp+ICU build). So word-wrap is done
+ * HERE, in the shim, on top of the already-bound Skia font measure + draw:
+ * greedy line-breaking on ASCII whitespace to fit `max_width`, each wrapped
+ * line drawn at line-height spacing and aligned (left/center/right). This needs
+ * no new native library and covers the vast majority of UI text (wrapping
+ * labels, text blocks, multi-line content).
+ *
+ * SCOPE: Latin word-wrap. Proper international shaping — bidi, ligatures,
+ * complex scripts, grapheme/line-break tables — is deliberately deferred to a
+ * later HarfBuzz/ICU follow-up (docs/ROADMAP.md). Whitespace here is ASCII
+ * space/tab/newline; an explicit '\n' forces a line break.
+ *
+ * Skia-only: a wrapped paragraph cannot be faithfully reproduced on the 5x7
+ * bitmap fallback (no real advances), so these report RXC_ERR_NO_SKIA when no
+ * Skia font is available rather than mis-laying-out text.
+ *
+ * Alignment within the max_width column: 0 = left, 1 = center, 2 = right. */
+enum { RXC_ALIGN_LEFT = 0, RXC_ALIGN_CENTER = 1, RXC_ALIGN_RIGHT = 2 };
+
+/* True for the ASCII whitespace we break on. */
+static int rxc_is_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* Measure a byte range [s, s+len) with an already-resolved Skia font, in whole
+ * device pixels. Empty range measures 0. */
+static int rxc_measure_run(const RxSkia *sk, sk_font_t *font, const char *s, size_t len) {
+    if (len == 0) return 0;
+    float w = sk->font_measure_text(font, s, len, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(w > 0.0f)) return 0;
+    return (int)(w + 0.5f);
+}
+
+/* Greedy word-wrap + (optionally) draw of `text` into a `max_width` column at
+ * font `font`, with the first baseline at (x, y0 + ascent...) — actually y0 is
+ * the FIRST line's baseline, and each subsequent line is one line_height below.
+ *
+ * If `draw` is nonzero, each line is rendered via canvas_draw_simple_text at its
+ * aligned x; otherwise nothing is drawn (measure-only). Returns the number of
+ * lines laid out, and writes the widest line's width to *out_max_w. The caller
+ * derives total height = n_lines * line_height.
+ *
+ * Breaking rules (greedy):
+ *   - words are maximal non-whitespace runs; an explicit '\n' forces a break.
+ *   - a word is appended to the current line if (current line width + space +
+ *     word) still fits max_width; otherwise the current line is flushed and the
+ *     word starts a new line.
+ *   - a single word WIDER than max_width that is alone on its line is placed
+ *     anyway (it overflows the column rather than looping forever) — correctness
+ *     over fitting; we never split inside a word this round.
+ *
+ * Each line is drawn from the ORIGINAL text buffer by [start,end) offsets, so no
+ * copying/NUL-termination is needed and draw uses the exact source bytes. */
+static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
+                               const char *text, double x, double y0,
+                               double max_width, int line_height, int align,
+                               int64_t argb, int draw, int *out_max_w) {
+    int max_col = (max_width > 0.0) ? (int)(max_width + 0.5) : 0;
+    int n_lines = 0;
+    int widest = 0;
+
+    sk_paint_t *paint = NULL;
+    if (draw) {
+        paint = sk->paint_new();
+        if (!paint) return -1;           /* signal allocation failure */
+        sk->paint_set_antialias(paint, 1);
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+    }
+
+    size_t i = 0;
+    /* Current pending line is the byte range [line_start, line_end); line_w is
+     * its measured width. -1 line_start means "no line started yet". */
+    size_t line_start = 0, line_end = 0;
+    int    line_w = 0;
+    int    have_line = 0;
+
+    /* Flush the current line: align + (optionally) draw it, advance the row. */
+    #define RXC_FLUSH_LINE()                                                      \
+        do {                                                                      \
+            int lw = line_w;                                                      \
+            if (lw > widest) widest = lw;                                         \
+            if (draw) {                                                           \
+                double off = 0.0;                                                 \
+                if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lw) / 2.0;\
+                else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lw;    \
+                if (off < 0.0) off = 0.0;                                         \
+                double by = y0 + (double)n_lines * line_height;                   \
+                size_t llen = line_end - line_start;                             \
+                if (llen > 0)                                                     \
+                    sk->canvas_draw_simple_text(rx_host_canvas(h),                \
+                        text + line_start, llen, RX_SK_TEXT_UTF8,                 \
+                        (float)(x + off), (float)by, font, paint);               \
+            }                                                                     \
+            n_lines++;                                                            \
+            have_line = 0; line_w = 0;                                            \
+        } while (0)
+
+    while (text[i]) {
+        /* skip run of whitespace; an explicit newline forces a break of any
+         * pending line (and produces an empty line only via blank input runs we
+         * collapse — a lone '\n' between words just ends the current line). */
+        if (rxc_is_space((unsigned char)text[i])) {
+            int had_newline = 0;
+            while (text[i] && rxc_is_space((unsigned char)text[i])) {
+                if (text[i] == '\n') had_newline = 1;
+                i++;
+            }
+            if (had_newline && have_line) RXC_FLUSH_LINE();
+            continue;
+        }
+        /* a word: maximal non-whitespace run [w_start, w_end) */
+        size_t w_start = i;
+        while (text[i] && !rxc_is_space((unsigned char)text[i])) i++;
+        size_t w_end = i;
+        int word_w = rxc_measure_run(sk, font, text + w_start, w_end - w_start);
+
+        if (!have_line) {
+            /* start a fresh line with this word (even if it overflows alone) */
+            line_start = w_start; line_end = w_end; line_w = word_w;
+            have_line = 1;
+        } else {
+            /* candidate width if we append " word": measure the joined range so
+             * the inter-word space advance is exact for the font. */
+            int joined = rxc_measure_run(sk, font, text + line_start, w_end - line_start);
+            if (max_col > 0 && joined > max_col) {
+                /* would overflow: flush the current line, word starts the next */
+                RXC_FLUSH_LINE();
+                line_start = w_start; line_end = w_end; line_w = word_w;
+                have_line = 1;
+            } else {
+                /* extend the current line to include the space + word */
+                line_end = w_end;
+                line_w = joined;
+            }
+        }
+    }
+    if (have_line) RXC_FLUSH_LINE();
+
+    #undef RXC_FLUSH_LINE
+
+    if (draw && paint) sk->paint_delete(paint);
+    if (out_max_w) *out_max_w = widest;
+    return n_lines;
+}
+
+/* Resolve the paragraph font + line height; shared by draw/measure. Returns the
+ * font (size set) or NULL when no Skia font is available; writes the line height
+ * to *out_lh. */
+static sk_font_t *rx_paragraph_font(const char *family, double size, int *out_lh) {
+    sk_font_t *font = rx_font_for_family(family, size);
+    if (!font) { *out_lh = 0; return NULL; }
+    int lh = (int)rx_text_height_with_font(font);
+    if (lh < 1) lh = 1;
+    *out_lh = lh;
+    return font;
+}
+
+/* Draw a word-wrapped, aligned paragraph of `text` into a `max_width` column.
+ * (x, y) is the origin: x is the column's left edge, y is the FIRST line's
+ * baseline. Subsequent lines stack one line-height below. Returns the laid-out
+ * TOTAL HEIGHT in pixels (n_lines * line_height) so L2 can size a text block,
+ * or a NEGATIVE -RXC_ERR_* on failure (Skia-only — no bitmap word-wrap). */
+int64_t ruxen_canvas_draw_paragraph(int64_t self, int64_t text, double x, double y,
+                                    double max_width, double size, int64_t family,
+                                    int64_t align, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    int lh = 0;
+    sk_font_t *font = rx_paragraph_font(fam, size, &lh);
+    if (!canvas || !font || !sk->canvas_draw_simple_text || !sk->font_measure_text) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    int n = rx_paragraph_layout(h, sk, font, s, x, y, max_width, lh,
+                                (int)align, argb, /*draw*/1, NULL);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;   /* paint alloc failed */
+    return (int64_t)n * lh;
+}
+
+/* Measure a word-wrapped paragraph WITHOUT drawing: returns the laid-out size
+ * packed as (max_line_width << 32) | total_height — both in pixels — so L2 gets
+ * the wrapped block's width and height in one call for layout. NEGATIVE
+ * -RXC_ERR_* on failure (Skia-only). */
+int64_t ruxen_canvas_measure_paragraph(int64_t self, int64_t text, double max_width,
+                                       double size, int64_t family) {
+    (void)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    const RxSkia *sk = rx_skia();
+    int lh = 0;
+    sk_font_t *font = rx_paragraph_font(fam, size, &lh);
+    if (!font || !sk->font_measure_text) return -RXC_ERR_NO_SKIA;
+    int max_w = 0;
+    int n = rx_paragraph_layout(NULL, sk, font, s, 0.0, 0.0, max_width, lh,
+                                RXC_ALIGN_LEFT, 0, /*draw*/0, &max_w);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    int64_t height = (int64_t)n * lh;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
 /* ---- event queue ---- */
 /* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the
