@@ -2153,6 +2153,133 @@ static int rxc_measure_run(const RxSkia *sk, sk_font_t *font, const char *s, siz
     return (int)(w + 0.5f);
 }
 
+static int rxc_hb_direction(int64_t dir);   /* fwd: defined in the shaping section */
+
+/* ---- shaper context: shaped paragraph lines (docs/SHAPING.md) ----
+ *
+ * A paragraph-wide HarfBuzz + Skia handle set, built ONCE for the whole
+ * paragraph (not per line): the HarfBuzz font (for shaping a byte sub-range) and
+ * the matching Skia typeface+font (the SAME font file, so glyph ids agree, plus
+ * a measured line height). rx_paragraph_layout consults this when shaping is
+ * requested, so its greedy word-wrap measures + draws each line through the
+ * shaped glyph path; with a NULL context the layout uses the non-shaped
+ * measure+draw exactly as before. */
+typedef struct {
+    const RxSkia *sk;
+    const RxHB   *hb;
+    hb_blob_t    *blob;
+    hb_face_t    *face;
+    hb_font_t    *hfont;     /* HarfBuzz font, scaled to size*64 (26.6 fixed) */
+    sk_typeface_t *tf;
+    sk_font_t    *skf;       /* Skia font over the same file, size set */
+    int           hbdir;     /* RX_HB_DIR_* or INVALID for auto */
+    int           line_height;
+    int           ok;        /* 1 iff every handle was created */
+} RxShaper;
+
+/* Build the paragraph shaper for `font_path` at `size` px and `dir`. Returns ok=0
+ * (and releases anything partial) when shaping is unavailable or the font file
+ * can't be opened — the caller then reports a clean Err. */
+static void rx_shaper_init(RxShaper *s, const char *font_path, double size, int64_t dir) {
+    memset(s, 0, sizeof(*s));
+    s->sk = rx_skia();
+    s->hb = rx_hb();
+    if (!s->sk->available || !s->sk->glyph_render_ok || !s->hb->available) return;
+    if (!font_path || !font_path[0]) return;
+
+    int scale = (int)(size * 64.0 + 0.5);
+    s->blob = s->hb->blob_create_from_file(font_path);
+    if (!s->blob) return;
+    s->face = s->hb->face_create(s->blob, 0);
+    s->hfont = s->face ? s->hb->font_create(s->face) : NULL;
+    if (!s->hfont) return;
+    s->hb->font_set_scale(s->hfont, scale, scale);
+    s->hbdir = rxc_hb_direction(dir);
+
+    s->tf = s->sk->typeface_create_from_file(font_path, 0);
+    s->skf = s->sk->font_new_with_values(s->tf, (float)size, 1.0f, 0.0f);
+    if (!s->skf) return;
+    int lh = (int)rx_text_height_with_font(s->skf);
+    s->line_height = lh < 1 ? 1 : lh;
+    s->ok = 1;
+}
+
+static void rx_shaper_drop(RxShaper *s) {
+    if (s->skf && s->sk->font_delete) s->sk->font_delete(s->skf);
+    if (s->tf && s->sk->typeface_unref) s->sk->typeface_unref(s->tf);
+    if (s->hfont) s->hb->font_destroy(s->hfont);
+    if (s->face) s->hb->face_destroy(s->face);
+    if (s->blob) s->hb->blob_destroy(s->blob);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Shape the byte sub-range [start, start+len) of `text` and return its total
+ * advance width in whole device pixels (kerning + ligatures applied). Uses
+ * hb_buffer_add_utf8's item_offset/item_length to shape the sub-range with the
+ * surrounding text as context. Empty range = 0. */
+static int rx_shaper_measure(RxShaper *s, const char *text, size_t start, size_t len) {
+    if (len == 0 || !s->ok) return 0;
+    hb_buffer_t *buf = s->hb->buffer_create();
+    if (!buf) return 0;
+    s->hb->buffer_add_utf8(buf, text, -1, (unsigned int)start, (int)len);
+    if (s->hbdir != RX_HB_DIR_INVALID) s->hb->buffer_set_direction(buf, s->hbdir);
+    s->hb->buffer_guess_segment_properties(buf);
+    s->hb->shape(s->hfont, buf, NULL, 0);
+    unsigned int n = s->hb->buffer_get_length(buf);
+    hb_glyph_position_t *gp = s->hb->buffer_get_glyph_positions(buf, NULL);
+    double adv = 0.0;
+    for (unsigned int i = 0; i < n; i++) adv += gp[i].x_advance / 64.0;
+    s->hb->buffer_destroy(buf);
+    return (int)(adv + 0.5);
+}
+
+/* Draw the shaped byte sub-range [start, start+len) at baseline (x, y) with
+ * packed color argb, onto `canvas`. Builds a positioned-glyph textblob from the
+ * HarfBuzz shaping and draws it (the same render path as draw_text_shaped). */
+static void rx_shaper_draw(RxShaper *s, sk_canvas_t *canvas, const char *text,
+                           size_t start, size_t len, double x, double y, int64_t argb) {
+    if (len == 0 || !s->ok || !canvas) return;
+    hb_buffer_t *buf = s->hb->buffer_create();
+    if (!buf) return;
+    s->hb->buffer_add_utf8(buf, text, -1, (unsigned int)start, (int)len);
+    if (s->hbdir != RX_HB_DIR_INVALID) s->hb->buffer_set_direction(buf, s->hbdir);
+    s->hb->buffer_guess_segment_properties(buf);
+    s->hb->shape(s->hfont, buf, NULL, 0);
+    unsigned int n = s->hb->buffer_get_length(buf);
+    if (n == 0) { s->hb->buffer_destroy(buf); return; }
+    hb_glyph_info_t *gi = s->hb->buffer_get_glyph_infos(buf, NULL);
+    hb_glyph_position_t *gp = s->hb->buffer_get_glyph_positions(buf, NULL);
+
+    sk_textblob_builder_t *b = s->sk->textblob_builder_new();
+    if (b) {
+        sk_textblob_runbuffer_t rb;
+        s->sk->textblob_builder_alloc_run_pos(b, s->skf, (int)n, NULL, &rb);
+        uint16_t *gout = (uint16_t *)rb.glyphs;
+        float    *pout = (float *)rb.pos;
+        double penx = 0.0;
+        for (unsigned int i = 0; i < n; i++) {
+            gout[i] = (uint16_t)gi[i].codepoint;
+            pout[2 * i + 0] = (float)(penx + gp[i].x_offset / 64.0);
+            pout[2 * i + 1] = (float)(-(gp[i].y_offset / 64.0));
+            penx += gp[i].x_advance / 64.0;
+        }
+        sk_textblob_t *blobt = s->sk->textblob_builder_make(b);
+        s->sk->textblob_builder_delete(b);
+        if (blobt) {
+            sk_paint_t *paint = s->sk->paint_new();
+            if (paint) {
+                s->sk->paint_set_antialias(paint, 1);
+                s->sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                s->sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                s->sk->canvas_draw_text_blob(canvas, blobt, (float)x, (float)y, paint);
+                s->sk->paint_delete(paint);
+            }
+            s->sk->textblob_unref(blobt);
+        }
+    }
+    s->hb->buffer_destroy(buf);
+}
+
 /* Greedy word-wrap + (optionally) draw of `text` into a `max_width` column at
  * font `font`, with the first baseline at (x, y0 + ascent...) — actually y0 is
  * the FIRST line's baseline, and each subsequent line is one line_height below.
@@ -2176,7 +2303,8 @@ static int rxc_measure_run(const RxSkia *sk, sk_font_t *font, const char *s, siz
 static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
                                const char *text, double x, double y0,
                                double max_width, int line_height, int align,
-                               int64_t argb, int draw, int *out_max_w) {
+                               int64_t argb, int draw, int *out_max_w,
+                               RxShaper *shaper) {
     int max_col = (max_width > 0.0) ? (int)(max_width + 0.5) : 0;
     int n_lines = 0;
     int widest = 0;
@@ -2197,7 +2325,9 @@ static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
     int    line_w = 0;
     int    have_line = 0;
 
-    /* Flush the current line: align + (optionally) draw it, advance the row. */
+    /* Flush the current line: align + (optionally) draw it, advance the row.
+     * When `shaper` is set, the line is drawn through the HarfBuzz-shaped glyph
+     * path (kerning/ligatures); otherwise the plain canvas_draw_simple_text. */
     #define RXC_FLUSH_LINE()                                                      \
         do {                                                                      \
             int lw = line_w;                                                      \
@@ -2209,10 +2339,15 @@ static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
                 if (off < 0.0) off = 0.0;                                         \
                 double by = y0 + (double)n_lines * line_height;                   \
                 size_t llen = line_end - line_start;                             \
-                if (llen > 0)                                                     \
-                    sk->canvas_draw_simple_text(rx_host_canvas(h),                \
-                        text + line_start, llen, RX_SK_TEXT_UTF8,                 \
-                        (float)(x + off), (float)by, font, paint);               \
+                if (llen > 0) {                                                   \
+                    if (shaper)                                                   \
+                        rx_shaper_draw(shaper, rx_host_canvas(h), text,           \
+                            line_start, llen, x + off, by, argb);                 \
+                    else                                                          \
+                        sk->canvas_draw_simple_text(rx_host_canvas(h),            \
+                            text + line_start, llen, RX_SK_TEXT_UTF8,             \
+                            (float)(x + off), (float)by, font, paint);           \
+                }                                                                 \
             }                                                                     \
             n_lines++;                                                            \
             have_line = 0; line_w = 0;                                            \
@@ -2235,7 +2370,8 @@ static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
         size_t w_start = i;
         while (text[i] && !rxc_is_space((unsigned char)text[i])) i++;
         size_t w_end = i;
-        int word_w = rxc_measure_run(sk, font, text + w_start, w_end - w_start);
+        int word_w = shaper ? rx_shaper_measure(shaper, text, w_start, w_end - w_start)
+                            : rxc_measure_run(sk, font, text + w_start, w_end - w_start);
 
         if (!have_line) {
             /* start a fresh line with this word (even if it overflows alone) */
@@ -2243,8 +2379,10 @@ static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
             have_line = 1;
         } else {
             /* candidate width if we append " word": measure the joined range so
-             * the inter-word space advance is exact for the font. */
-            int joined = rxc_measure_run(sk, font, text + line_start, w_end - line_start);
+             * the inter-word space advance is exact for the font. Shaped when a
+             * shaper is set, so wrap + alignment use kerned/ligature widths. */
+            int joined = shaper ? rx_shaper_measure(shaper, text, line_start, w_end - line_start)
+                                : rxc_measure_run(sk, font, text + line_start, w_end - line_start);
             if (max_col > 0 && joined > max_col) {
                 /* would overflow: flush the current line, word starts the next */
                 RXC_FLUSH_LINE();
@@ -2304,7 +2442,7 @@ int64_t ruxen_canvas_draw_paragraph(int64_t self, int64_t text, double x, double
         return -RXC_ERR_NO_SKIA;
     }
     int n = rx_paragraph_layout(h, sk, font, s, x, y, max_width, lh,
-                                (int)align, argb, /*draw*/1, NULL);
+                                (int)align, argb, /*draw*/1, NULL, /*shaper*/NULL);
     if (n < 0) return -RXC_ERR_BAD_ARGS;   /* paint alloc failed */
     return (int64_t)n * lh;
 }
@@ -2326,7 +2464,7 @@ int64_t ruxen_canvas_measure_paragraph(int64_t self, int64_t text, double max_wi
     if (!font || !sk->font_measure_text) return -RXC_ERR_NO_SKIA;
     int max_w = 0;
     int n = rx_paragraph_layout(NULL, sk, font, s, 0.0, 0.0, max_width, lh,
-                                RXC_ALIGN_LEFT, 0, /*draw*/0, &max_w);
+                                RXC_ALIGN_LEFT, 0, /*draw*/0, &max_w, /*shaper*/NULL);
     if (n < 0) return -RXC_ERR_BAD_ARGS;
     int64_t height = (int64_t)n * lh;
     return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
@@ -2493,6 +2631,78 @@ int64_t ruxen_canvas_measure_text_shaped(int64_t self, int64_t text, double size
                                          int64_t font_path, int64_t direction) {
     return rx_shape_run((RxHost *)self, (const char *)text, 0.0, 0.0, size,
                         (const char *)font_path, direction, 0, /*draw*/0);
+}
+
+/* ---- shaped paragraphs: word-wrap with SHAPED line widths + glyph render ----
+ *
+ * The same greedy whitespace word-wrap as ruxen_canvas_draw_paragraph, but each
+ * line's width (for the wrap decision + alignment) is the HarfBuzz-SHAPED advance
+ * (kerning/ligatures), and each wrapped line is rendered through the shaped glyph
+ * path. So wrapping and alignment of e.g. a line with "ffi"/"AV" differ from the
+ * naive per-char path. ONE font (by file path), greedy whitespace wrap (no ICU
+ * line-break this round); Skia+HarfBuzz-only (clean Err when absent — callers
+ * fall back to the non-shaped draw_paragraph). The non-shaped path is untouched.
+ *
+ * Direction (0 auto / 1 LTR / 2 RTL) applies to each shaped line. */
+
+/* Draw a word-wrapped paragraph with SHAPED lines (kerning/ligatures) at the
+ * given alignment (0 left / 1 center / 2 right). (x, y) is the column left edge
+ * + first baseline; lines stack one line-height below. Returns the laid-out
+ * TOTAL HEIGHT in pixels, or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_draw_paragraph_shaped(int64_t self, int64_t text, double x, double y,
+        double max_width, double size, int64_t font_path, int64_t align, int64_t direction,
+        int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fp = (const char *)font_path;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas) return -RXC_ERR_NO_SKIA;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, fp, size, direction);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    int n = rx_paragraph_layout(h, shaper.sk, shaper.skf, s, x, y, max_width,
+                                shaper.line_height, (int)align, argb,
+                                /*draw*/1, NULL, &shaper);
+    int lh = shaper.line_height;
+    rx_shaper_drop(&shaper);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    return (int64_t)n * lh;
+}
+
+/* Measure a shaped word-wrapped paragraph WITHOUT drawing: returns
+ * (max_shaped_line_width << 32) | total_height. NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_paragraph_shaped(int64_t self, int64_t text, double max_width,
+        double size, int64_t font_path, int64_t direction) {
+    (void)self;
+    const char *s = (const char *)text;
+    const char *fp = (const char *)font_path;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, fp, size, direction);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    int max_w = 0;
+    int n = rx_paragraph_layout(NULL, shaper.sk, shaper.skf, s, 0.0, 0.0, max_width,
+                                shaper.line_height, RXC_ALIGN_LEFT, 0,
+                                /*draw*/0, &max_w, &shaper);
+    int lh = shaper.line_height;
+    rx_shaper_drop(&shaper);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    int64_t height = (int64_t)n * lh;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
 }
 
 /* ---- event queue ---- */

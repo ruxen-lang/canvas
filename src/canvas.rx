@@ -401,6 +401,46 @@ class Canvas
     end
   end
 
+  ## Draw a word-wrapped, aligned **shaped** paragraph: the same greedy whitespace
+  ## word-wrap as `draw_paragraph`, but each wrapped line is measured + rendered
+  ## through the HarfBuzz-shaped glyph path, so wrapping, alignment, and ink all
+  ## use kerned/ligature widths (a line with `ffi`/`AV` is narrower than the naive
+  ## per-char path). `(x, y)` is the column left edge + first baseline; `align`
+  ## 0 left / 1 center / 2 right; `direction` 0 auto / 1 LTR / 2 RTL. Returns
+  ## `Ok(total_height)` or `Err`.
+  ##
+  ## Skia + HarfBuzz only; when shaping is unavailable this returns `Err` and
+  ## callers fall back to the non-shaped `draw_paragraph` (untouched). Font by
+  ## file path. Greedy whitespace wrap only — ICU bidi / line-break is the
+  ## deferred "full international" follow-up (`docs/SHAPING.md`).
+  def var draw_paragraph_shaped(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, font_path: String, align: Int, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_shaped_raw(&text, x as Float, y as Float, max_width as Float, size as Float, &font_path, align, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph_shaped")
+  end
+
+  ## Measure a **shaped** word-wrapped paragraph without drawing: returns the
+  ## laid-out block height in pixels (using shaped line widths for the wrap). 0
+  ## when shaping is unavailable. Pair with `draw_paragraph_shaped` for layout.
+  def measure_paragraph_shaped(text: String, max_width: Float32, size: Float32, font_path: String, direction: Int) -> Int
+    let packed = self.raw.measure_paragraph_shaped_raw(&text, max_width as Float, size as Float, &font_path, direction)
+    if packed < 0
+      0
+    else
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest **shaped** wrapped line of a paragraph in pixels (the block's
+  ## content width). 0 when shaping is unavailable.
+  def measure_paragraph_shaped_width(text: String, max_width: Float32, size: Float32, font_path: String, direction: Int) -> Int
+    let packed = self.raw.measure_paragraph_shaped_raw(&text, max_width as Float, size as Float, &font_path, direction)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String

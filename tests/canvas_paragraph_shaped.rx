@@ -1,0 +1,220 @@
+# Pin tests for SHAPED paragraphs: Canvas#draw_paragraph_shaped /
+# #measure_paragraph_shaped — greedy word-wrap whose per-line measurement AND
+# rendering go through the HarfBuzz-shaped glyph path (kerning, ligatures).
+#
+# Combines the two pieces: word-wrap (canvas_paragraph) + shaping (canvas_shaping).
+# Skia + HarfBuzz only; with neither, a clean Err / 0 and the non-shaped
+# draw_paragraph is the fallback. Skia is active + HarfBuzz fetched locally, so
+# the `on` branch runs REAL shaped wrapping + pixel readback.
+#
+# The decisive proof that lines are SHAPED (not naive per-char): for a
+# ligature/kerning-rich run, the shaped wrapped-line width is strictly narrower
+# than the same run measured WITHOUT shaping at the same size — so wrapping and
+# alignment differ measurably from the naive path.
+
+Tester.describe("Canvas.measure_paragraph_shaped uses shaped line widths") do |t: &var Tester|
+  t.it("wrap uses shaped widths: paragraph line width == shaped run width") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      # On a wide column the text fits one line, so the paragraph's widest line
+      # IS the shaped run width. If the wrap measured naively (per-char, no
+      # kerning/ligatures) these would diverge; that they agree (±1px rounding)
+      # proves the wrap used SHAPED measurement.
+      let txt = "Affluent AV Waffle"
+      let w_para = c.measure_paragraph_shaped_width(String.from(txt), 1000.0f32, 24.0f32, String.from(arial), 0)
+      let w_run = c.measure_text_shaped(String.from(txt), 24.0f32, String.from(arial), 0)
+      t.expect(w_para > 0).to_eq(true)
+      t.expect(w_run > 0).to_eq(true)
+      let diff = if w_para > w_run
+        w_para - w_run
+      else
+        w_run - w_para
+      end
+      t.expect(diff <= 2).to_eq(true)
+    else
+      let z = c.measure_paragraph_shaped(String.from("hi"), 100.0f32, 24.0f32, String.from(arial), 0)
+      t.expect(z).to_eq(0)
+    end
+  end
+
+  t.it("shaped lines are narrower than a naive per-character layout (ligature)") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      # A same-face NAIVE baseline: shaping each character ALONE gives no cross-
+      # character ligatures/kerning, so summing per-char shaped widths is exactly
+      # a naive per-char layout. The shaped paragraph line of "ffi" must be
+      # strictly NARROWER (Arial forms the ffi ligature) — proving wrapping uses
+      # real shaped widths, not a naive sum.
+      let line = c.measure_paragraph_shaped_width(String.from("ffi"), 1000.0f32, 24.0f32, String.from(arial), 0)
+      let f = c.measure_text_shaped(String.from("f"), 24.0f32, String.from(arial), 0)
+      let i = c.measure_text_shaped(String.from("i"), 24.0f32, String.from(arial), 0)
+      let naive = f + f + i
+      t.expect(line > 0).to_eq(true)
+      t.expect(naive > 0).to_eq(true)
+      t.expect(line < naive).to_eq(true)   # ffi ligature: shaped line tighter than f+f+i
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+
+  t.it("a narrower column wraps a shaped paragraph to a taller block") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      let txt = "the quick brown fox jumps over the lazy dog"
+      let wide = c.measure_paragraph_shaped(String.from(txt), 1000.0f32, 20.0f32, String.from(arial), 0)
+      let narrow = c.measure_paragraph_shaped(String.from(txt), 80.0f32, 20.0f32, String.from(arial), 0)
+      t.expect(wide > 0).to_eq(true)
+      t.expect(narrow > wide).to_eq(true)   # more lines => taller
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_paragraph_shaped renders shaped wrapped lines") do |t: &var Tester|
+  t.it("wraps long text to multiple shaped lines (ink on many rows)") do
+    var c = match Canvas.create(140, 100)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let white = Color.rgb(255u8, 255u8, 255u8)
+    let black = Color.rgb(0u8, 0u8, 0u8)
+    let bg = black.to_argb as Int
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(black)
+    let txt = "Affluent waffle Affirmative Avenue affix Wave"
+    let res = c.draw_paragraph_shaped(String.from(txt), 4.0f32, 18.0f32, 110.0f32, 18.0f32, String.from(arial), 0, 0, white)
+    let _2 = c.end_frame
+
+    var rows = 0
+    var y = 0
+    while y < 100
+      var x = 0
+      var inked = false
+      while x < 140
+        if c.read_pixel(x, y) != bg
+          inked = true
+        end
+        x += 1
+      end
+      if inked
+        rows += 1
+      end
+      y += 1
+    end
+
+    if on
+      let h = match res
+        Ok(v)  -> v
+        Err(e) -> panic!("draw_paragraph_shaped failed: #{e}")
+      end
+      t.expect(h > 20).to_eq(true)        # more than one line tall
+      t.expect(rows > 18).to_eq(true)     # ink across multiple wrapped lines
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+
+  t.it("center and right alignment shift shaped ink rightward vs left") do
+    var cl = match Canvas.create(180, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var cc = match Canvas.create(180, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var cr = match Canvas.create(180, 30)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = cl.shaping_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let white = Color.rgb(255u8, 255u8, 255u8)
+    let black = Color.rgb(0u8, 0u8, 0u8)
+    let bg = black.to_argb as Int
+
+    let _a = cl.begin_frame
+    let _b = cl.clear(black)
+    let _c = cl.draw_paragraph_shaped(String.from("AVA"), 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 0, 0, white)
+    let _d = cl.end_frame
+    let _e = cc.begin_frame
+    let _f = cc.clear(black)
+    let _g = cc.draw_paragraph_shaped(String.from("AVA"), 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 1, 0, white)
+    let _h = cc.end_frame
+    let _i = cr.begin_frame
+    let _j = cr.clear(black)
+    let _k = cr.draw_paragraph_shaped(String.from("AVA"), 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 2, 0, white)
+    let _l = cr.end_frame
+
+    if on
+      var lx = -1
+      var y = 0
+      while y < 30
+        var x = 0
+        while x < 180
+          if lx < 0 && cl.read_pixel(x, y) != bg
+            lx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      var cx = -1
+      y = 0
+      while y < 30
+        var x = 0
+        while x < 180
+          if cx < 0 && cc.read_pixel(x, y) != bg
+            cx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      var rx = -1
+      y = 0
+      while y < 30
+        var x = 0
+        while x < 180
+          if rx < 0 && cr.read_pixel(x, y) != bg
+            rx = x
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(lx >= 0).to_eq(true)
+      t.expect(cx > lx).to_eq(true)
+      t.expect(rx > cx).to_eq(true)
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+end
