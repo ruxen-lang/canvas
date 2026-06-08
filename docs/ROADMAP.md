@@ -163,10 +163,15 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       Skia's textblob API (libSkiaSharp has no SkParagraph/SkShaper, but DOES have
       `sk_textblob_*`). `Canvas#draw_text_shaped` / `#measure_text_shaped` /
       `#shaping_available?`; kerning + ligatures pixel-verified
-      (`tests/canvas_shaping.rx`, `examples/shape_kerning_verify.c`). **Deferred
-      follow-ups:** ICU bidi / line-break / grapheme segmentation; multi-run
-      paragraph integration (shaped wrapped lines); family→file resolution;
-      font/run caching. These are what "full international text in L2" still needs.
+      (`tests/canvas_shaping.rx`, `examples/shape_kerning_verify.c`). Plus
+      **shaped paragraphs** — `Canvas#draw_paragraph_shaped` /
+      `#measure_paragraph_shaped`: the greedy word-wrap now measures + renders
+      each line through the shaped glyph path (a `"ffi"` line is narrower than the
+      naive `f+f+i`; `tests/canvas_paragraph_shaped.rx`). **Deferred follow-ups:**
+      ICU bidi / line-break / grapheme segmentation (the shaped wrap is still
+      greedy-whitespace, not ICU line-break); per-line multi-run shaping + font
+      fallback; family→file resolution; font/run caching. These are what "full
+      international text in L2" still needs.
 - [ ] **Accessibility** — platform a11y trees.
 - [ ] **Platform matrix** — Windows → Android/iOS → web (WASM + canvas).
 

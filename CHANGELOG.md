@@ -7,6 +7,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Shaped paragraphs — word-wrapped text with kerning + ligatures.** Combines
+  the wrap + shaping work so wrapping labels / text blocks get real shaping
+  (`docs/SHAPING.md`):
+  - `Canvas#draw_paragraph_shaped(text, x, y, max_width, size, font_path, align,
+    direction, color) -> Result[Int, String]` (total height) and
+    `#measure_paragraph_shaped(...) -> Int` / `#measure_paragraph_shaped_width`.
+    The same greedy whitespace word-wrap as `draw_paragraph`, but each line's
+    width (for the wrap decision **and** alignment) is the HarfBuzz-**shaped**
+    advance, and each wrapped line is rendered through the shaped glyph path — so
+    wrapping, alignment, and ink of a line with `ffi`/`AV` differ from the naive
+    per-char path.
+  - **Additive / ABI-stable:** `rx_paragraph_layout` gained an optional shaper
+    context; the non-shaped `draw_paragraph` / `measure_paragraph` path is
+    untouched (passes `NULL`). The shaper (HarfBuzz face/font + Skia typeface) is
+    built **once per paragraph**, not per line; a line's width comes from shaping
+    its byte sub-range via `hb_buffer_add_utf8` offset/length
+    (`runtime/skia_shim.c` `ruxen_canvas_draw_paragraph_shaped` /
+    `_measure_paragraph_shaped`). Skia + HarfBuzz only — clean `Err`/0 when
+    absent, with the non-shaped paragraph path as the fallback.
+  - **Scope:** greedy whitespace wrap (not ICU line-break), one font by file
+    path. ICU bidi / line-break and per-line multi-run/font-fallback remain the
+    deferred "full international" follow-ups.
+  - Verified on real Skia + HarfBuzz (`tests/canvas_paragraph_shaped.rx`): a
+    `"ffi"` paragraph line is strictly narrower than the naive `f+f+i` sum (the
+    ligature proves the wrap uses shaped widths); the paragraph line width equals
+    the shaped run width; a narrower column wraps taller; multi-line shaped ink
+    reads back; center/right alignment shift the shaped ink.
 - **Proper text shaping — kerning + ligatures (HarfBuzz + Skia glyphs).** The
   last big text gap: real shaping instead of naive per-character placement
   (`docs/SHAPING.md`):

@@ -64,18 +64,30 @@ silent wrong render). The font is selected by **file path** this round.
 **Landed (verified locally on real Skia + HarfBuzz):**
 - A single shaped run with **kerning** and **ligatures** (`tests/canvas_shaping.rx`:
   `"AV"` shaped < `"A"` + `"V"`; `"ffi"` < 3× `"f"`), and direction LTR/RTL/auto.
+- **Shaped paragraphs** — `Canvas#draw_paragraph_shaped` /
+  `#measure_paragraph_shaped`: the greedy whitespace word-wrap measures **and**
+  renders each wrapped line through the shaped glyph path, so wrapping +
+  alignment use kerned/ligature widths. The shaper (HarfBuzz face/font + Skia
+  typeface) is built once per paragraph; each line's width comes from shaping its
+  byte sub-range (`hb_buffer_add_utf8` item-offset/length).
+  `tests/canvas_paragraph_shaped.rx` proves it: a `"ffi"` paragraph line is
+  strictly narrower than the naive per-char sum `f+f+i` (the ligature), and the
+  paragraph line width equals the shaped run width (wrap measured shaped, not
+  naive).
 - `examples/shape_kerning_verify.c` — a standalone, committed proof
   (`cc -O2 -o m examples/shape_kerning_verify.c && ./m` → `PASS`; AV 1.8px
   tighter, ffi 1.8px tighter, textblob inked).
 
 **Deferred (the follow-ups to "full" international text):**
 - **Bidi + line-break + grapheme segmentation (ICU).** Multi-directional
-  paragraphs and Unicode line-breaking need ICU (large, build-heavy). This round
-  shapes a single run with an explicit/auto direction; full bidi reordering of
-  mixed-direction text is not yet done.
-- **Multi-run paragraph integration.** Wiring shaped runs into
-  `draw_paragraph`'s wrapping (so wrapped lines are shaped, and wrap points come
-  from real line-break tables) is the natural next step.
+  paragraphs and Unicode line-breaking need ICU (large, build-heavy). The shaped
+  paragraph path still uses **greedy whitespace** word-wrap (not ICU line-break
+  tables), and shapes each line with one direction; full bidi reordering of
+  mixed-direction text is not yet done. This is the last piece for "full"
+  international text.
+- **Per-line multi-run shaping / font fallback.** A line is shaped as one run in
+  one font; itemizing a line into runs by script + per-run font fallback (for
+  mixed scripts / missing glyphs) is a follow-up.
 - **Family → file resolution.** Today a shaped run takes a font **file path**;
   resolving a family name to a file (via the system font manager) is a small
   follow-up.
