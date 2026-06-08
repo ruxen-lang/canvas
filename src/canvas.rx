@@ -366,6 +366,41 @@ class Canvas
     end
   end
 
+  ## True when proper text **shaping** is available: Skia's positioned-glyph
+  ## render API plus the HarfBuzz shaper are both loaded (run
+  ## `runtime/fetch_skia.sh`). A capability probe — when false, `draw_text_shaped`
+  ## returns `Err` and callers use the non-shaped `draw_text` / `draw_paragraph`.
+  def shaping_available? -> Bool
+    self.raw.shaping_available_raw
+  end
+
+  ## Draw one **HarfBuzz-shaped run** of `text` in the font FILE `font_path` at
+  ## `size` px, baseline origin `(x, y)`. Shaping applies kerning + ligatures
+  ## (and RTL / complex scripts when `direction` is set): `direction` is 0 auto /
+  ## 1 left-to-right / 2 right-to-left. Returns `Ok(advance_width_px)` — the
+  ## shaped run's width, for centering/layout — or `Err`.
+  ##
+  ## Skia + HarfBuzz only (greedy non-shaped `draw_text` / `draw_paragraph` is the
+  ## fallback when shaping is unavailable). Scope: ONE run, ONE font by file path;
+  ## proper bidi / line-break / multi-run paragraphs are a later ICU follow-up.
+  def var draw_text_shaped(text: String, x: Float32, y: Float32, size: Float32, font_path: String, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_shaped_raw(&text, x as Float, y as Float, size as Float, &font_path, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_text_shaped")
+  end
+
+  ## Advance **width** in pixels of a HarfBuzz-shaped run of `text` in font file
+  ## `font_path` at `size` px (kerning/ligatures applied), without drawing — for
+  ## layout. `direction`: 0 auto / 1 LTR / 2 RTL. Returns 0 when shaping is
+  ## unavailable (pair with `shaping_available?`).
+  def measure_text_shaped(text: String, size: Float32, font_path: String, direction: Int) -> Int
+    let code = self.raw.measure_text_shaped_raw(&text, size as Float, &font_path, direction)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String

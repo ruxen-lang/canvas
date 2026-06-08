@@ -229,6 +229,16 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(gr_direct_context_make_metal,  "gr_direct_context_make_metal");
     RX_SK_OPTIONAL(surface_new_render_target,     "sk_surface_new_render_target");
     RX_SK_OPTIONAL(surface_read_pixels,           "sk_surface_read_pixels");
+
+    /* Positioned-glyph rendering for shaped text (docs/SHAPING.md). OPTIONAL:
+     * a miss leaves glyph_render_ok = 0, disabling only shaping. */
+    RX_SK_OPTIONAL(typeface_create_from_file,     "sk_typeface_create_from_file");
+    RX_SK_OPTIONAL(textblob_builder_new,          "sk_textblob_builder_new");
+    RX_SK_OPTIONAL(textblob_builder_delete,       "sk_textblob_builder_delete");
+    RX_SK_OPTIONAL(textblob_builder_alloc_run_pos,"sk_textblob_builder_alloc_run_pos");
+    RX_SK_OPTIONAL(textblob_builder_make,         "sk_textblob_builder_make");
+    RX_SK_OPTIONAL(textblob_unref,                "sk_textblob_unref");
+    RX_SK_OPTIONAL(canvas_draw_text_blob,         "sk_canvas_draw_text_blob");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
 
@@ -256,10 +266,91 @@ const RxSkia *rx_skia(void) {
         skia.gr_recording_context_unref &&
         skia.surface_unref ? 1 : 0;
 
+    /* Shaped-glyph rendering needs: load the font file as a typeface, build a
+     * positioned-glyph run, and draw the blob. (HarfBuzz does the shaping; see
+     * rx_hb().) If any is absent, shaping is unavailable and the non-shaped text
+     * path stays the fallback. */
+    skia.glyph_render_ok =
+        skia.typeface_create_from_file &&
+        skia.font_new_with_values &&
+        skia.textblob_builder_new &&
+        skia.textblob_builder_alloc_run_pos &&
+        skia.textblob_builder_make &&
+        skia.canvas_draw_text_blob &&
+        skia.textblob_unref ? 1 : 0;
+
     /* Keep the handle open for the process lifetime (no dlclose): the resolved
      * pointers must stay valid. */
     skia.available = ok;
     return &skia;
+}
+
+/* ---- HarfBuzz loader (text shaping, docs/SHAPING.md) ----
+ *
+ * libHarfBuzzSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here —
+ * never linked, exactly like Skia/SDL. rx_hb() resolves the hb_* table on first
+ * call; if the library or any required symbol is missing, ->available stays 0
+ * and the shaped-text ops report a clean Err (the non-shaped path is unaffected).
+ * Process-wide singleton. */
+static void *rx_hb_dlopen(void) {
+    const char *env = getenv("RUXEN_CANVAS_HARFBUZZ");
+    if (env && env[0]) {
+        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    char path[4096];
+    const char *cache = getenv("RUXEN_CANVAS_CACHE");
+    if (cache && cache[0]) {
+        snprintf(path, sizeof(path), "%s/libHarfBuzzSharp.dylib", cache);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libHarfBuzzSharp.dylib", home);
+        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    void *h = dlopen("libHarfBuzzSharp.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    return dlopen("libHarfBuzzSharp.so", RTLD_NOW | RTLD_LOCAL);
+}
+
+const RxHB *rx_hb(void) {
+    static RxHB hb;
+    static int initialized = 0;
+    if (initialized) return &hb;
+    initialized = 1;
+
+    void *lib = rx_hb_dlopen();
+    if (!lib) return &hb;   /* not available; shaping reports Err */
+
+    int ok = 1;
+#define RX_HB_REQ(field, sym)                                  \
+    do {                                                       \
+        *(void **)(&hb.field) = dlsym(lib, sym);               \
+        if (!hb.field) ok = 0;                                 \
+    } while (0)
+    RX_HB_REQ(blob_create_from_file,             "hb_blob_create_from_file_or_fail");
+    RX_HB_REQ(face_create,                       "hb_face_create");
+    RX_HB_REQ(font_create,                       "hb_font_create");
+    RX_HB_REQ(font_set_scale,                    "hb_font_set_scale");
+    RX_HB_REQ(buffer_create,                     "hb_buffer_create");
+    RX_HB_REQ(buffer_add_utf8,                   "hb_buffer_add_utf8");
+    RX_HB_REQ(buffer_set_direction,              "hb_buffer_set_direction");
+    RX_HB_REQ(buffer_guess_segment_properties,   "hb_buffer_guess_segment_properties");
+    RX_HB_REQ(shape,                             "hb_shape");
+    RX_HB_REQ(buffer_get_length,                 "hb_buffer_get_length");
+    RX_HB_REQ(buffer_get_glyph_infos,            "hb_buffer_get_glyph_infos");
+    RX_HB_REQ(buffer_get_glyph_positions,        "hb_buffer_get_glyph_positions");
+    RX_HB_REQ(buffer_destroy,                    "hb_buffer_destroy");
+    RX_HB_REQ(font_destroy,                      "hb_font_destroy");
+    RX_HB_REQ(face_destroy,                      "hb_face_destroy");
+    RX_HB_REQ(blob_destroy,                      "hb_blob_destroy");
+#undef RX_HB_REQ
+
+    hb.available = ok;
+    return &hb;
 }
 
 /* ---- Metal device + command queue (Apple GPU, docs/GPU.md) ----
@@ -2239,6 +2330,169 @@ int64_t ruxen_canvas_measure_paragraph(int64_t self, int64_t text, double max_wi
     if (n < 0) return -RXC_ERR_BAD_ARGS;
     int64_t height = (int64_t)n * lh;
     return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- shaped text: HarfBuzz shape + Skia glyph render (docs/SHAPING.md) ----
+ *
+ * The fetched libSkiaSharp has no SkShaper, so a single run is shaped with
+ * HarfBuzz (kerning, ligatures; RTL/complex with an explicit direction) and the
+ * resulting positioned glyphs are rendered with Skia's textblob API. HarfBuzz
+ * and Skia are fed the SAME font FILE (sk_typeface_create_from_file +
+ * hb_blob_create_from_file_or_fail), so glyph ids match.
+ *
+ * SCOPE (bounded first increment): ONE run, ONE font (by file path), with
+ * left-to-right / right-to-left / auto direction. Proper bidi + line-break +
+ * grapheme segmentation (ICU) and multi-run paragraph integration are a later
+ * follow-up. This is Skia+HarfBuzz-only — a clean Err when either is absent; the
+ * non-shaped draw_text / draw_paragraph path is the fallback.
+ *
+ * hb advances are 26.6 fixed because we set hb scale = size*64; divide by 64 for
+ * device pixels. */
+
+/* Map the FFI direction arg (0 auto / 1 LTR / 2 RTL) to an hb_direction_t, or 0
+ * for "auto" (then guess_segment_properties picks it from the script). */
+static int rxc_hb_direction(int64_t dir) {
+    if (dir == 1) return RX_HB_DIR_LTR;
+    if (dir == 2) return RX_HB_DIR_RTL;
+    return RX_HB_DIR_INVALID;   /* auto */
+}
+
+/* Shape `text` with `font_path` at `size` px and `dir`, then either draw the
+ * positioned glyph run at baseline (x, y) with color `argb` (draw != 0) or just
+ * measure it. Returns the run's total advance width in pixels, or a NEGATIVE
+ * -RXC_ERR_* on failure. All HarfBuzz + Skia objects are created and released
+ * within the call (bounded first increment — no font cache yet). */
+static int64_t rx_shape_run(RxHost *h, const char *text, double x, double y,
+                            double size, const char *font_path, int64_t dir,
+                            int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    const RxHB *hb = rx_hb();
+    if (!sk->available || !sk->glyph_render_ok || !hb->available) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+
+    int scale = (int)(size * 64.0 + 0.5);
+
+    /* HarfBuzz: blob -> face -> font, shape the buffer. */
+    hb_blob_t *blob = hb->blob_create_from_file(font_path);
+    if (!blob) return -RXC_ERR_BAD_ARGS;        /* unreadable / not a font file */
+    hb_face_t *face = hb->face_create(blob, 0);
+    hb_font_t *hfont = face ? hb->font_create(face) : NULL;
+    if (!hfont) {
+        if (face) hb->face_destroy(face);
+        hb->blob_destroy(blob);
+        return -RXC_ERR_BAD_ARGS;
+    }
+    hb->font_set_scale(hfont, scale, scale);
+
+    hb_buffer_t *buf = hb->buffer_create();
+    if (!buf) {
+        hb->font_destroy(hfont); hb->face_destroy(face); hb->blob_destroy(blob);
+        return -RXC_ERR_BAD_ARGS;
+    }
+    hb->buffer_add_utf8(buf, text, -1, 0, -1);
+    int hbdir = rxc_hb_direction(dir);
+    if (hbdir != RX_HB_DIR_INVALID) hb->buffer_set_direction(buf, hbdir);
+    hb->buffer_guess_segment_properties(buf);   /* fills script/lang (+ dir if auto) */
+    hb->shape(hfont, buf, NULL, 0);
+
+    unsigned int n = hb->buffer_get_length(buf);
+    hb_glyph_info_t *gi = hb->buffer_get_glyph_infos(buf, NULL);
+    hb_glyph_position_t *gp = hb->buffer_get_glyph_positions(buf, NULL);
+
+    /* total advance in pixels (the shaped run width). */
+    double total_adv = 0.0;
+    for (unsigned int i = 0; i < n; i++) total_adv += gp[i].x_advance / 64.0;
+    int64_t width_px = (int64_t)(total_adv + 0.5);
+
+    int64_t result = width_px;
+
+    if (draw && n > 0) {
+        /* Skia: the SAME font file as a typeface + a size-set font. */
+        sk_typeface_t *tf = sk->typeface_create_from_file(font_path, 0);
+        sk_font_t *skf = sk->font_new_with_values(tf, (float)size, 1.0f, 0.0f);
+        if (skf && sk->textblob_builder_new) {
+            sk_textblob_builder_t *b = sk->textblob_builder_new();
+            if (b) {
+                sk_textblob_runbuffer_t rb;
+                sk->textblob_builder_alloc_run_pos(b, skf, (int)n, NULL, &rb);
+                uint16_t *gout = (uint16_t *)rb.glyphs;
+                float    *pout = (float *)rb.pos;
+                double penx = 0.0;
+                for (unsigned int i = 0; i < n; i++) {
+                    gout[i] = (uint16_t)gi[i].codepoint;     /* glyph id from HB */
+                    pout[2 * i + 0] = (float)(penx + gp[i].x_offset / 64.0);
+                    pout[2 * i + 1] = (float)(-(gp[i].y_offset / 64.0));
+                    penx += gp[i].x_advance / 64.0;
+                }
+                sk_textblob_t *blobt = sk->textblob_builder_make(b);
+                sk->textblob_builder_delete(b);
+                if (blobt) {
+                    sk_paint_t *paint = sk->paint_new();
+                    if (paint) {
+                        sk->paint_set_antialias(paint, 1);
+                        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                        sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                        sk->canvas_draw_text_blob(canvas, blobt, (float)x, (float)y, paint);
+                        sk->paint_delete(paint);
+                    }
+                    sk->textblob_unref(blobt);
+                } else {
+                    result = -RXC_ERR_NO_SKIA;
+                }
+            }
+        } else {
+            result = -RXC_ERR_NO_SKIA;
+        }
+        if (skf && sk->font_delete) sk->font_delete(skf);
+        if (tf && sk->typeface_unref) sk->typeface_unref(tf);
+    }
+
+    hb->buffer_destroy(buf);
+    hb->font_destroy(hfont);
+    hb->face_destroy(face);
+    hb->blob_destroy(blob);
+    return result;
+}
+
+/* True (1) when text shaping can run: Skia's glyph-render API resolved AND the
+ * HarfBuzz shaper loaded. A capability probe (mirrors skia_available). */
+int64_t ruxen_canvas_shaping_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    return (sk->available && sk->glyph_render_ok && rx_hb()->available) ? 1 : 0;
+}
+
+/* Draw one HarfBuzz-shaped run of `text` in the font FILE `font_path` at `size`
+ * px, baseline origin (x, y), color packed 0xAARRGGBB in `argb`. `direction`:
+ * 0 auto / 1 LTR / 2 RTL. Returns the shaped run's advance WIDTH in pixels
+ * (>= 0), or a NEGATIVE -RXC_ERR_* on failure (Skia+HarfBuzz-only). */
+int64_t ruxen_canvas_draw_text_shaped(int64_t self, int64_t text, double x, double y,
+                                      double size, int64_t font_path, int64_t direction,
+                                      int64_t argb) {
+    return rx_shape_run((RxHost *)self, (const char *)text, x, y, size,
+                        (const char *)font_path, direction, argb, /*draw*/1);
+}
+
+/* Advance WIDTH in pixels of a HarfBuzz-shaped run (kerning/ligatures applied),
+ * without drawing — for layout/centering. `direction`: 0 auto / 1 LTR / 2 RTL.
+ * Negative -RXC_ERR_* on failure (Skia+HarfBuzz-only). */
+int64_t ruxen_canvas_measure_text_shaped(int64_t self, int64_t text, double size,
+                                         int64_t font_path, int64_t direction) {
+    return rx_shape_run((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                        (const char *)font_path, direction, 0, /*draw*/0);
 }
 
 /* ---- event queue ---- */

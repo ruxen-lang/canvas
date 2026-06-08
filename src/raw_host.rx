@@ -43,6 +43,9 @@ class RawHost
     def text_height_font_raw as "ruxen_canvas_text_height_font"(self, size: Float, family: &String) -> Int
     def draw_paragraph_raw as "ruxen_canvas_draw_paragraph"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, family: &String, align: Int, argb: Int) -> Int
     def measure_paragraph_raw as "ruxen_canvas_measure_paragraph"(self, text: &String, max_width: Float, size: Float, family: &String) -> Int
+    def draw_text_shaped_raw as "ruxen_canvas_draw_text_shaped"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, direction: Int, argb: Int) -> Int
+    def measure_text_shaped_raw as "ruxen_canvas_measure_text_shaped"(self, text: &String, size: Float, font_path: &String, direction: Int) -> Int
+    def shaping_available_raw as "ruxen_canvas_shaping_available"(self) -> Bool
     def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
     def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int

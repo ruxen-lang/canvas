@@ -34,6 +34,8 @@ typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
 typedef struct sk_path_t       sk_path_t;
 typedef struct sk_fontstyle_t  sk_fontstyle_t;
+typedef struct sk_textblob_t         sk_textblob_t;
+typedef struct sk_textblob_builder_t sk_textblob_builder_t;
 
 /* ---- Ganesh (GPU) opaque handles ----
  * The GPU backend (docs/GPU.md). A gr_direct_context drives a GL/Metal/Vulkan
@@ -320,6 +322,96 @@ typedef sk_surface_t *(*pfn_surface_new_render_target)(gr_recording_context_t *c
 typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
         void *dst_pixels, size_t dst_row_bytes, int src_x, int src_y);
 
+/* ---- positioned-glyph rendering (for shaped text, docs/SHAPING.md) ----
+ *
+ * libSkiaSharp has no SkShaper, but it DOES expose the textblob API to render a
+ * pre-positioned glyph run. We shape with HarfBuzz (below), then build a run of
+ * (glyphId, x, y) and draw it. sk_typeface_create_from_file loads the SAME font
+ * file HarfBuzz shapes, so the glyph ids match. The runbuffer's `glyphs` is a
+ * uint16_t[count] and `pos` is a float[2*count] (x,y per glyph). */
+typedef struct {
+    void *glyphs;     /* uint16_t[count] — glyph ids */
+    void *pos;        /* float[2*count]  — x,y per glyph (for alloc_run_pos) */
+    void *utf8text;
+    void *clusters;
+} sk_textblob_runbuffer_t;
+
+typedef sk_typeface_t *(*pfn_typeface_create_from_file)(const char *path, int index);
+typedef sk_textblob_builder_t *(*pfn_textblob_builder_new)(void);
+typedef void           (*pfn_textblob_builder_delete)(sk_textblob_builder_t *);
+/* Allocate a run of `count` positioned glyphs for `font`; fills *runbuffer with
+ * pointers to write glyph ids + (x,y) positions into. bounds may be NULL. */
+typedef void           (*pfn_textblob_builder_alloc_run_pos)(sk_textblob_builder_t *,
+        const sk_font_t *font, int count, const sk_rect_t *bounds,
+        sk_textblob_runbuffer_t *runbuffer);
+typedef sk_textblob_t *(*pfn_textblob_builder_make)(sk_textblob_builder_t *);
+typedef void           (*pfn_textblob_unref)(sk_textblob_t *);
+typedef void           (*pfn_canvas_draw_text_blob)(sk_canvas_t *, sk_textblob_t *,
+        float x, float y, const sk_paint_t *);
+
+/* ---- HarfBuzz shaping (the hb_* flat C API, docs/SHAPING.md) ----
+ *
+ * Shape a UTF-8 run into positioned glyphs (kerning, ligatures; and RTL/complex
+ * when direction/script are set). dlopen'd from libHarfBuzzSharp; bound as an
+ * OPTIONAL tier (a miss only forecloses shaping). All handles are opaque
+ * pointers; the glyph info/position structs are HarfBuzz's stable ABI (5x uint32
+ * / int32 each). hb advances/offsets are in font units scaled by hb_font_set_scale
+ * — we set scale = size*64, so values are 26.6 fixed (divide by 64 for pixels). */
+typedef struct hb_blob_t   hb_blob_t;
+typedef struct hb_face_t   hb_face_t;
+typedef struct hb_font_t   hb_font_t;
+typedef struct hb_buffer_t hb_buffer_t;
+typedef struct { uint32_t codepoint, mask, cluster, var1, var2; } hb_glyph_info_t;
+typedef struct { int32_t x_advance, y_advance, x_offset, y_offset; uint32_t var; } hb_glyph_position_t;
+
+typedef hb_blob_t   *(*pfn_hb_blob_create_from_file_or_fail)(const char *path);
+typedef hb_face_t   *(*pfn_hb_face_create)(hb_blob_t *, unsigned int index);
+typedef hb_font_t   *(*pfn_hb_font_create)(hb_face_t *);
+typedef void         (*pfn_hb_font_set_scale)(hb_font_t *, int x_scale, int y_scale);
+typedef hb_buffer_t *(*pfn_hb_buffer_create)(void);
+typedef void         (*pfn_hb_buffer_add_utf8)(hb_buffer_t *, const char *text,
+        int text_length, unsigned int item_offset, int item_length);
+typedef void         (*pfn_hb_buffer_set_direction)(hb_buffer_t *, int direction);
+typedef void         (*pfn_hb_buffer_guess_segment_properties)(hb_buffer_t *);
+typedef void         (*pfn_hb_shape)(hb_font_t *, hb_buffer_t *, const void *features,
+        unsigned int num_features);
+typedef unsigned int (*pfn_hb_buffer_get_length)(hb_buffer_t *);
+typedef hb_glyph_info_t     *(*pfn_hb_buffer_get_glyph_infos)(hb_buffer_t *, unsigned int *length);
+typedef hb_glyph_position_t *(*pfn_hb_buffer_get_glyph_positions)(hb_buffer_t *, unsigned int *length);
+typedef void         (*pfn_hb_buffer_destroy)(hb_buffer_t *);
+typedef void         (*pfn_hb_font_destroy)(hb_font_t *);
+typedef void         (*pfn_hb_face_destroy)(hb_face_t *);
+typedef void         (*pfn_hb_blob_destroy)(hb_blob_t *);
+
+/* hb_direction_t (stable ABI): 4 = LTR, 5 = RTL, 6 = TTB, 7 = BTT. 0 = invalid
+ * (use guess_segment_properties). We expose LTR/RTL/auto across the FFI. */
+enum { RX_HB_DIR_INVALID = 0, RX_HB_DIR_LTR = 4, RX_HB_DIR_RTL = 5 };
+
+/* The resolved HarfBuzz loader (dlopen'd separately from Skia). */
+typedef struct {
+    int available;   /* 1 iff the dylib loaded and all shaping symbols resolved */
+    pfn_hb_blob_create_from_file_or_fail  blob_create_from_file;
+    pfn_hb_face_create                    face_create;
+    pfn_hb_font_create                    font_create;
+    pfn_hb_font_set_scale                 font_set_scale;
+    pfn_hb_buffer_create                  buffer_create;
+    pfn_hb_buffer_add_utf8                buffer_add_utf8;
+    pfn_hb_buffer_set_direction           buffer_set_direction;
+    pfn_hb_buffer_guess_segment_properties buffer_guess_segment_properties;
+    pfn_hb_shape                          shape;
+    pfn_hb_buffer_get_length              buffer_get_length;
+    pfn_hb_buffer_get_glyph_infos         buffer_get_glyph_infos;
+    pfn_hb_buffer_get_glyph_positions     buffer_get_glyph_positions;
+    pfn_hb_buffer_destroy                 buffer_destroy;
+    pfn_hb_font_destroy                   font_destroy;
+    pfn_hb_face_destroy                   face_destroy;
+    pfn_hb_blob_destroy                   blob_destroy;
+} RxHB;
+
+/* Lazily dlopen()s libHarfBuzzSharp and resolves the table on first call;
+ * process-wide singleton. Never NULL — check ->available. (runtime/skia_shim.c) */
+const RxHB *rx_hb(void);
+
 /* ---- the resolved loader ---- */
 typedef struct {
     int available;    /* 1 iff the .so loaded and all required symbols resolved */
@@ -416,6 +508,17 @@ typedef struct {
     pfn_surface_new_render_target        surface_new_render_target;
     pfn_surface_read_pixels              surface_read_pixels;
     int gpu_metal_ok;  /* 1 iff every required GPU-Metal/readback symbol resolved */
+
+    /* Positioned-glyph rendering for shaped text (OPTIONAL; absence disables
+     * only shaping — the non-shaped text path is untouched). */
+    pfn_typeface_create_from_file        typeface_create_from_file;
+    pfn_textblob_builder_new             textblob_builder_new;
+    pfn_textblob_builder_delete          textblob_builder_delete;
+    pfn_textblob_builder_alloc_run_pos   textblob_builder_alloc_run_pos;
+    pfn_textblob_builder_make            textblob_builder_make;
+    pfn_textblob_unref                   textblob_unref;
+    pfn_canvas_draw_text_blob            canvas_draw_text_blob;
+    int glyph_render_ok;  /* 1 iff every textblob/typeface-from-file symbol resolved */
 } RxSkia;
 
 /* Lazily dlopen()s libSkiaSharp and resolves the table on first call; returns
