@@ -95,6 +95,15 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       font, not just a size. Done: `Canvas#draw_text_font` / `#measure_text_font`
       / `#text_height_font`; a process-wide family cache; an unknown family
       falls back to the default typeface. Pin tests in `tests/canvas_fonts.rx`.
+- [x] **Rich text — word-wrapped, aligned paragraphs** — multi-line wrapping
+      labels / text blocks. The fetched `libSkiaSharp` has no SkParagraph/
+      SkShaper, so wrapping is done in the shim (greedy whitespace word-wrap on
+      the bound Skia font measure+draw — no new native lib). Done:
+      `Canvas#draw_paragraph` (returns total height; align 0/1/2) /
+      `#measure_paragraph` / `#measure_paragraph_width`; Skia-only (clean `Err`
+      when absent); a long unbreakable word renders without looping. Pixel-
+      verified in `tests/canvas_paragraph.rx`. **Scope: Latin word-wrap**; proper
+      shaping (bidi/complex scripts) is the HarfBuzz/ICU follow-up below.
 - [ ] **Multi-window** — one window per process today; lift to N windows for
       real apps (engine-level, not blocking the widget library).
 

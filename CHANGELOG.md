@@ -7,6 +7,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Rich text — multi-line, word-wrapped, aligned paragraphs.** Wrapping labels
+  and text blocks, the biggest fundamental UI-text gap:
+  - `Canvas#draw_paragraph(text, x, y, max_width, size, family, align, color)
+    -> Result[Int, String]` returns the laid-out **total height** (so L2 can
+    size a text block); `x` is the column's left edge, `y` the first line's
+    baseline, lines stack one line-height below. `align`: 0 left / 1 center /
+    2 right.
+  - `Canvas#measure_paragraph(text, max_width, size, family) -> Int` (wrapped
+    block height) + `#measure_paragraph_width(...) -> Int` (widest line) for
+    layout, no draw. The shim packs both into one call.
+  - **Implemented in the shim, no new native lib.** The fetched `libSkiaSharp`
+    ships no SkParagraph/SkShaper (needs a separate HarfBuzzSharp+ICU build), so
+    wrapping is greedy whitespace word-wrap on the already-bound Skia font
+    measure+draw: append words while the measured line fits `max_width`, else
+    break; an explicit `\n` forces a break; a single word wider than the column
+    renders on its own line (never loops). Skia-only (clean `Err`/0 when the
+    backend is absent — a wrapped paragraph can't be faked on the 5×7 bitmap);
+    graceful default-family fallback; real Skia metrics for line height +
+    advances (`runtime/skia_shim.c` `ruxen_canvas_draw_paragraph` /
+    `_measure_paragraph`).
+  - **Scope:** Latin word-wrap (covers the vast majority of UI text). Proper
+    international shaping — bidi, ligatures, complex scripts — is deferred to a
+    later HarfBuzz/ICU follow-up.
+  - Pixel-verified locally on active Skia (`tests/canvas_paragraph.rx`): long
+    text wraps to multiple rows; a narrower column wraps taller than a wide one;
+    center/right alignment measurably shift the ink right; a long unbreakable
+    word still renders. Dual-branch on `skia_active?`.
 - **GPU surface backend — Metal (Apple), with HEADLESS GPU pixel verification.**
   An additive rung behind the same `rx_gpu_context` seam / backend ladder /
   probes, with the **unchanged `ruxen_canvas_*` ABI** (`docs/GPU.md`):
