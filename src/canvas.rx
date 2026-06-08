@@ -300,6 +300,29 @@ class Canvas
     self.raw.text_height_sized_raw(size as Float)
   end
 
+  ## Draw `text` in the named font `family` at `size` px, (x, y) the baseline
+  ## origin. An unknown/uninstalled `family` falls back to the default typeface
+  ## (a missing font never breaks rendering — not an error). Skia-only: picking
+  ## a family is meaningless for the bitmap face, so this returns `Err` when the
+  ## backend is absent. Pair with `measure_text_font` for centering.
+  def var draw_text_font(text: String, x: Float32, y: Float32, size: Float32, family: String, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_text_font_raw(&text, x as Float, y as Float, size as Float, &family, color.to_argb as Int)
+    self.status_to_result(code, "draw_text_font")
+  end
+
+  ## Advance width of `text` in the named font `family` at `size` px — pair with
+  ## `draw_text_font` for centering. An unknown family measures like the default
+  ## typeface; the bitmap advance when Skia is absent (always a usable number).
+  def measure_text_font(text: String, size: Float32, family: String) -> Int
+    self.raw.measure_text_font_raw(&text, size as Float, &family)
+  end
+
+  ## Line height of the named font `family` at `size` px (Skia metrics when
+  ## active, else the bitmap 7px; an unknown family falls back to the default).
+  def text_height_font(size: Float32, family: String) -> Int
+    self.raw.text_height_font_raw(size as Float, &family)
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String

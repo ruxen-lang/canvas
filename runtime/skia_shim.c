@@ -160,6 +160,10 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(image_unref,               "sk_image_unref");
     RX_SK_OPTIONAL(canvas_draw_image_rect,    "sk_canvas_draw_image_rect");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
+    RX_SK_OPTIONAL(typeface_create_from_name, "sk_typeface_create_from_name");
+    RX_SK_OPTIONAL(typeface_unref,            "sk_typeface_unref");
+    RX_SK_OPTIONAL(fontstyle_new,             "sk_fontstyle_new");
+    RX_SK_OPTIONAL(fontstyle_delete,          "sk_fontstyle_delete");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
     RX_SK_OPTIONAL(font_delete,               "sk_font_delete");
@@ -1242,9 +1246,92 @@ static sk_font_t *rx_font_at(double size) {
     return font;
 }
 
-/* Shared text impl at an explicit font size. `argb` is packed 0xAARRGGBB. */
-static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
-                                 int64_t argb, double size) {
+/* ---- font family cache ----
+ *
+ * Selecting a typeface by family name (sk_typeface_create_from_name) is the
+ * "configurable font family" capability. Each resolved family gets one cached
+ * sk_font_t (built once, resized in place per call like the default font),
+ * owned for the process lifetime — the same never-freed singleton model as
+ * rx_default_font (the surface/typeface tables outlive any one host). The cache
+ * is tiny and append-only; a full cache reuses the default font.
+ *
+ * GRACEFUL FALLBACK: an unknown / unavailable family is NOT an error. When
+ * sk_typeface_create_from_name returns NULL (or yields a zero-glyph face), we
+ * fall back to the default font so an uninstalled font never breaks rendering.
+ * We still cache that decision under the requested name, so the fallback is
+ * resolved once. (A missing Skia backend is the only Err case — handled by the
+ * callers, which use the bitmap path when rx_font_for_family returns NULL.) */
+#define RXC_FAMILY_CACHE_CAP 16
+#define RXC_FAMILY_NAME_MAX  63
+
+typedef struct {
+    char       name[RXC_FAMILY_NAME_MAX + 1];
+    sk_font_t *font;   /* the family's face, or the default face on fallback */
+} RxFamilyEntry;
+
+/* Build a font for `family` from a freshly matched typeface, or NULL if the
+ * family can't be resolved into a usable (positive-advance) face. Caller owns
+ * nothing extra: the font keeps a ref to the typeface, so we drop our ref. */
+static sk_font_t *rx_build_family_font(const RxSkia *sk, const char *family) {
+    if (!sk->typeface_create_from_name || !sk->font_new_with_values) return NULL;
+    sk_fontstyle_t *style = NULL;
+    if (sk->fontstyle_new) style = sk->fontstyle_new(400, 5, 0);  /* normal/normal/upright */
+    sk_typeface_t *tf = sk->typeface_create_from_name(family, style);
+    if (style && sk->fontstyle_delete) sk->fontstyle_delete(style);
+    if (!tf) return NULL;
+    sk_font_t *f = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    if (sk->typeface_unref) sk->typeface_unref(tf);  /* the font holds its own ref */
+    if (!f) return NULL;
+    /* Reject a zero-glyph face (mirrors rx_default_font's probe) so it falls
+     * back to the default rather than drawing nothing. */
+    float probe = sk->font_measure_text(f, "M", 1, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(probe > 0.0f)) {
+        if (sk->font_delete) sk->font_delete(f);
+        return NULL;
+    }
+    return f;
+}
+
+/* The cached font for `family` at `size` px, resized in place. Falls back to
+ * the default font when the family is empty/unknown/unavailable. NULL only when
+ * no Skia font is available at all (Skia absent) — callers then use the bitmap
+ * path, exactly as for the default font. */
+static sk_font_t *rx_font_for_family(const char *family, double size) {
+    sk_font_t *fallback = rx_default_font();
+    if (!fallback) return NULL;                       /* no Skia text at all */
+    if (!family || !family[0]) return rx_font_at(size);
+
+    static RxFamilyEntry cache[RXC_FAMILY_CACHE_CAP];
+    static int count = 0;
+    const RxSkia *sk = rx_skia();
+
+    for (int i = 0; i < count; i++) {
+        if (strncmp(cache[i].name, family, RXC_FAMILY_NAME_MAX) == 0) {
+            sk_font_t *f = cache[i].font;
+            if (sk->font_set_size && size > 0.0) sk->font_set_size(f, (float)size);
+            return f;
+        }
+    }
+
+    /* Miss: resolve the family (or fall back to the default face) and cache it.
+     * If the cache is full, just use the default font without caching. */
+    sk_font_t *resolved = rx_build_family_font(sk, family);
+    if (!resolved) resolved = fallback;               /* graceful fallback */
+    if (count < RXC_FAMILY_CACHE_CAP) {
+        strncpy(cache[count].name, family, RXC_FAMILY_NAME_MAX);
+        cache[count].name[RXC_FAMILY_NAME_MAX] = '\0';
+        cache[count].font = resolved;
+        count++;
+    }
+    if (sk->font_set_size && size > 0.0) sk->font_set_size(resolved, (float)size);
+    return resolved;
+}
+
+/* Shared text impl at an explicit, already-resolved `font` (which already has
+ * its size set). `argb` is packed 0xAARRGGBB. A NULL font selects the bitmap
+ * fallback. */
+static int64_t rx_draw_text_with_font(RxHost *h, const char *s, double x, double y,
+                                      int64_t argb, sk_font_t *font) {
     if (!h || !s) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
@@ -1253,7 +1340,6 @@ static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
      * same convention as the bitmap path below. */
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (canvas && font && sk->canvas_draw_simple_text) {
         sk_paint_t *paint = sk->paint_new();
         if (!paint) return RXC_ERR_BAD_ARGS;
@@ -1295,10 +1381,16 @@ static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
     return RXC_OK;
 }
 
-static int64_t rx_measure_impl(const char *s, double size) {
+/* Draw text with the default font at `size` px (the family-less path). */
+static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
+                                 int64_t argb, double size) {
+    return rx_draw_text_with_font(h, s, x, y, argb, rx_font_at(size));
+}
+
+/* Measure with an already-resolved `font` (NULL = bitmap advance). */
+static int64_t rx_measure_with_font(const char *s, sk_font_t *font) {
     if (!s) return 0;
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (sk->available && font && sk->font_measure_text) {
         float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
         if (!(w > 0.0f)) return 0;
@@ -1308,9 +1400,13 @@ static int64_t rx_measure_impl(const char *s, double size) {
     return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
 }
 
-static int64_t rx_text_height_impl(double size) {
+static int64_t rx_measure_impl(const char *s, double size) {
+    return rx_measure_with_font(s, rx_font_at(size));
+}
+
+/* Line height of an already-resolved `font` (NULL = bitmap 7px). */
+static int64_t rx_text_height_with_font(sk_font_t *font) {
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (sk->available && font && sk->font_get_metrics) {
         sk_fontmetrics_t m;
         sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
@@ -1318,6 +1414,10 @@ static int64_t rx_text_height_impl(double size) {
         if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
     }
     return RXC_GLYPH_H;
+}
+
+static int64_t rx_text_height_impl(double size) {
+    return rx_text_height_with_font(rx_font_at(size));
 }
 
 /* Width in pixels of `n` characters at the bitmap font's one size. The
@@ -1370,6 +1470,45 @@ int64_t ruxen_canvas_draw_text(int64_t self, int64_t text, double x, double y,
 int64_t ruxen_canvas_draw_text_sized(int64_t self, int64_t text, double x, double y,
                                      double size, int64_t argb) {
     return rx_draw_text_impl((RxHost *)self, (const char *)text, x, y, argb, size);
+}
+
+/* ---- configurable font family ----
+ *
+ * Pick a typeface by family name. The family resolves through the process-wide
+ * cache (rx_font_for_family), which falls back to the default face for an
+ * unknown/uninstalled family — a missing font never breaks rendering, and is
+ * NOT an error. `text` and `family` are C-string pointers (borrowed &Strings).
+ *
+ * draw_text_font is Skia-only: picking a family is meaningless for the 5x7
+ * bitmap, so it returns RXC_ERR_NO_SKIA when no Skia font is available (rather
+ * than silently drawing the bitmap face, which would ignore the family).
+ * measure_text_font / text_height_font always return a usable number, falling
+ * back to the bitmap metrics when Skia is absent. */
+
+int64_t ruxen_canvas_draw_text_font(int64_t self, int64_t text, double x, double y,
+                                    double size, int64_t family, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!h || !s) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_font_t *font = rx_font_for_family(fam, size);
+    if (!font) return RXC_ERR_NO_SKIA;   /* no Skia text face -> family unhonorable */
+    return rx_draw_text_with_font(h, s, x, y, argb, font);
+}
+
+/* Advance width of `text` in `family` at `size` px (bitmap advance when Skia
+ * is absent — so it always returns a usable number; an unknown family measures
+ * like the default face). */
+int64_t ruxen_canvas_measure_text_font(int64_t self, int64_t text, double size, int64_t family) {
+    (void)self;
+    return rx_measure_with_font((const char *)text, rx_font_for_family((const char *)family, size));
+}
+
+/* Line height of `family` at `size` px (bitmap 7px when Skia is absent). */
+int64_t ruxen_canvas_text_height_font(int64_t self, double size, int64_t family) {
+    (void)self;
+    return rx_text_height_with_font(rx_font_for_family((const char *)family, size));
 }
 
 /* ---- event queue ---- */

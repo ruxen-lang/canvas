@@ -33,6 +33,7 @@ typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
 typedef struct sk_path_t       sk_path_t;
+typedef struct sk_fontstyle_t  sk_fontstyle_t;
 
 /* Packed 0xAARRGGBB, matching our framebuffer + RxHost.pixels. */
 typedef uint32_t sk_color_t;
@@ -172,6 +173,16 @@ typedef sk_maskfilter_t *(*pfn_maskfilter_new_blur)(int blur_style, float sigma)
 typedef void             (*pfn_maskfilter_unref)(sk_maskfilter_t *);
 
 typedef sk_typeface_t *(*pfn_typeface_create_default)(void);
+/* Resolve a typeface by family name + style; NULL when the family is unknown
+ * (the shim then falls back to the default face — a missing font must not break
+ * rendering). The returned typeface is owned (release with typeface_unref). */
+typedef sk_typeface_t *(*pfn_typeface_create_from_name)(const char *family_name,
+        const sk_fontstyle_t *style);
+typedef void           (*pfn_typeface_unref)(sk_typeface_t *);
+/* weight/width are SkFontStyle ints (400 = normal weight, 5 = normal width);
+ * slant 0 = upright. Owned: release with fontstyle_delete. */
+typedef sk_fontstyle_t *(*pfn_fontstyle_new)(int weight, int width, int slant);
+typedef void            (*pfn_fontstyle_delete)(sk_fontstyle_t *);
 typedef sk_font_t     *(*pfn_font_new_with_values)(sk_typeface_t *, float size, float scale_x,
         float skew_x);
 typedef void           (*pfn_font_set_size)(sk_font_t *, float);
@@ -254,12 +265,16 @@ typedef struct {
     pfn_maskfilter_new_blur        maskfilter_new_blur;
     pfn_maskfilter_unref           maskfilter_unref;
 
-    pfn_typeface_create_default typeface_create_default;
-    pfn_font_new_with_values    font_new_with_values;
-    pfn_font_set_size           font_set_size;
-    pfn_font_delete             font_delete;
-    pfn_font_measure_text       font_measure_text;
-    pfn_font_get_metrics        font_get_metrics;
+    pfn_typeface_create_default   typeface_create_default;
+    pfn_typeface_create_from_name typeface_create_from_name;
+    pfn_typeface_unref            typeface_unref;
+    pfn_fontstyle_new             fontstyle_new;
+    pfn_fontstyle_delete          fontstyle_delete;
+    pfn_font_new_with_values      font_new_with_values;
+    pfn_font_set_size             font_set_size;
+    pfn_font_delete               font_delete;
+    pfn_font_measure_text         font_measure_text;
+    pfn_font_get_metrics          font_get_metrics;
 
     pfn_path_new           path_new;
     pfn_path_delete        path_delete;

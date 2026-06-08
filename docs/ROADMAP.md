@@ -87,9 +87,11 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       blended overlays (fade transitions, translucent panels). Done:
       `Canvas#save_layer` / `#save_layer_alpha` return the layer save count and
       pair with the existing `#restore`; pin tests in `tests/canvas_layers.rx`.
-- [ ] **Configurable font *family*** — `draw_text_sized` resizes the shared
-      default typeface today; add family selection (`sk_typeface_*` /
-      `sk_fontmgr_*`) so widgets can pick a font, not just a size.
+- [x] **Configurable font *family*** — family selection via
+      `sk_typeface_create_from_name` (+ `sk_fontstyle_*`), so widgets can pick a
+      font, not just a size. Done: `Canvas#draw_text_font` / `#measure_text_font`
+      / `#text_height_font`; a process-wide family cache; an unknown family
+      falls back to the default typeface. Pin tests in `tests/canvas_fonts.rx`.
 - [ ] **Multi-window** — one window per process today; lift to N windows for
       real apps (engine-level, not blocking the widget library).
 

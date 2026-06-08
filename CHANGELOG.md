@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Configurable font family** — pick a typeface by family name (widgets can
+  choose a font, not just a size):
+  - `Canvas#draw_text_font(text, x, y, size, family, color)`,
+    `#measure_text_font(text, size, family)`, `#text_height_font(size, family)`
+    — the `*_sized` text ops plus a family name.
+  - A missing/uninstalled `family` **gracefully falls back to the default
+    typeface** (an absent font never breaks rendering — not an error). Resolved
+    families are cached process-wide (one `sk_font_t` per family, resized in
+    place like the default font; freed never, the same singleton model).
+  - `draw_text_font` is Skia-only (a clear `Err` when the backend is absent —
+    a family is meaningless for the 5x7 bitmap face); `measure_text_font` /
+    `text_height_font` always return a usable number, falling back to the
+    bitmap metrics when Skia is absent (`runtime/skia_shim.c`
+    `ruxen_canvas_*_font`, `sk_typeface_create_from_name` / `sk_fontstyle_*` /
+    `sk_typeface_unref`).
+  - Pin tests: `tests/canvas_fonts.rx` (two distinct families measure a string
+    differently; an absent family measures like the default; positive line
+    height; ink drawn / clean `Err` when Skia is inactive).
 - **Offscreen layers** — `Canvas#save_layer` / `#save_layer_alpha`, composited
   down by the existing `#restore` (group opacity + blended overlays: fade
   transitions, translucent panels, scrolling lists):

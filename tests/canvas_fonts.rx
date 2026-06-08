@@ -1,0 +1,121 @@
+# Pin tests for configurable font family: Canvas#draw_text_font /
+# #measure_text_font / #text_height_font, which pick a typeface by family name.
+# Skia-only — with no library the draw call returns a clean Err and the
+# measure/height calls return the bitmap fallback metrics. A MISSING family is
+# NOT an error: it gracefully falls back to the default typeface (so an
+# uninstalled font never breaks rendering). When Skia is active we assert that
+# two distinct families measure the same string differently, and that an absent
+# family measures exactly like the default fallback.
+
+Tester.describe("Canvas.measure_text_font") do |t: &var Tester|
+  t.it("distinct families measure the same string differently") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+    # "Wiii": a proportional (serif) face packs the narrow i's tighter than a
+    # fixed-pitch monospace face, so the two advances differ. Both fontconfig
+    # generic aliases always resolve to some installed face on Linux CI.
+    let mono = c.measure_text_font(String.from("Wiii"), 16.0f32, String.from("monospace"))
+    let serif = c.measure_text_font(String.from("Wiii"), 16.0f32, String.from("serif"))
+    let mono_positive = mono > 0
+    let serif_positive = serif > 0
+    let differ = mono != serif
+    let equal = mono == serif
+    if active
+      t.expect(mono_positive).to_eq(true)
+      t.expect(serif_positive).to_eq(true)
+      t.expect(differ).to_eq(true)   # family actually changed the metrics
+    else
+      # software fallback: both go through the fixed bitmap advance, so equal.
+      t.expect(equal).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.measure_text_font missing family") do |t: &var Tester|
+  t.it("falls back to the default typeface, not an error") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+    let bogus = c.measure_text_font(String.from("Hello"), 16.0f32, String.from("ThisFontDoesNotExist12345"))
+    let base = c.measure_text_sized(String.from("Hello"), 16.0f32)
+    # A family that is not installed must measure exactly like the default
+    # typeface — graceful fallback, never a crash or zero/garbage width.
+    let matches_default = bogus == base
+    let base_positive = base > 0
+    t.expect(matches_default).to_eq(true)
+    if active
+      t.expect(base_positive).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.text_height_font") do |t: &var Tester|
+  t.it("reports a positive line height for a resolved family") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c.skia_active?
+    let h = c.text_height_font(16.0f32, String.from("serif"))
+    t.expect(h > 0).to_eq(true)
+    if !active
+      # bitmap fallback: the fixed 7px glyph height.
+      t.expect(h).to_eq(7)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_text_font") do |t: &var Tester|
+  t.it("draws with the family, or a clean Err with no Skia") do
+    var c = match Canvas.create(48, 24)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let res = c.draw_text_font(String.from("Ag"), 2.0f32, 18.0f32, 16.0f32, String.from("serif"), Color.rgb(255u8, 255u8, 255u8))
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_text_font failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      # Some pixel in the text box must have been inked (non-black).
+      var lit = 0
+      var y = 0
+      while y < 24
+        var x = 0
+        while x < 48
+          if c.read_pixel(x, y) != 0
+            lit += 1
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(lit > 0).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
