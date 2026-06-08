@@ -14,6 +14,12 @@ how Skia is brought in, the integration model, and how to advance the binding.
     (`runtimes/osx/native/`), a **single universal** Mach-O covering arm64 +
     x86_64. This build has `SK_METAL=1` (links `Metal.framework`), so the Metal
     backend is real on it — unlike the Linux `.so` (see `docs/GPU.md`).
+  - **macOS also** → `libHarfBuzzSharp.dylib` from
+    `HarfBuzzSharp.NativeAssets.macOS` (HarfBuzz's flat `hb_*` C API), fetched +
+    SHA-pinned by the same script for **text shaping** (kerning / ligatures /
+    RTL) — libSkiaSharp has no SkShaper, so HarfBuzz shapes and Skia's
+    `sk_textblob_*` renders (see `docs/SHAPING.md`). A miss is non-fatal:
+    shaping just reports unavailable.
 - **Fetched, not committed:** `runtime/fetch_skia.sh` is host-aware (selects the
   package by `uname -s`), downloads a pinned version, verifies the SHA-256 of
   **both** the package and the extracted binary, and installs it to

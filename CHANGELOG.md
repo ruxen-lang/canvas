@@ -7,6 +7,33 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Proper text shaping — kerning + ligatures (HarfBuzz + Skia glyphs).** The
+  last big text gap: real shaping instead of naive per-character placement
+  (`docs/SHAPING.md`):
+  - The fetched `libSkiaSharp` ships no SkParagraph/SkShaper, but it **does**
+    expose positioned-glyph rendering (`sk_textblob_builder_alloc_run_pos`,
+    `sk_canvas_draw_text_blob`, `sk_typeface_create_from_file`). So shaping is
+    **HarfBuzz-direct (shape) + Skia glyph-draw (render)**: `runtime/fetch_skia.sh`
+    now fetches + SHA-pins **`HarfBuzzSharp.NativeAssets.macOS`** (a 2.5 MB
+    universal dylib) alongside Skia; the shim `dlopen`s it (`rx_hb()`, OPTIONAL
+    tier). Both are fed the **same font file** so glyph ids match. No SkParagraph
+    rebuild, no ICU for Latin kerning/ligatures.
+  - `Canvas#draw_text_shaped(text, x, y, size, font_path, direction, color)
+    -> Result[Int, String]` shapes one run (kerning, ligatures; `direction` 0
+    auto / 1 LTR / 2 RTL) and renders it, returning the shaped advance width;
+    `#measure_text_shaped(...) -> Int` is the width without drawing;
+    `#shaping_available? -> Bool` probes the capability. Skia + HarfBuzz only —
+    clean `Err`/0 when absent, with the non-shaped `draw_text`/`draw_paragraph`
+    as the fallback (`runtime/skia_shim.c` `ruxen_canvas_draw_text_shaped` /
+    `_measure_text_shaped`).
+  - **Scope (bounded first increment):** one run, one font by file path. Bidi /
+    line-break / grapheme segmentation (ICU), multi-run paragraph integration,
+    and family→file resolution are deferred follow-ups (`docs/SHAPING.md`).
+  - Verified locally on real Skia + HarfBuzz (`tests/canvas_shaping.rx`): `"AV"`
+    shaped < `"A"` + `"V"` (GPOS kerning), `"ffi"` < 3× `"f"` (ffi ligature),
+    shaped ink renders within the reported advance, a bad font path fails
+    cleanly. `examples/shape_kerning_verify.c` is a standalone committed proof
+    (`PASS`: AV 1.8px tighter, ffi 1.8px tighter, textblob inked).
 - **Rich text — multi-line, word-wrapped, aligned paragraphs.** Wrapping labels
   and text blocks, the biggest fundamental UI-text gap:
   - `Canvas#draw_paragraph(text, x, y, max_width, size, family, align, color)

@@ -156,8 +156,17 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
 
 ### Later cycles (large, sequenced)
 
-- [ ] **Text i18n / shaping** — HarfBuzz + ICU + paragraph layout (separate
-      `HarfBuzzSharp` native lib). Gates real international text in L2.
+- [~] **Text shaping / i18n** — proper shaping (kerning, ligatures, RTL/complex)
+      via **HarfBuzz-direct + Skia glyph render** (`docs/SHAPING.md`). **Landed:**
+      `HarfBuzzSharp.NativeAssets.macOS` fetched + SHA-pinned alongside Skia; the
+      shim shapes one run (`hb_shape`) and renders the positioned glyphs with
+      Skia's textblob API (libSkiaSharp has no SkParagraph/SkShaper, but DOES have
+      `sk_textblob_*`). `Canvas#draw_text_shaped` / `#measure_text_shaped` /
+      `#shaping_available?`; kerning + ligatures pixel-verified
+      (`tests/canvas_shaping.rx`, `examples/shape_kerning_verify.c`). **Deferred
+      follow-ups:** ICU bidi / line-break / grapheme segmentation; multi-run
+      paragraph integration (shaped wrapped lines); family→file resolution;
+      font/run caching. These are what "full international text in L2" still needs.
 - [ ] **Accessibility** — platform a11y trees.
 - [ ] **Platform matrix** — Windows → Android/iOS → web (WASM + canvas).
 
