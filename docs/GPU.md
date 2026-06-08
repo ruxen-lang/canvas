@@ -1,8 +1,21 @@
 # ADR: GPU surface backend (Ganesh) — GL vs Vulkan vs Metal per platform
 
-Status: **Accepted (design only — no implementation in this cycle)**
+Status: **Accepted — GL backend implemented (GL-first); Metal/Vulkan deferred**
 Date: 2026-06-08
 Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md`.
+
+> **Implementation status (update):** the **Ganesh GL** backend described below
+> has landed. The `rx_gpu_context` seam lives in `runtime/sdl_window.c`
+> (`ruxen_canvas_window_create_gl` / `_gl_present` / `_gl_get_proc` /
+> `_gl_drawable_size`); the `GrDirectContext` + GPU-backed `SkSurface` and the
+> probes live in `runtime/skia_shim.c` (`ruxen_canvas_host_enable_gpu`,
+> `ruxen_canvas_gpu_available` / `_gpu_active`). The Ganesh symbols are bound as
+> an OPTIONAL loader tier (a miss disables only the GPU rung). Surface creation
+> is reached from `Window#show_gpu`, which falls back to the raster window path
+> on any failure. **Metal on Apple and Vulkan remain deferred**, additive behind
+> the same seam, exactly as decided here. Full GPU **pixel** verification is
+> pending a GL-capable desktop (CI/this host are headless); the
+> `tests/gpu_backend.rx` smoke pin covers capability + clean fallback.
 
 This is an architecture decision record. It decides *which* GPU API `canvas`
 targets per platform when it moves off CPU raster, and — equally important —

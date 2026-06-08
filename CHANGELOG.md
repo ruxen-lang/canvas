@@ -7,6 +7,46 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **GPU surface backend (Ganesh GL)** — the top rung of the backend-selection
+  ladder, behind the **unchanged `ruxen_canvas_*` ABI** (`docs/GPU.md`,
+  GL-first; Metal/Vulkan deferred):
+  - **GL context seam** in `runtime/sdl_window.c`: the SDL GL entry points
+    (`SDL_GL_CreateContext` / `_MakeCurrent` / `_GetProcAddress` /
+    `_SwapWindow` / `_GetDrawableSize`) resolved in the same dlopen tier as the
+    rest of SDL, exposed as `ruxen_canvas_window_create_gl` / `_gl_present` /
+    `_gl_get_proc` / `_gl_drawable_size` / `_is_gl`. All fail cleanly and
+    bounded on a headless / no-SDL / no-GL host; the raster path never depends
+    on them.
+  - **`GrDirectContext` + GPU-backed `SkSurface`** over that GL context in
+    `runtime/skia_shim.c` via the Ganesh C symbols the prebuilt `libSkiaSharp`
+    already exports — `gr_glinterface_assemble_gl_interface` /
+    `gr_glinterface_create_native_interface`, `gr_direct_context_make_gl`,
+    `gr_backendrendertarget_new_gl`, `sk_surface_new_backend_render_target`
+    (an **OPTIONAL** loader tier: a missing symbol sets `gpu_gl_ok = 0` and
+    disables only the GPU rung — the raster backend is untouched).
+  - **Draw routing is automatic and ABI-stable:** every `ruxen_canvas_*` draw
+    op funnels through `rx_host_canvas`, which returns the GPU canvas when the
+    host is in GPU mode — so no drawing signature moves. `end_frame` flushes +
+    submits the `GrDirectContext`; `Window#present` swaps the GL back buffer
+    when `gpu_active?`, else blits the raster framebuffer.
+  - **Capability probes** `Canvas#gpu_available?` (process can reach Ganesh GL)
+    / `#gpu_active?` (this canvas has a live GPU surface), mirroring
+    `skia_available?` / `skia_active?`. `Window#show_gpu` attempts the GPU
+    backend (GL window + context + GPU surface) and **falls back cleanly to the
+    raster show path** on any failure — a GPU op that can't run falls back,
+    never produces silently-wrong pixels.
+  - **CPU raster fallback preserved** as the deterministic test oracle; GPU is
+    selected at runtime, never a replacement. Teardown order is explicit (GPU
+    surface → backend-render-target → `GrDirectContext` → GL interface, before
+    the GL context + window are destroyed).
+  - Pin: `tests/gpu_backend.rx` asserts the **capability + clean-fallback**
+    contract (probes are total and safe; an offscreen canvas is never
+    GPU-active; raster readback stays byte-exact when GPU is unavailable;
+    `show_gpu` either brings a GPU/raster window up or stays headless, drawing
+    works on every branch). **NOTE:** full GPU **pixel** verification is
+    deferred to a GL-capable desktop — this host and CI are headless with no
+    usable GL surface, the same posture as the Skia-on-Linux-CI note in
+    `docs/SKIA.md`.
 - **Configurable font family** — pick a typeface by family name (widgets can
   choose a font, not just a size):
   - `Canvas#draw_text_font(text, x, y, size, family, color)`,

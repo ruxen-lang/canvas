@@ -97,11 +97,28 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
 
 ### Needs an architecture decision (design doc first, then implement)
 
-- [ ] **GPU surface backend (Ganesh)** — CPU raster only today. **Decision
-      recorded in `docs/GPU.md`** (Metal on Apple, OpenGL on Linux/Windows
-      behind one context seam, Vulkan deferred; `gr_*` C API already in the
-      fetched lib). The ADR is done; the *binding/implementation* is a later
-      cycle and slots behind the unchanged `ruxen_canvas_*` ABI.
+- [~] **GPU surface backend (Ganesh)** — **decision in `docs/GPU.md`** (Metal
+      on Apple, OpenGL on Linux/Windows behind one context seam, GL-first;
+      Vulkan deferred). **GL backend landed** (the top rung of the
+      backend-selection ladder, behind the unchanged `ruxen_canvas_*` ABI):
+      - SDL GL context seam in `runtime/sdl_window.c`
+        (`ruxen_canvas_window_create_gl` / `_gl_present` / `_gl_get_proc` /
+        `_gl_drawable_size`), resolved in the same dlopen tier as the rest of
+        SDL.
+      - `GrDirectContext` + GPU-backed `SkSurface` over that GL context in
+        `runtime/skia_shim.c` (`gr_glinterface_*`, `gr_direct_context_make_gl`,
+        `gr_backendrendertarget_new_gl`, `sk_surface_new_backend_render_target`
+        — OPTIONAL loader tier, a miss disables only the GPU rung).
+      - Probes `Canvas#gpu_available?` / `#gpu_active?`; `Window#show_gpu`
+        attempts GPU then falls back cleanly to the raster window path.
+      - **CPU raster fallback preserved** as the test oracle; the GPU path is
+        selected at runtime, never a replacement. Full GPU **pixel**
+        verification is deferred to a GL-capable desktop (this host + CI are
+        headless — same posture as the Skia-on-Linux-CI note in `docs/SKIA.md`);
+        the smoke pin (`tests/gpu_backend.rx`) asserts the capability + clean
+        fallback contract.
+      - **Still deferred:** Metal on Apple (`gr_direct_context_make_metal` +
+        `CAMetalLayer`) and Vulkan — additive behind the same seam, per the ADR.
 
 ### Later cycles (large, sequenced)
 
