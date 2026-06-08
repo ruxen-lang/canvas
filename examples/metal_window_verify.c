@@ -42,6 +42,7 @@ enum { CT_BGRA = 6, AT_PREMUL = 2, ORIGIN_TL = 0, PAINT_FILL = 0 };
 #define SDL_WINDOWPOS_CENTERED 0x2FFF0000u
 #define SDL_WINDOW_SHOWN 0x4u
 #define SDL_WINDOW_METAL 0x20000000u
+#define SDL_WINDOW_ALLOW_HIGHDPI 0x00002000u
 #define MTL_PIXFMT_BGRA8 80
 
 static void *DL(const char *const *names, int n) {
@@ -69,6 +70,7 @@ int main(void) {
     void *(*SDL_Metal_GetLayer)(void*) = dlsym(SDL, "SDL_Metal_GetLayer");
     void  (*SDL_Delay)(uint32_t) = dlsym(SDL, "SDL_Delay");
     void  (*SDL_DestroyWindow)(void*) = dlsym(SDL, "SDL_DestroyWindow");
+    void  (*SDL_Metal_GetDrawableSize)(void*,int*,int*) = dlsym(SDL, "SDL_Metal_GetDrawableSize");
     if (!SDL_Init || !SDL_CreateWindow || !SDL_Metal_CreateView || !SDL_Metal_GetLayer) {
         printf("SKIP: SDL_Metal_* not in this SDL2 build\n"); return 2;
     }
@@ -100,13 +102,22 @@ int main(void) {
     if (!make_metal || !rt_metal || !surf_brt || !draw_rect) { printf("SKIP: Skia Metal symbols absent\n"); return 2; }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { printf("SKIP: SDL_Init failed (no display?)\n"); return 2; }
-    int W = 320, H = 240;
+    int LW = 320, LH = 240;                               /* logical window size */
+    /* ALLOW_HIGHDPI so the backing store is the true Retina pixel size; we render
+     * at THAT size (queried below) and present 1:1 — crisp, no upscale. */
     void *win = SDL_CreateWindow("ruxen metal window verify", (int)SDL_WINDOWPOS_CENTERED,
-                                 (int)SDL_WINDOWPOS_CENTERED, W, H, SDL_WINDOW_METAL | SDL_WINDOW_SHOWN);
+                                 (int)SDL_WINDOWPOS_CENTERED, LW, LH,
+                                 SDL_WINDOW_METAL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!win) { printf("SKIP: no window (headless?)\n"); return 2; }
     void *view = SDL_Metal_CreateView(win);
     void *layer = view ? SDL_Metal_GetLayer(view) : NULL;
     if (!layer) { printf("SKIP: no CAMetalLayer\n"); SDL_DestroyWindow(win); return 2; }
+
+    /* The true backing (Retina) pixel size — render at this for crispness. */
+    int W = LW, H = LH;
+    if (SDL_Metal_GetDrawableSize) SDL_Metal_GetDrawableSize(win, &W, &H);
+    if (W <= 0 || H <= 0) { W = LW; H = LH; }
+    printf("logical %dx%d -> backing %dx%d (dpr ~%.1f)\n", LW, LH, W, H, (double)W / LW);
 
     msg_p(layer, sel("setDevice:"), device);
     msg_u(layer, sel("setPixelFormat:"), MTL_PIXFMT_BGRA8);
@@ -122,13 +133,15 @@ int main(void) {
         if (!drawable) { if (SDL_Delay) SDL_Delay(16); continue; }
         void *texture = msg(drawable, sel("texture"));
         mtl_texinfo ti; ti.fTexture = texture;
-        gr_backendrendertarget_t *rt = rt_metal(W, H, &ti);
+        gr_backendrendertarget_t *rt = rt_metal(W, H, &ti);   /* native backing size */
         sk_surface_t *surf = rt ? surf_brt((gr_recording_context_t*)ctx, rt, ORIGIN_TL, CT_BGRA, NULL, NULL) : NULL;
         if (!surf) { if (rt) rt_del(rt); break; }
         sk_canvas_t *cv = get_canvas(surf);
         canvas_clear(cv, 0xFF000000u);                    /* black */
         sk_paint_t *p = paint_new(); paint_style(p, PAINT_FILL); paint_color(p, 0xFF0080FFu);
-        rectf r = { 40.0f, 40.0f, 280.0f, 200.0f };
+        /* rect in native pixels (scaled from the logical 40..280 x 40..200). */
+        float sx = (float)W / LW, sy = (float)H / LH;
+        rectf r = { 40.0f * sx, 40.0f * sy, 280.0f * sx, 200.0f * sy };
         draw_rect(cv, &r, p);
         if (flush_submit) flush_submit(ctx, 0);
         /* present: [[queue commandBuffer] presentDrawable:drawable]; commit */

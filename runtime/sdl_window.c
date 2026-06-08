@@ -100,6 +100,10 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 /* SDL_WINDOW_METAL — request a window backed by a Metal-capable view (so
  * SDL_Metal_CreateView / SDL_Metal_GetLayer give us a CAMetalLayer). */
 #define SDL_WINDOW_METAL          0x20000000u
+/* SDL_WINDOW_ALLOW_HIGHDPI — the window's backing store is the true Retina pixel
+ * size, so we render at native resolution and present 1:1 (no double upscale /
+ * blur). docs/GPU.md. */
+#define SDL_WINDOW_ALLOW_HIGHDPI  0x00002000u
 /* MTLPixelFormatBGRA8Unorm = 80 — the CAMetalLayer pixel format; matches the
  * host 0xAARRGGBB packing so Skia's BGRA surface renders correctly. */
 #define MTL_PIXELFORMAT_BGRA8     80
@@ -141,6 +145,8 @@ static void  (*s_GL_DeleteContext)(void *context);
 static void *(*s_Metal_CreateView)(void *window);
 static void *(*s_Metal_GetLayer)(void *view);
 static void  (*s_Metal_DestroyView)(void *view);
+static void  (*s_Metal_GetDrawableSize)(void *window, int *w, int *h);
+static int   (*s_GetRendererOutputSize)(void *renderer, int *w, int *h);
 
 /* Objective-C runtime + Metal device, for the CAMetalLayer drawable lifecycle
  * (configure the layer, acquire the next drawable, present it). Resolved lazily
@@ -156,7 +162,9 @@ static void *s_ren = NULL;
 static void *s_tex = NULL;
 static int   s_tex_w = 0;
 static int   s_tex_h = 0;
-static int   s_scale = 1;   /* window = framebuffer * scale; pump divides */
+static int   s_scale = 1;   /* logical window = framebuffer * scale */
+static int   s_out_w = 0;    /* renderer output (backing) pixel size — Retina-true */
+static int   s_out_h = 0;    /* used by the pump to map device->framebuffer coords */
 static void *s_owner = NULL; /* the RxHost the window belongs to */
 
 /* ---- GL-window state (the GPU presenter; mutually exclusive with the raster
@@ -243,6 +251,8 @@ static int load_sdl(void) {
     s_Metal_CreateView  = (void *(*)(void *))sym("SDL_Metal_CreateView");
     s_Metal_GetLayer    = (void *(*)(void *))sym("SDL_Metal_GetLayer");
     s_Metal_DestroyView = (void (*)(void *))sym("SDL_Metal_DestroyView");
+    s_Metal_GetDrawableSize = (void (*)(void *, int *, int *))sym("SDL_Metal_GetDrawableSize");
+    s_GetRendererOutputSize = (int (*)(void *, int *, int *))sym("SDL_GetRendererOutputSize");
     s_metal_have_fns = (s_Metal_CreateView && s_Metal_GetLayer) ? 1 : 0;
     return 1;
 }
@@ -285,9 +295,26 @@ static void mtl_set_drawable_size(void *layer, double w, double h) {
     m(layer, s_sel("setDrawableSize:"), w, h);
 }
 
-/* Create the OS window at scale x the host framebuffer (the renderer
- * stretches the texture; the pump divides pointer coords back down, so
- * the app always works in framebuffer coordinates). */
+/* Whether opening a REAL OS window is permitted in this process. macOS forbids
+ * CoreFoundation / AppKit / Metal windowing after fork() without exec(); the
+ * `ruxen test` harness forks per test case, so opening real windows there is
+ * unsafe and, under parallel fan-out, races the WindowServer (flaky). So under
+ * the test harness (detected via RUXEN_TEST_FORMAT) we default to NOT opening a
+ * real window — the windowing entry points return RXC_ERR_NO_SDL and callers
+ * fall back to the deterministic headless framebuffer path. An operator (or a
+ * single-threaded live run) can force real windows with RUXEN_CANVAS_WINDOW=1.
+ * Outside the harness (real apps), windows always open. The standalone examples
+ * (examples/metal_window_verify.c) prove the on-screen path directly. */
+static int rx_window_allowed(void) {
+    const char *force = getenv("RUXEN_CANVAS_WINDOW");
+    if (force && force[0] == '1') return 1;
+    if (getenv("RUXEN_TEST_FORMAT")) return 0;   /* forked test harness: headless */
+    return 1;
+}
+
+/* Create the OS window at scale x the host framebuffer (HiDPI-correct: the
+ * backing store is the true Retina pixel size, presented 1:1). The pump maps
+ * pointer coords back to framebuffer coordinates. */
 int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     const char *t = (const char *)title;
@@ -299,13 +326,20 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
          * the second Window presenting someone else's framebuffer */
         return s_owner == (void *)h ? RXC_OK : RXC_ERR_BUSY;
     }
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
 
     s_scale = (int)scale;
+    /* ALLOW_HIGHDPI: the backing store is the true Retina pixel size, so macOS
+     * does NOT upscale the window a second time on top of our scale. The texture
+     * holds the logical framebuffer; RenderCopy maps it to the renderer's output
+     * (backing) size once. Without this flag the window was upscaled twice
+     * (our scale × Retina) — double blur. */
     s_win = s_CreateWindow(t,
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width * s_scale, h->height * s_scale, SDL_WINDOW_SHOWN);
+                           h->width * s_scale, h->height * s_scale,
+                           SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_ren = s_CreateRenderer(s_win, -1, 0);
     if (!s_ren) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_NO_SDL; }
@@ -318,6 +352,16 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     }
     s_tex_w = h->width;
     s_tex_h = h->height;
+    /* The real backing pixel size (Retina ~2x the logical window). */
+    s_out_w = h->width * s_scale;
+    s_out_h = h->height * s_scale;
+    if (s_GetRendererOutputSize) {
+        int ow = 0, oh = 0;
+        if (s_GetRendererOutputSize(s_ren, &ow, &oh) == 0 && ow > 0 && oh > 0) {
+            s_out_w = ow;
+            s_out_h = oh;
+        }
+    }
     s_owner = (void *)h;
     return RXC_OK;
 }
@@ -370,6 +414,7 @@ int64_t ruxen_canvas_window_create_gl(int64_t self) {
         if (s_owner == (void *)h && s_glctx) return RXC_OK;
         return RXC_ERR_BUSY;
     }
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (!s_gl_have_fns) return RXC_ERR_NO_SDL;   /* no GL entry points */
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
@@ -389,9 +434,12 @@ int64_t ruxen_canvas_window_create_gl(int64_t self) {
         s_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     }
 
+    /* ALLOW_HIGHDPI: SDL_GL_GetDrawableSize then returns the true Retina backing
+     * size, which we size the Ganesh GL surface to — native-resolution, crisp. */
     s_win = s_CreateWindow("ruxen-gl",
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width, h->height, SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN);
+                           h->width, h->height,
+                           SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_win) return RXC_ERR_NO_SDL;
     s_glctx = s_GL_CreateContext(s_win);
     if (!s_glctx) {
@@ -462,14 +510,19 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
         if (s_owner == (void *)h && s_mtl_layer) return RXC_OK;
         return RXC_ERR_BUSY;
     }
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (!s_metal_have_fns) return RXC_ERR_NO_SDL;   /* no SDL_Metal_* */
     if (!metal_objc_init()) return RXC_ERR_NO_SDL;  /* no objc runtime */
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
 
+    /* ALLOW_HIGHDPI so the view's backing store is the true Retina pixel size;
+     * we render the Skia Metal surface at THAT size (queried below) and present
+     * 1:1 — crisp by construction, no upscaling a small buffer. */
     s_win = s_CreateWindow("ruxen-metal",
                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width, h->height, SDL_WINDOW_METAL | SDL_WINDOW_SHOWN);
+                           h->width, h->height,
+                           SDL_WINDOW_METAL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!s_win) return RXC_ERR_NO_SDL;
 
     s_mtl_view = s_Metal_CreateView(s_win);
@@ -481,18 +534,28 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
         return RXC_ERR_PRESENT;
     }
 
+    /* The true backing (drawable) pixel size — on Retina ~2x the logical size.
+     * We size the layer's drawable AND the Skia surface to this, so the GPU
+     * renders at native resolution (crisp text/shapes), presented 1:1. */
+    int dpw = h->width, dph = h->height;
+    if (s_Metal_GetDrawableSize) s_Metal_GetDrawableSize(s_win, &dpw, &dph);
+    if (dpw <= 0 || dph <= 0) { dpw = h->width; dph = h->height; }
+
     s_mtl_device = (void *)device;
     s_mtl_queue  = (void *)queue;
     /* Configure the layer: our device, BGRA8 (matches the host packing), and
-     * framebufferOnly=NO so Skia may render into the drawable's texture. */
+     * framebufferOnly=NO so Skia may render into the drawable's texture. The
+     * drawableSize is the native backing size (HiDPI-correct). */
     mtl_msg_p(s_mtl_layer, "setDevice:", s_mtl_device);
     mtl_msg_u(s_mtl_layer, "setPixelFormat:", MTL_PIXELFORMAT_BGRA8);
     mtl_msg_u(s_mtl_layer, "setFramebufferOnly:", 0);
-    mtl_set_drawable_size(s_mtl_layer, (double)h->width, (double)h->height);
+    mtl_set_drawable_size(s_mtl_layer, (double)dpw, (double)dph);
 
+    /* Track the NATIVE backing size — window_metal_drawable_size returns this, so
+     * the shim builds the GPU surface at native resolution (crisp by construction). */
     s_scale = 1;
-    s_tex_w = h->width;
-    s_tex_h = h->height;
+    s_tex_w = dpw;
+    s_tex_h = dph;
     s_owner = (void *)h;
     return RXC_OK;
 }
@@ -565,7 +628,14 @@ int64_t ruxen_canvas_window_metal_present(int64_t self) {
 
 /* Drain SDL's event queue into the host's RxEvent ring. Returns the
  * number of events forwarded (>= 0), or a negative status on bad args.
- * Unknown SDL event types are skipped. */
+ * Unknown SDL event types are skipped.
+ *
+ * HiDPI note: SDL2 reports mouse coordinates in LOGICAL window points (not
+ * backing pixels) even with ALLOW_HIGHDPI, so mapping a point to framebuffer
+ * coords is framebuffer_size / logical_window_size = h->width / (h->width *
+ * s_scale) = 1 / s_scale. The integer divide below is therefore the correct
+ * device-point -> framebuffer-coord ratio; the Retina backing scale does not
+ * enter here (SDL already accounts for it in the point coordinates). */
 int64_t ruxen_canvas_window_pump(int64_t self) {
     if (!self) return -RXC_ERR_BAD_ARGS;
     if (!s_win || s_owner != (void *)self) return 0;
@@ -633,6 +703,7 @@ int64_t ruxen_canvas_window_destroy(void) {
     s_mtl_queue  = NULL;
     if (s_win) { s_DestroyWindow(s_win); s_win = NULL; }
     s_tex_w = s_tex_h = 0;
+    s_out_w = s_out_h = 0;
     s_scale = 1;
     s_owner = NULL;
     return RXC_OK;

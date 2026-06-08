@@ -7,6 +7,53 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **On-screen windowed GPU present (Metal swapchain via `CAMetalLayer`).** Turns
+  the offscreen Metal path into a real window (`docs/GPU.md`):
+  - SDL window (`SDL_WINDOW_METAL`) → `SDL_Metal_CreateView` /
+    `SDL_Metal_GetLayer` → `CAMetalLayer` (configured with the system
+    `MTLDevice`, BGRA8, `framebufferOnly=NO`). Per frame: acquire the layer's
+    next drawable → wrap its `MTLTexture` (`gr_backendrendertarget_new_metal`) →
+    `sk_surface_new_backend_render_target` (a **per-frame** surface — each frame
+    consumes a fresh drawable) → draw → `flush_and_submit` → present
+    (`[queue commandBuffer]` `[presentDrawable:]` `[commit]`).
+  - **Backend-selection ladder** in `Window#show_gpu`: on Apple, **on-screen
+    Metal → GL window → raster**, each rung falling through cleanly to the next;
+    `ruxen_canvas_host_enable_gpu_windowed` gates on acquiring a first drawable,
+    so a headless host fails the rung and falls back. `Window#present` routes by
+    backend (Metal drawable present / GL swap / raster blit). Reuses the
+    `gr_direct_context_make_metal` + device/queue singleton + `gpu_backend_kind`
+    seam. ABI unchanged; raster/offscreen paths untouched; any drawable failure
+    falls back (never a half-presented frame / wrong pixels). Teardown: surface →
+    render-target → context → layer → view → window.
+  - **HiDPI / Retina-correct present (fixes blur).** All window paths now use
+    `SDL_WINDOW_ALLOW_HIGHDPI` and render at the true **backing pixel** size
+    (queried via `SDL_Metal_GetDrawableSize` / `SDL_GL_GetDrawableSize` /
+    `SDL_GetRendererOutputSize`) — Metal sets `CAMetalLayer.drawableSize` to the
+    backing size and builds the Skia surface at that resolution (crisp by
+    construction), presented 1:1. Previously a small logical buffer was stretched
+    by our scale **and** upscaled again by Retina (double blur). The input pump's
+    logical-point → framebuffer mapping (`/ s_scale`) is already correct since
+    SDL reports mouse in logical points. (`examples/metal_window_verify.c` reports
+    `logical 320x240 -> backing 640x480 (dpr ~2.0)`.)
+  - **SDL loader fix (load-bearing):** `load_sdl()` only `dlopen`'d the Linux SO
+    name, so SDL never loaded on macOS and every `Window.show` fell back headless.
+    Now host-aware — a candidate list (macOS dylib names, Homebrew full paths at
+    `/opt/homebrew` + `/usr/local` since `dlopen` doesn't search them, the
+    `SDL2.framework`, the Linux SO; `$RUXEN_CANVAS_SDL2` overrides). With SDL2
+    installed, `RawHost.sdl_available == 1`.
+  - **Deterministic suite under real windows.** macOS forbids CF/Metal/AppKit
+    windowing after `fork()`, and the harness forks per case + fans out in
+    parallel (real windows race the WindowServer → flaky). So real-window
+    creation is gated off under the test harness (detected via `RUXEN_TEST_FORMAT`)
+    → the windowing pin tests run on the deterministic headless framebuffer path;
+    `RUXEN_CANVAS_WINDOW=1` (or running outside the harness, like the examples)
+    forces real windows. The `sdl_available` probe is unaffected.
+  - **Verified on a real display** by `examples/metal_window_verify.c`
+    (`cc -O2 -o m examples/metal_window_verify.c && ./m` → `PASS`: a Metal window
+    shows a GPU-drawn blue rect). **Not verifiable in the harness** (macOS forbids
+    CF/Metal/AppKit windowing after `fork()` without `exec()`, and the harness
+    forks per case), so the windowed rungs fall back to a raster window there;
+    `tests/gpu_backend.rx` pins the capability + ladder + clean-fallback contract.
 - **Shaped paragraphs — word-wrapped text with kerning + ligatures.** Combines
   the wrap + shaping work so wrapping labels / text blocks get real shaping
   (`docs/SHAPING.md`):

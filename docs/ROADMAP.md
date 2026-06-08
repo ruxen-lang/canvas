@@ -150,8 +150,17 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
         blue rect read back byte-exact) — NOT an in-harness draw, because Apple
         forbids Metal across `fork()`-without-`exec()` and the test harness forks
         per case (`MTLCompilerService` unreachable post-fork). The in-harness
-        `tests/gpu_backend.rx` pins capability + clean fallback. Windowed Metal
-        (`CAMetalLayer` via `SDL_Metal_*`) stays deferred (no display here).
+        `tests/gpu_backend.rx` pins capability + clean fallback.
+      - **On-screen windowed Metal (`CAMetalLayer`) LANDED.** SDL `SDL_WINDOW_METAL`
+        → `SDL_Metal_CreateView`/`GetLayer` → `CAMetalLayer`; per frame acquire
+        the next drawable, wrap its texture (`gr_backendrendertarget_new_metal`),
+        build a per-frame `SkSurface`, draw, flush+submit, and present the
+        drawable. `Window#show_gpu` ladder = on-screen Metal → GL window → raster;
+        `Window#present` routes by backend. **Verified on a real display** by
+        `examples/metal_window_verify.c` (`PASS`); not harness-verifiable (CF/Metal
+        after `fork()` is blocked, harness forks per case → falls back to a raster
+        window there). Also fixed the **host-aware SDL loader** (`load_sdl` only
+        tried the Linux SO name, so macOS always fell back headless).
       - **Still deferred:** Vulkan — additive behind the same seam, per the ADR.
 
 ### Later cycles (large, sequenced)

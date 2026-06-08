@@ -1,6 +1,6 @@
 # ADR: GPU surface backend (Ganesh) — GL vs Vulkan vs Metal per platform
 
-Status: **Accepted — GL + Metal backends implemented; Vulkan deferred**
+Status: **Accepted — GL + Metal (offscreen + on-screen windowed) implemented; Vulkan deferred**
 Date: 2026-06-08
 Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md`.
 
@@ -40,9 +40,41 @@ Supersedes: the "Open decision — GPU surface backend" line in `docs/ROADMAP.md
 >   in-harness `tests/gpu_backend.rx` pins only the **capability + clean-fallback**
 >   contract (no forked Metal draw). The 100 raster tests stay the deterministic
 >   oracle.
-> - **Windowed Metal (on-screen, `CAMetalLayer` via `SDL_Metal_*`) stays
->   deferred** — there is no display on this host, same as GL windowed; the
->   offscreen path is what unlocks local GPU verification.
+> - **On-screen windowed Metal (`CAMetalLayer`) — LANDED.** SDL window
+>   (`SDL_WINDOW_METAL`) → `SDL_Metal_CreateView` → `SDL_Metal_GetLayer` →
+>   `CAMetalLayer` (configured with the system `MTLDevice`, BGRA8,
+>   `framebufferOnly=NO`). Per frame: `[layer nextDrawable]` → `[drawable
+>   texture]` → `gr_backendrendertarget_new_metal` →
+>   `sk_surface_new_backend_render_target` (a **per-frame** surface, since each
+>   frame consumes a fresh drawable, unlike the offscreen persistent surface) →
+>   draw → `gr_direct_context_flush_and_submit` → present (`[queue
+>   commandBuffer]` `[presentDrawable:]` `[commit]`). Wired into the
+>   `Window#show_gpu` ladder (**on-screen Metal → GL window → raster**) and
+>   `Window#present` (routes by backend). `ruxen_canvas_host_enable_gpu_windowed`
+>   gates on acquiring a first drawable, so a headless host fails the rung and
+>   falls back cleanly.
+>   - **Verified on a real display** by `examples/metal_window_verify.c` (run on a
+>     logged-in macOS session: opens a Metal window, renders a blue rect on the
+>     GPU through a Metal `SkSurface`, presents the drawable → `PASS`).
+>   - **HiDPI / Retina-correct:** the window uses `SDL_WINDOW_ALLOW_HIGHDPI` and
+>     the `CAMetalLayer.drawableSize` + Skia surface are sized to the true
+>     **backing pixel** size (`SDL_Metal_GetDrawableSize`), so the GPU renders at
+>     native resolution and presents 1:1 — crisp, no upscaling a small buffer
+>     (the prior double blur: our scale × Retina). GL/raster paths likewise add
+>     `ALLOW_HIGHDPI` + query the backing size (`SDL_GL_GetDrawableSize` /
+>     `SDL_GetRendererOutputSize`).
+>   - **Not verifiable in the test harness:** macOS forbids CoreFoundation /
+>     Metal / AppKit windowing after `fork()` without `exec()`, and the harness
+>     forks per case + fans out in parallel (real windows race the WindowServer).
+>     So real-window creation is **gated off under the harness** (detected via
+>     `RUXEN_TEST_FORMAT`) → the windowing rungs fall back to the deterministic
+>     headless framebuffer path; `tests/gpu_backend.rx` pins the capability +
+>     ladder + clean-fallback contract. `RUXEN_CANVAS_WINDOW=1` (or running
+>     outside the harness, like the examples) forces real windows.
+>   - **Loader fix (load-bearing):** `load_sdl()` previously only `dlopen`'d the
+>     Linux SO name, so SDL never loaded on macOS and every window fell back
+>     headless. Now host-aware (macOS dylib names + Homebrew full paths +
+>     framework + Linux SO); with `brew sdl2`, `RawHost.sdl_available == 1` here.
 
 > **Implementation status (update):** the **Ganesh GL** backend described below
 > has landed. The `rx_gpu_context` seam lives in `runtime/sdl_window.c`
