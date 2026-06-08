@@ -7,6 +7,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Scroll + Resize events for windowed apps.**
+  - `Event.Scroll(dx, dy)` — mouse-wheel deltas (+y up / away, +x right), emitted
+    from `SDL_MOUSEWHEEL`; deltas are wheel "clicks", not coordinates (not
+    scaled). L2 routes it to scroll the hovered widget.
+  - Windows are created `SDL_WINDOW_RESIZABLE`; the pump emits `Event.Resize(w, h)`
+    (in DESIGN coords) from `SDL_WINDOWEVENT` → `RESIZED`. On resize the GPU
+    surface is re-created at the new backing size — Metal updates the layer's
+    `drawableSize` (the per-frame drawable picks it up); GL invalidates its
+    persistent surface so the next frame rebuilds at the new drawable size.
+  - Both wired through `Window#poll_event` / `#push_event`
+    (`tests/scroll_resize.rx`).
 - **On-screen windowed GPU present (Metal swapchain via `CAMetalLayer`).** Turns
   the offscreen Metal path into a real window (`docs/GPU.md`):
   - SDL window (`SDL_WINDOW_METAL`) → `SDL_Metal_CreateView` /
@@ -400,6 +411,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pointer).
 
 ### Fixed
+- **Windowed pointer coordinates landed ~N× too low (interaction broken).** With
+  `show_gpu_scaled(N)` / `show_scaled(N)` the OS window is N× the design size and
+  SDL reports the mouse in window POINTS, but the **Metal/GL windowed create
+  paths set `s_scale = 1`** while the pump divides pointer x/y by `s_scale` — so
+  coordinates were never divided by N and a click on the top of the UI registered
+  ~N× lower (on a different widget). Fixed: both windowed backends now set
+  `s_scale = N` (the show factor), so the pump maps window points → design coords
+  (`point / N`). `s_scale` is the design→point factor; the Retina backing/dpr is
+  tracked separately (render-only) and does not enter the pump (SDL reports points
+  under `ALLOW_HIGHDPI`). Headless-pinned (`tests/input_scale.rx`): a window point
+  `(200,300)` at scale 2 → design `(100,150)`; a top click `y=20` → `10`.
 - **`save_layer_alpha` group opacity now works on real Skia.** This Skia build
   does not export `sk_canvas_save_layer_alpha` (the convenience wrapper was
   removed upstream; only `sk_canvas_save_layer` / `_rec` exist), so the call was
