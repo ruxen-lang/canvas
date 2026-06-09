@@ -138,11 +138,13 @@ class Window
     self.canvas.raw.window_pump
   end
 
-  ## Take the OS window off screen (idempotent; the canvas stays fully
-  ## usable headless). Call when handling `Event.CloseRequested`.
+  ## Take THIS window off screen (idempotent; the canvas stays fully usable
+  ## headless, and any OTHER open windows are unaffected). Call when handling
+  ## `Event.CloseRequested`. Multi-window safe: routes through the per-host
+  ## teardown so only this window is destroyed.
   def var hide -> nil
     if self.windowed
-      let _ = RawHost.window_destroy
+      let _ = self.canvas.raw.window_destroy_for
       self.windowed = false
     end
   end

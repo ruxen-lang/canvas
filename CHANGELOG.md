@@ -7,6 +7,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Multi-window support — N independent on-screen windows per process**
+  (`docs/MULTIWINDOW.md`). `Window.open` can now create and track multiple live
+  windows; each owns its own SDL window + renderer/GPU surface and its own event
+  ring. The single-window globals in `runtime/sdl_window.c` became a fixed-size
+  table of `RxWin` slots keyed by the owning `RxHost` pointer (no heap, capacity
+  `RX_MAX_WINDOWS = 16`); every `ruxen_canvas_window_*` entry point looks its
+  slot up by `self`, so a single-window app touches exactly one slot and behaves
+  **identically** (backward compatible — all prior tests unchanged + green).
+  - **Per-windowID event demux.** SDL has one process-wide event queue; the pump
+    now reads each event's SDL `windowID` (byte offset 8 of every
+    window-associated event, via `SDL_GetWindowID` recorded at create) and routes
+    it to the owning window's host ring — so window B's clicks never land in
+    window A's stream. `SDL_QUIT` (no windowID) delivers `CloseRequested` to every
+    live window.
+  - **Per-window teardown** — new flat binding `ruxen_canvas_window_destroy_for`
+    (host param) tears down only that window; `Window#hide` now routes through it
+    so hiding one window leaves the others up. The legacy no-arg
+    `ruxen_canvas_window_destroy` tears down all windows; `note_host_dropped`
+    frees only the dropping host's slot.
+  - Headless pin tests in `tests/multiwindow.rx` (independent canvases +
+    framebuffers, per-window event-ring isolation, interleaved FIFO order,
+    deterministic teardown of many concurrent windows). The live two-window
+    present + windowID demux is proven on a real display by
+    `examples/multiwindow_verify.c` (`PASS`: two windows, ids 1 & 2, red + blue
+    presented independently) — not harness-verifiable (the harness forks per case
+    and runs headless).
 - **Proper text entry — `Event.TextInput(codepoint)`.** Printable typing now
   flows through the OS text path (`SDL_StartTextInput` + `SDL_TEXTINPUT`), which
   is layout/shift-correct and composition-aware, instead of raw keysyms. The

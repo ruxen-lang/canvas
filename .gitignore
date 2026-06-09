@@ -1,6 +1,9 @@
 target/
 Ruxen.lock
 
+# Cached test/build output (global rule 41) — never committed.
+tmp/
+
 # Fetched Skia native library — pulled by runtime/fetch_skia.sh, never committed.
 # Canonical install is $HOME/.cache/ruxen-canvas/; ignore any in-tree copies too.
 /runtime/skia/lib/

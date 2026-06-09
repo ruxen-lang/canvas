@@ -13,7 +13,8 @@
  *   - ruxen_canvas_window_show(host, title)   create window/renderer/texture
  *   - ruxen_canvas_window_present(host)       blit host->pixels, vsync flip
  *   - ruxen_canvas_window_pump(host)          SDL events -> the ring buffer
- *   - ruxen_canvas_window_destroy()           tear down
+ *   - ruxen_canvas_window_destroy_for(host)   tear one window down
+ *   - ruxen_canvas_window_destroy()           tear ALL windows down (legacy)
  *
  * The pump translates SDL input into the SAME RxEvent stream tests feed
  * with push_event, so L2/L3 dispatch code is identical headless vs windowed.
@@ -25,7 +26,10 @@
  *     mouse button:    Sint32 x @ 20, y @ 24  (button Uint8 @ 16)
  *     mouse motion:    Sint32 x @ 20, y @ 24
  *     keyboard:        Sint32 keysym.sym @ 20
- *   One window only for this slice (mirrors the single-RxHost model).
+ *     window id:       Uint32 windowID    @ 8  (for the multi-window demux)
+ *   MULTI-WINDOW: up to RX_MAX_WINDOWS live windows, each one RxWin slot keyed
+ *   by its owning RxHost. SDL's single event queue is demuxed per windowID in
+ *   the pump. A single-window app touches exactly one slot (backward compatible).
  */
 
 #include <stdint.h>
@@ -82,6 +86,12 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define SDL_KEY_REPEAT_OFF        13
 /* SDL_TextInputEvent: the UTF-8 NUL-terminated text starts at offset 12. */
 #define SDL_TEXTINPUT_TEXT_OFF    12
+/* Every window-associated SDL event struct begins {Uint32 type; Uint32
+ * timestamp; Uint32 windowID; ...}, so the originating window's SDL windowID is
+ * at byte offset 8 for mouse motion/button/wheel, keyboard, text-input, and
+ * window events. The pump reads it to DEMUX each event to the owning window's
+ * host ring (multi-window). SDL_QUIT has no windowID (it is app-global). */
+#define SDL_EVENT_WINDOWID_OFF    8
 
 /* Control keysyms we still forward via KeyDown (TextInput owns printable chars).
  * SDLK values: editing + navigation. The arrow keys are SDLK_RIGHT/LEFT/DOWN/UP
@@ -152,6 +162,7 @@ static int   (*s_PollEvent)(void *);
 static void  (*s_DestroyTexture)(void *);
 static void  (*s_DestroyRenderer)(void *);
 static void  (*s_DestroyWindow)(void *);
+static uint32_t (*s_GetWindowID)(void *);   /* event-demux: window -> SDL windowID */
 static const char *(*s_GetError)(void);
 /* Text-input mode: when started, SDL emits SDL_TEXTINPUT (layout/shift-correct
  * UTF-8) instead of relying on raw keysyms. OPTIONAL — a miss just means no text
@@ -190,34 +201,94 @@ static void *(*s_sel)(const char *);
 static int   s_metal_have_fns = 0;
 static int   s_metal_objc_ok = 0;
 
-/* ---- single-window state ---- */
-static void *s_win = NULL;
-static void *s_ren = NULL;
-static void *s_tex = NULL;
-static int   s_tex_w = 0;
-static int   s_tex_h = 0;
-static int   s_scale = 1;   /* logical window = framebuffer * scale */
-static int   s_out_w = 0;    /* renderer output (backing) pixel size — Retina-true */
-static int   s_out_h = 0;    /* used by the pump to map device->framebuffer coords */
-static void *s_owner = NULL; /* the RxHost the window belongs to */
+/* ---- multi-window state (docs/MULTIWINDOW.md) ----
+ *
+ * Each live OS window is one RxWin slot, keyed by the RxHost pointer that owns
+ * it (`owner`). A small fixed-size table (no heap, no language feature) tracks
+ * up to RX_MAX_WINDOWS concurrent windows. Every ruxen_canvas_window_* entry
+ * point already receives `self` (the host pointer); it looks its slot up by
+ * `self`, so a 1-window app touches exactly one slot and behaves identically to
+ * the old single-`s_*`-global design (backward compatible).
+ *
+ * The SDL library handle (s_lib) and its dlsym'd function pointers stay
+ * process-global — SDL is loaded once. Only the per-window OS objects (window /
+ * renderer / texture / GL context / Metal view+layer+drawable) move into a slot.
+ *
+ * SDL_PollEvent is a single PROCESS-WIDE queue across all windows; each SDL
+ * event carries the originating window's SDL windowID. ruxen_canvas_window_pump
+ * drains that one queue and DEMUXES each event to the owning slot's host ring by
+ * windowID (so window B's click never lands in window A's event stream). Each
+ * slot records its `win_id` (SDL_GetWindowID) at create for this routing. */
+#define RX_MAX_WINDOWS 16
 
-/* ---- GL-window state (the GPU presenter; mutually exclusive with the raster
- * texture path above for a given window). s_glctx != NULL means this window was
- * created SDL_WINDOW_OPENGL with a current GL context — present is then a buffer
- * swap, not a texture blit. */
-static void *s_glctx = NULL;   /* SDL_GLContext for s_win, or NULL */
+typedef struct {
+    void   *owner;     /* the RxHost this window belongs to; NULL = free slot */
+    void   *win;       /* SDL_Window* */
+    void   *ren;       /* SDL_Renderer* (raster path; NULL for GL/Metal) */
+    void   *tex;       /* SDL_Texture* (raster path; NULL for GL/Metal) */
+    uint32_t win_id;   /* SDL_GetWindowID(win) — for the pump's event demux */
+    int     tex_w;     /* logical framebuffer width  (texture size) */
+    int     tex_h;     /* logical framebuffer height */
+    int     scale;     /* design->window-point factor (the show factor) */
+    int     out_w;     /* renderer output (backing) pixel size — Retina-true */
+    int     out_h;
+    /* GL-window state: glctx != NULL means this window is SDL_WINDOW_OPENGL with
+     * a current GL context — present is a buffer swap, not a texture blit. */
+    void   *glctx;     /* SDL_GLContext, or NULL */
+    /* Metal-window state: mtl_layer != NULL means a SDL_WINDOW_METAL window whose
+     * CAMetalLayer we render into per frame; mtl_drawable is the frame's drawable
+     * (NULL between frames). docs/GPU.md. The device/queue are the rx_metal
+     * singleton (one per process), stashed here for present. */
+    void   *mtl_view;
+    void   *mtl_layer;
+    void   *mtl_device;
+    void   *mtl_queue;
+    void   *mtl_drawable;
+} RxWin;
+
+static RxWin s_wins[RX_MAX_WINDOWS];
+
 static int   s_gl_have_fns = 0;
 
-/* ---- Metal-window state (the on-screen Metal presenter; mutually exclusive
- * with the GL/raster paths for a given window). s_mtl_layer != NULL means this
- * window is a SDL_WINDOW_METAL window whose CAMetalLayer we render into per
- * frame. s_mtl_drawable is the drawable currently acquired for the in-flight
- * frame (NULL between frames). docs/GPU.md. */
-static void *s_mtl_view     = NULL;   /* SDL_MetalView */
-static void *s_mtl_layer    = NULL;   /* CAMetalLayer (id) */
-static void *s_mtl_device   = NULL;   /* id<MTLDevice> (the rx_metal singleton) */
-static void *s_mtl_queue    = NULL;   /* id<MTLCommandQueue> (rx_metal singleton) */
-static void *s_mtl_drawable = NULL;   /* the frame's CAMetalDrawable, or NULL */
+/* Find the slot owned by `owner`, or NULL if it has no live window. */
+static RxWin *rx_win_for(void *owner) {
+    if (!owner) return NULL;
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) {
+        if (s_wins[i].owner == owner) return &s_wins[i];
+    }
+    return NULL;
+}
+
+/* Claim a free slot for `owner` (zeroed, owner set), or NULL when the table is
+ * full. Caller must already have checked rx_win_for(owner) == NULL. */
+static RxWin *rx_win_alloc(void *owner) {
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) {
+        if (s_wins[i].owner == NULL) {
+            memset(&s_wins[i], 0, sizeof(RxWin));
+            s_wins[i].owner = owner;
+            s_wins[i].scale = 1;
+            return &s_wins[i];
+        }
+    }
+    return NULL;
+}
+
+/* Find the slot whose live window has SDL windowID `id` (the pump's demux), or
+ * NULL when no slot matches (an event for a window we don't track). */
+static RxWin *rx_win_by_id(uint32_t id) {
+    if (id == 0) return NULL;
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) {
+        if (s_wins[i].owner && s_wins[i].win_id == id) return &s_wins[i];
+    }
+    return NULL;
+}
+
+/* How many slots currently hold a live window. */
+static int rx_win_count(void) {
+    int n = 0;
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) if (s_wins[i].owner) n++;
+    return n;
+}
 
 static void *sym(const char *name) { return dlsym(s_lib, name); }
 
@@ -263,6 +334,7 @@ static int load_sdl(void) {
     s_DestroyTexture = (void (*)(void *))sym("SDL_DestroyTexture");
     s_DestroyRenderer= (void (*)(void *))sym("SDL_DestroyRenderer");
     s_DestroyWindow  = (void (*)(void *))sym("SDL_DestroyWindow");
+    s_GetWindowID    = (uint32_t (*)(void *))sym("SDL_GetWindowID");  /* event demux */
     s_GetError       = (const char *(*)(void))sym("SDL_GetError");
     s_StartTextInput = (void (*)(void))sym("SDL_StartTextInput");  /* OPTIONAL */
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
@@ -362,56 +434,56 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     const char *t = (const char *)title;
     if (scale == 0) scale = 1; /* 0 = auto (callers without a preference) */
     if (!h || !t || scale < 1 || scale > 8) return RXC_ERR_BAD_ARGS;
-    if (s_win) {
-        /* idempotent for the owning host; an error for any other host —
-         * one window per process, and silently "succeeding" would leave
-         * the second Window presenting someone else's framebuffer */
-        return s_owner == (void *)h ? RXC_OK : RXC_ERR_BUSY;
-    }
+    /* idempotent for the owning host (it already has a live window). */
+    if (rx_win_for((void *)h)) return RXC_OK;
     if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
 
-    s_scale = (int)scale;
+    RxWin *w = rx_win_alloc((void *)h);
+    if (!w) return RXC_ERR_BUSY;   /* window table full */
+    w->scale = (int)scale;
     /* ALLOW_HIGHDPI: the backing store is the true Retina pixel size, so macOS
      * does NOT upscale the window a second time on top of our scale. The texture
      * holds the logical framebuffer; RenderCopy maps it to the renderer's output
      * (backing) size once. Without this flag the window was upscaled twice
      * (our scale × Retina) — double blur. */
-    s_win = s_CreateWindow(t,
-                           (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width * s_scale, h->height * s_scale,
-                           SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
-    if (!s_win) return RXC_ERR_NO_SDL;
-    s_ren = s_CreateRenderer(s_win, -1, 0);
-    if (!s_ren) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_NO_SDL; }
-    s_tex = s_CreateTexture(s_ren, SDL_PIXELFORMAT_ARGB8888,
-                            SDL_TEXTUREACCESS_STREAMING, h->width, h->height);
-    if (!s_tex) {
-        s_DestroyRenderer(s_ren); s_ren = NULL;
-        s_DestroyWindow(s_win);   s_win = NULL;
+    w->win = s_CreateWindow(t,
+                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
+                            h->width * w->scale, h->height * w->scale,
+                            SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+    if (!w->win) { w->owner = NULL; return RXC_ERR_NO_SDL; }
+    w->ren = s_CreateRenderer(w->win, -1, 0);
+    if (!w->ren) { s_DestroyWindow(w->win); w->owner = NULL; return RXC_ERR_NO_SDL; }
+    w->tex = s_CreateTexture(w->ren, SDL_PIXELFORMAT_ARGB8888,
+                             SDL_TEXTUREACCESS_STREAMING, h->width, h->height);
+    if (!w->tex) {
+        s_DestroyRenderer(w->ren);
+        s_DestroyWindow(w->win);
+        w->owner = NULL;
         return RXC_ERR_NO_SDL;
     }
-    s_tex_w = h->width;
-    s_tex_h = h->height;
+    w->tex_w = h->width;
+    w->tex_h = h->height;
     /* The real backing pixel size (Retina ~2x the logical window). */
-    s_out_w = h->width * s_scale;
-    s_out_h = h->height * s_scale;
+    w->out_w = h->width * w->scale;
+    w->out_h = h->height * w->scale;
     if (s_GetRendererOutputSize) {
         int ow = 0, oh = 0;
-        if (s_GetRendererOutputSize(s_ren, &ow, &oh) == 0 && ow > 0 && oh > 0) {
-            s_out_w = ow;
-            s_out_h = oh;
+        if (s_GetRendererOutputSize(w->ren, &ow, &oh) == 0 && ow > 0 && oh > 0) {
+            w->out_w = ow;
+            w->out_h = oh;
         }
     }
+    if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);  /* for the pump's demux */
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
-    s_owner = (void *)h;
     return RXC_OK;
 }
 
-/* Whether a window is currently up (0/1). */
+/* Whether ANY window is currently up (0/1) — the legacy no-arg probe. With
+ * multiple windows this reports "at least one window is shown". */
 int64_t ruxen_canvas_window_is_shown(void) {
-    return s_win ? 1 : 0;
+    return rx_win_count() > 0 ? 1 : 0;
 }
 
 /* Blit the host framebuffer to the window. host pixels are 0xAARRGGBB,
@@ -419,12 +491,12 @@ int64_t ruxen_canvas_window_is_shown(void) {
 int64_t ruxen_canvas_window_present(int64_t self) {
     RxHostPrefix *h = (RxHostPrefix *)self;
     if (!h || !h->pixels) return RXC_ERR_BAD_ARGS;
-    if (!s_win || s_owner != (void *)h ||
-        h->width != s_tex_w || h->height != s_tex_h) return RXC_ERR_PRESENT;
-    if (s_UpdateTexture(s_tex, NULL, h->pixels, h->width * 4) != 0) return RXC_ERR_PRESENT;
-    if (s_RenderClear(s_ren) != 0) return RXC_ERR_PRESENT;
-    if (s_RenderCopy(s_ren, s_tex, NULL, NULL) != 0) return RXC_ERR_PRESENT;
-    s_RenderPresent(s_ren);
+    RxWin *w = rx_win_for((void *)h);
+    if (!w || !w->tex || h->width != w->tex_w || h->height != w->tex_h) return RXC_ERR_PRESENT;
+    if (s_UpdateTexture(w->tex, NULL, h->pixels, h->width * 4) != 0) return RXC_ERR_PRESENT;
+    if (s_RenderClear(w->ren) != 0) return RXC_ERR_PRESENT;
+    if (s_RenderCopy(w->ren, w->tex, NULL, NULL) != 0) return RXC_ERR_PRESENT;
+    s_RenderPresent(w->ren);
     return RXC_OK;
 }
 
@@ -445,7 +517,7 @@ int64_t ruxen_canvas_window_present(int64_t self) {
 int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
 
 /* Create an SDL_WINDOW_OPENGL window for this host and make a GL context
- * current on it. Returns RXC_OK on success (s_glctx set), or RXC_ERR_NO_SDL /
+ * current on it. Returns RXC_OK on success (slot glctx set), or RXC_ERR_NO_SDL /
  * RXC_ERR_BUSY / RXC_ERR_PRESENT on a clean failure. Idempotent for the owning
  * host. On ANY failure the window state is left torn down so the caller can
  * fall back to the raster show path. */
@@ -455,15 +527,16 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
     int ws = (int)win_scale;
     if (ws < 1) ws = 1;
     if (ws > 8) ws = 8;
-    if (s_win) {
-        /* a window already exists: only OK if it is THIS host's GL window */
-        if (s_owner == (void *)h && s_glctx) return RXC_OK;
-        return RXC_ERR_BUSY;
-    }
+    /* idempotent for the owning host if it already has a GL window. */
+    RxWin *existing = rx_win_for((void *)h);
+    if (existing) return existing->glctx ? RXC_OK : RXC_ERR_BUSY;
     if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (!s_gl_have_fns) return RXC_ERR_NO_SDL;   /* no GL entry points */
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
+
+    RxWin *w = rx_win_alloc((void *)h);
+    if (!w) return RXC_ERR_BUSY;   /* window table full */
 
     /* Request a GL context Skia can render into: 8-bit RGBA, a stencil buffer
      * (Ganesh uses stencil for some clips/AA), double-buffered, core profile.
@@ -484,57 +557,67 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
      * size, which we size the Ganesh GL surface to — native-resolution, crisp.
      * win_scale opens a larger on-screen window; the design->backing content
      * scale fills it crisply (see window_create_metal). */
-    s_win = s_CreateWindow("ruxen-gl",
-                           (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width * ws, h->height * ws,
-                           SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
-    if (!s_win) return RXC_ERR_NO_SDL;
-    s_glctx = s_GL_CreateContext(s_win);
-    if (!s_glctx) {
-        s_DestroyWindow(s_win); s_win = NULL;
+    w->win = s_CreateWindow("ruxen-gl",
+                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
+                            h->width * ws, h->height * ws,
+                            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_RESIZABLE);
+    if (!w->win) { w->owner = NULL; return RXC_ERR_NO_SDL; }
+    w->glctx = s_GL_CreateContext(w->win);
+    if (!w->glctx) {
+        s_DestroyWindow(w->win); w->owner = NULL;
         return RXC_ERR_PRESENT;
     }
-    if (s_GL_MakeCurrent(s_win, s_glctx) != 0) {
-        s_GL_DeleteContext(s_glctx); s_glctx = NULL;
-        s_DestroyWindow(s_win);      s_win = NULL;
+    if (s_GL_MakeCurrent(w->win, w->glctx) != 0) {
+        s_GL_DeleteContext(w->glctx);
+        s_DestroyWindow(w->win); w->owner = NULL;
         return RXC_ERR_PRESENT;
     }
     if (s_GL_SetSwapInterval) s_GL_SetSwapInterval(1);   /* vsync; best-effort */
-    /* s_scale is the DESIGN->window-point factor (the show_gpu_scaled factor),
+    /* scale is the DESIGN->window-point factor (the show_gpu_scaled factor),
      * used by the pump to map mouse POINTS (0..width*ws) back to design coords
      * (/ ws). NOT the backing/dpr scale — SDL reports mouse in logical points
      * under ALLOW_HIGHDPI; the backing drawable size is tracked separately for
      * the render surface. */
-    s_scale = ws;
-    s_tex_w = h->width;     /* reuse the size guard fields for the GL window */
-    s_tex_h = h->height;
+    w->scale = ws;
+    w->tex_w = h->width;     /* reuse the size guard fields for the GL window */
+    w->tex_h = h->height;
+    if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
-    s_owner = (void *)h;
     return RXC_OK;
 }
 
-/* Whether the current window is a GL window owned by `self` (0/1). */
+/* Whether the window owned by `self` is a GL window (0/1). */
 int64_t ruxen_canvas_window_is_gl(int64_t self) {
-    return (s_glctx && s_owner == (void *)self) ? 1 : 0;
+    RxWin *w = rx_win_for((void *)self);
+    return (w && w->glctx) ? 1 : 0;
 }
 
 /* Resolve a GL function by name through SDL_GL_GetProcAddress, returned as an
  * int64 pointer (0 when unavailable). This is the loader Skia's
  * gr_glinterface_assemble_*_interface calls back into. The GL context must be
- * current (it is, after create_gl). */
+ * current — it is, immediately after create_gl made it current. SDL's GL proc
+ * resolution is per-process (context-independent for core entry points), so this
+ * does not need a host; we only gate on SOME GL window existing. */
 int64_t ruxen_canvas_window_gl_get_proc(int64_t name) {
     const char *n = (const char *)name;
-    if (!n || !s_glctx || !s_GL_GetProcAddress) return 0;
+    if (!n || !s_GL_GetProcAddress) return 0;
+    /* require at least one live GL context so a current context exists. */
+    int have_gl = 0;
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) {
+        if (s_wins[i].owner && s_wins[i].glctx) { have_gl = 1; break; }
+    }
+    if (!have_gl) return 0;
     return (int64_t)s_GL_GetProcAddress(n);
 }
 
-/* The drawable pixel size of the GL window (HiDPI-correct via
+/* The drawable pixel size of `self`'s GL window (HiDPI-correct via
  * SDL_GL_GetDrawableSize). Packs width in the high 32 bits, height in the low
  * 32 — one int64 return, no out-params across the ABI. 0 when no GL window. */
 int64_t ruxen_canvas_window_gl_drawable_size(int64_t self) {
-    if (!s_glctx || s_owner != (void *)self) return 0;
-    int w = s_tex_w, hh = s_tex_h;
-    if (s_GL_GetDrawableSize) s_GL_GetDrawableSize(s_win, &w, &hh);
+    RxWin *win = rx_win_for((void *)self);
+    if (!win || !win->glctx) return 0;
+    int w = win->tex_w, hh = win->tex_h;
+    if (s_GL_GetDrawableSize) s_GL_GetDrawableSize(win->win, &w, &hh);
     if (w <= 0 || hh <= 0) return 0;
     return ((int64_t)(uint32_t)w << 32) | (int64_t)(uint32_t)hh;
 }
@@ -542,8 +625,9 @@ int64_t ruxen_canvas_window_gl_drawable_size(int64_t self) {
 /* Present a GPU frame: swap the GL back buffer to the screen. Returns RXC_OK
  * or RXC_ERR_PRESENT when there is no GL window for this host. */
 int64_t ruxen_canvas_window_gl_present(int64_t self) {
-    if (!s_glctx || s_owner != (void *)self || !s_GL_SwapWindow) return RXC_ERR_PRESENT;
-    s_GL_SwapWindow(s_win);
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->glctx || !s_GL_SwapWindow) return RXC_ERR_PRESENT;
+    s_GL_SwapWindow(w->win);
     return RXC_OK;
 }
 
@@ -564,15 +648,16 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
     int ws = (int)win_scale;
     if (ws < 1) ws = 1;
     if (ws > 8) ws = 8;
-    if (s_win) {
-        if (s_owner == (void *)h && s_mtl_layer) return RXC_OK;
-        return RXC_ERR_BUSY;
-    }
+    RxWin *existing = rx_win_for((void *)h);
+    if (existing) return existing->mtl_layer ? RXC_OK : RXC_ERR_BUSY;
     if (!rx_window_allowed()) return RXC_ERR_NO_SDL;   /* forked harness: headless */
     if (!load_sdl()) return RXC_ERR_NO_SDL;
     if (!s_metal_have_fns) return RXC_ERR_NO_SDL;   /* no SDL_Metal_* */
     if (!metal_objc_init()) return RXC_ERR_NO_SDL;  /* no objc runtime */
     if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
+
+    RxWin *w = rx_win_alloc((void *)h);
+    if (!w) return RXC_ERR_BUSY;   /* window table full */
 
     /* ALLOW_HIGHDPI so the view's backing store is the true Retina pixel size;
      * we render the Skia Metal surface at THAT size (queried below) and present
@@ -581,18 +666,18 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
      * scale (begin_frame) then fills it crisply at native density — so a 2x
      * window of a 320-design UI is 640 logical points, 1280 backing pixels on a
      * 2x display, content scale 4. */
-    s_win = s_CreateWindow("ruxen-metal",
-                           (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
-                           h->width * ws, h->height * ws,
-                           SDL_WINDOW_METAL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
-    if (!s_win) return RXC_ERR_NO_SDL;
+    w->win = s_CreateWindow("ruxen-metal",
+                            (int)SDL_WINDOWPOS_CENTERED, (int)SDL_WINDOWPOS_CENTERED,
+                            h->width * ws, h->height * ws,
+                            SDL_WINDOW_METAL | SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!w->win) { w->owner = NULL; return RXC_ERR_NO_SDL; }
 
-    s_mtl_view = s_Metal_CreateView(s_win);
-    if (!s_mtl_view) { s_DestroyWindow(s_win); s_win = NULL; return RXC_ERR_PRESENT; }
-    s_mtl_layer = s_Metal_GetLayer(s_mtl_view);
-    if (!s_mtl_layer) {
-        s_Metal_DestroyView(s_mtl_view); s_mtl_view = NULL;
-        s_DestroyWindow(s_win); s_win = NULL;
+    w->mtl_view = s_Metal_CreateView(w->win);
+    if (!w->mtl_view) { s_DestroyWindow(w->win); w->owner = NULL; return RXC_ERR_PRESENT; }
+    w->mtl_layer = s_Metal_GetLayer(w->mtl_view);
+    if (!w->mtl_layer) {
+        s_Metal_DestroyView(w->mtl_view);
+        s_DestroyWindow(w->win); w->owner = NULL;
         return RXC_ERR_PRESENT;
     }
 
@@ -600,36 +685,37 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
      * We size the layer's drawable AND the Skia surface to this, so the GPU
      * renders at native resolution (crisp text/shapes), presented 1:1. */
     int dpw = h->width, dph = h->height;
-    if (s_Metal_GetDrawableSize) s_Metal_GetDrawableSize(s_win, &dpw, &dph);
+    if (s_Metal_GetDrawableSize) s_Metal_GetDrawableSize(w->win, &dpw, &dph);
     if (dpw <= 0 || dph <= 0) { dpw = h->width; dph = h->height; }
 
-    s_mtl_device = (void *)device;
-    s_mtl_queue  = (void *)queue;
+    w->mtl_device = (void *)device;
+    w->mtl_queue  = (void *)queue;
     /* Configure the layer: our device, BGRA8 (matches the host packing), and
      * framebufferOnly=NO so Skia may render into the drawable's texture. The
      * drawableSize is the native backing size (HiDPI-correct). */
-    mtl_msg_p(s_mtl_layer, "setDevice:", s_mtl_device);
-    mtl_msg_u(s_mtl_layer, "setPixelFormat:", MTL_PIXELFORMAT_BGRA8);
-    mtl_msg_u(s_mtl_layer, "setFramebufferOnly:", 0);
-    mtl_set_drawable_size(s_mtl_layer, (double)dpw, (double)dph);
+    mtl_msg_p(w->mtl_layer, "setDevice:", w->mtl_device);
+    mtl_msg_u(w->mtl_layer, "setPixelFormat:", MTL_PIXELFORMAT_BGRA8);
+    mtl_msg_u(w->mtl_layer, "setFramebufferOnly:", 0);
+    mtl_set_drawable_size(w->mtl_layer, (double)dpw, (double)dph);
 
-    /* s_scale = the DESIGN->window-point factor (the show_gpu_scaled factor), so
+    /* scale = the DESIGN->window-point factor (the show_gpu_scaled factor), so
      * the pump maps mouse POINTS (0..width*ws) back to design coords (/ ws). This
-     * is SEPARATE from the backing/dpr scale: s_tex_w/h track the native backing
+     * is SEPARATE from the backing/dpr scale: tex_w/h track the native backing
      * (drawable) size for the render surface; the pump never uses them. SDL
      * reports mouse in logical points under ALLOW_HIGHDPI, so the dpr does not
      * enter the pump. */
-    s_scale = ws;
-    s_tex_w = dpw;
-    s_tex_h = dph;
+    w->scale = ws;
+    w->tex_w = dpw;
+    w->tex_h = dph;
+    if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
-    s_owner = (void *)h;
     return RXC_OK;
 }
 
-/* Whether the current window is a Metal window owned by `self` (0/1). */
+/* Whether the window owned by `self` is a Metal window (0/1). */
 int64_t ruxen_canvas_window_is_metal(int64_t self) {
-    return (s_mtl_layer && s_owner == (void *)self) ? 1 : 0;
+    RxWin *w = rx_win_for((void *)self);
+    return (w && w->mtl_layer) ? 1 : 0;
 }
 
 /* True (1) when SDL2 itself could be dlopen'd on this host (the host-aware
@@ -651,27 +737,29 @@ int64_t ruxen_canvas_window_metal_available(void) {
 /* Acquire the layer's next drawable for this frame and return its MTLTexture as
  * an int64 handle (0 on failure — e.g. headless, no display, so nextDrawable is
  * nil). The caller (skia_shim) wraps this texture in a Metal backend render
- * target. The drawable is held in s_mtl_drawable until present releases it; a
+ * target. The drawable is held in the slot's mtl_drawable until present releases it; a
  * second call without a present releases the prior unpresented drawable first
  * (no leak). */
 int64_t ruxen_canvas_window_metal_next_drawable(int64_t self) {
-    if (!s_mtl_layer || s_owner != (void *)self) return 0;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->mtl_layer) return 0;
     /* a prior unpresented drawable would leak — drop our reference to it. */
-    s_mtl_drawable = NULL;
-    void *drawable = mtl_msg(s_mtl_layer, "nextDrawable");
+    w->mtl_drawable = NULL;
+    void *drawable = mtl_msg(w->mtl_layer, "nextDrawable");
     if (!drawable) return 0;                  /* no display / off-screen */
     void *texture = mtl_msg(drawable, "texture");
     if (!texture) return 0;
-    s_mtl_drawable = drawable;
+    w->mtl_drawable = drawable;
     return (int64_t)texture;
 }
 
-/* The drawable pixel size of the Metal layer (HiDPI-correct). Packs width<<32 |
- * height. 0 when no Metal window. We track it from drawableSize set at create;
- * the layer's drawableSize is authoritative on HiDPI. */
+/* The drawable pixel size of `self`'s Metal layer (HiDPI-correct). Packs
+ * width<<32 | height. 0 when no Metal window. We track it from drawableSize set
+ * at create; the layer's drawableSize is authoritative on HiDPI. */
 int64_t ruxen_canvas_window_metal_drawable_size(int64_t self) {
-    if (!s_mtl_layer || s_owner != (void *)self) return 0;
-    int w = s_tex_w, hh = s_tex_h;
+    RxWin *win = rx_win_for((void *)self);
+    if (!win || !win->mtl_layer) return 0;
+    int w = win->tex_w, hh = win->tex_h;
     if (w <= 0 || hh <= 0) return 0;
     return ((int64_t)(uint32_t)w << 32) | (int64_t)(uint32_t)hh;
 }
@@ -681,15 +769,16 @@ int64_t ruxen_canvas_window_metal_drawable_size(int64_t self) {
  * when there is no Metal window / no acquired drawable. After present the
  * drawable is consumed (next frame acquires a fresh one). */
 int64_t ruxen_canvas_window_metal_present(int64_t self) {
-    if (!s_mtl_layer || s_owner != (void *)self) return RXC_ERR_PRESENT;
-    if (!s_mtl_drawable || !s_mtl_queue) return RXC_ERR_PRESENT;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->mtl_layer) return RXC_ERR_PRESENT;
+    if (!w->mtl_drawable || !w->mtl_queue) return RXC_ERR_PRESENT;
     /* id cmdbuf = [queue commandBuffer]; [cmdbuf presentDrawable:drawable];
      * [cmdbuf commit]; */
-    void *cmdbuf = mtl_msg(s_mtl_queue, "commandBuffer");
-    if (!cmdbuf) { s_mtl_drawable = NULL; return RXC_ERR_PRESENT; }
-    mtl_msg_p(cmdbuf, "presentDrawable:", s_mtl_drawable);
+    void *cmdbuf = mtl_msg(w->mtl_queue, "commandBuffer");
+    if (!cmdbuf) { w->mtl_drawable = NULL; return RXC_ERR_PRESENT; }
+    mtl_msg_p(cmdbuf, "presentDrawable:", w->mtl_drawable);
     mtl_msg(cmdbuf, "commit");
-    s_mtl_drawable = NULL;     /* consumed; next frame acquires a fresh drawable */
+    w->mtl_drawable = NULL;     /* consumed; next frame acquires a fresh drawable */
     return RXC_OK;
 }
 
@@ -697,14 +786,14 @@ int64_t ruxen_canvas_window_metal_present(int64_t self) {
  * (0..width*ws), not backing pixels, even under ALLOW_HIGHDPI. The app works in
  * DESIGN coords (0..width). The window opens at width*ws (the show /
  * show_scaled / show_gpu_scaled factor), so point -> design is point / ws =
- * point / s_scale. s_scale is set to the show factor by EVERY windowed backend
- * (raster, GL, Metal), so this maps points to design coords on all of them. The
+ * point / scale. The slot's `scale` is set to the show factor by EVERY windowed
+ * backend (raster, GL, Metal), so this maps points to design coords on all. The
  * Retina backing/dpr does NOT enter here (SDL accounts for it in the point
  * coordinates; the backing size is tracked separately, only for the render
  * surface). Factored out so the headless pump-mapping test exercises the EXACT
  * arithmetic the pump uses. */
-static double rx_map_point(int32_t window_point) {
-    return (double)window_point / (double)(s_scale > 0 ? s_scale : 1);
+static double rx_map_point_scale(int32_t window_point, int scale) {
+    return (double)window_point / (double)(scale > 0 ? scale : 1);
 }
 
 /* Decode the FIRST UTF-8 character of a NUL-terminated string to a Unicode
@@ -750,105 +839,139 @@ static int rx_is_control_keysym(int32_t sym) {
  * begin_frame rebuilds it at the new backing size (defined in skia_shim.c). */
 void ruxen_canvas_host_gl_invalidate_surface(int64_t self);
 
-/* On a window resize: the design->point factor s_scale is unchanged (the design
- * stays h->width), but the backing drawable grows/shrinks. For Metal, update the
+/* On a window resize: the design->point factor (the slot's scale) is unchanged
+ * (the design stays h->width), but the backing drawable grows/shrinks. For Metal, update the
  * layer's drawableSize to the new backing pixels so the next frame's drawable +
  * GPU surface are the new size (begin_frame picks them up via the drawable). For
  * GL (persistent surface), tell the shim to drop + rebuild the surface at the new
  * size on the next frame. */
-static void rx_window_on_resized(int64_t self) {
-    if (s_mtl_layer && s_Metal_GetDrawableSize) {
+static void rx_window_on_resized(RxWin *w) {
+    if (!w) return;
+    if (w->mtl_layer && s_Metal_GetDrawableSize) {
         int dpw = 0, dph = 0;
-        s_Metal_GetDrawableSize(s_win, &dpw, &dph);
+        s_Metal_GetDrawableSize(w->win, &dpw, &dph);
         if (dpw > 0 && dph > 0) {
-            mtl_set_drawable_size(s_mtl_layer, (double)dpw, (double)dph);
-            s_tex_w = dpw;   /* window_metal_drawable_size now returns the new size */
-            s_tex_h = dph;
+            mtl_set_drawable_size(w->mtl_layer, (double)dpw, (double)dph);
+            w->tex_w = dpw;   /* window_metal_drawable_size now returns the new size */
+            w->tex_h = dph;
         }
-    } else if (s_glctx) {
+    } else if (w->glctx) {
         /* GL: the drawable size is queried fresh each rebuild; just invalidate. */
-        ruxen_canvas_host_gl_invalidate_surface(self);
+        ruxen_canvas_host_gl_invalidate_surface((int64_t)w->owner);
     }
 }
 
+/* Drain the PROCESS-WIDE SDL event queue once, DEMUXING each event to the host
+ * ring of the window it originated from (by SDL windowID). Returns the number of
+ * events forwarded to `self`'s window specifically — so a single-window app sees
+ * the same count it always did, and a multi-window app gets each window's input
+ * in its own ring regardless of which window's pump call drained the queue.
+ *
+ * SDL has ONE event queue shared by all windows, so the first window to pump in
+ * a frame drains everything; events for other windows are routed to their rings
+ * and surface when THOSE windows poll. We never drop a window's events. */
 int64_t ruxen_canvas_window_pump(int64_t self) {
     if (!self) return -RXC_ERR_BAD_ARGS;
-    if (!s_win || s_owner != (void *)self) return 0;
+    /* No live window for this host (and the queue belongs to live windows): with
+     * no windows at all there is nothing to pump. */
+    if (rx_win_count() == 0) return 0;
     int64_t forwarded = 0;
     unsigned char ev[64];
     while (s_PollEvent(ev)) {
         uint32_t type;
         memcpy(&type, ev, sizeof type);
         int32_t xi, yi, sym;
+        uint32_t wid = 0;
+        /* windowID is at offset 8 for every window-associated event; route to
+         * the owning slot. SDL_QUIT carries no windowID (handled below). */
+        memcpy(&wid, ev + SDL_EVENT_WINDOWID_OFF, 4);
+        RxWin *tw = rx_win_by_id(wid);   /* target window for this event */
+        int64_t towner = tw ? (int64_t)tw->owner : 0;
+        int tscale = tw ? tw->scale : 1;
+        int is_self = (towner == self);
         switch (type) {
         case SDL_MOUSEMOTION_EV:
+            if (!tw) break;
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_MOVE,
-                                    rx_map_point(xi), rx_map_point(yi));
-            forwarded++;
+            ruxen_canvas_push_event(towner, RX_EV_POINTER_MOVE,
+                                    rx_map_point_scale(xi, tscale), rx_map_point_scale(yi, tscale));
+            if (is_self) forwarded++;
             break;
         case SDL_MOUSEBUTTONDOWN_EV:
+            if (!tw) break;
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
-                                    rx_map_point(xi), rx_map_point(yi));
-            forwarded++;
+            ruxen_canvas_push_event(towner, RX_EV_POINTER_DOWN,
+                                    rx_map_point_scale(xi, tscale), rx_map_point_scale(yi, tscale));
+            if (is_self) forwarded++;
             break;
         case SDL_MOUSEBUTTONUP_EV:
+            if (!tw) break;
             memcpy(&xi, ev + 20, 4); memcpy(&yi, ev + 24, 4);
-            ruxen_canvas_push_event(self, RX_EV_POINTER_UP,
-                                    rx_map_point(xi), rx_map_point(yi));
-            forwarded++;
+            ruxen_canvas_push_event(towner, RX_EV_POINTER_UP,
+                                    rx_map_point_scale(xi, tscale), rx_map_point_scale(yi, tscale));
+            if (is_self) forwarded++;
             break;
         case SDL_MOUSEWHEEL_EV:
             /* SDL_MouseWheelEvent: Sint32 x @ 16, y @ 20 (wheel deltas; +y = up,
              * +x = right). Wheel deltas are integer "clicks", not coords — NOT
-             * scaled by s_scale. Forwarded as Event.Scroll(dx, dy). */
+             * scaled. Forwarded as Event.Scroll(dx, dy). */
+            if (!tw) break;
             memcpy(&xi, ev + 16, 4); memcpy(&yi, ev + 20, 4);
-            ruxen_canvas_push_event(self, RX_EV_SCROLL, (double)xi, (double)yi);
-            forwarded++;
+            ruxen_canvas_push_event(towner, RX_EV_SCROLL, (double)xi, (double)yi);
+            if (is_self) forwarded++;
             break;
         case SDL_TEXTINPUT_EV: {
             /* SDL_TextInputEvent: NUL-terminated UTF-8 at offset 12. This is the
              * ONLY path that inserts printable characters (layout/shift-correct).
-             * Emit the first codepoint as Event.TextInput. */
+             * Emit the first codepoint as Event.TextInput to the focused window. */
+            if (!tw) break;
             int32_t cp = rx_utf8_first_codepoint(ev + SDL_TEXTINPUT_TEXT_OFF);
             if (cp >= 0) {
-                ruxen_canvas_push_event(self, RX_EV_TEXT_INPUT, (double)cp, 0.0);
-                forwarded++;
+                ruxen_canvas_push_event(towner, RX_EV_TEXT_INPUT, (double)cp, 0.0);
+                if (is_self) forwarded++;
             }
             break;
         }
         case SDL_KEYDOWN_EV: {
             /* Skip auto-repeat (held key) so a control key doesn't machine-gun. */
             if (ev[SDL_KEY_REPEAT_OFF] != 0) break;
+            if (!tw) break;
             memcpy(&sym, ev + 20, 4);
             /* Forward CONTROL keys only — editing/navigation. Printable chars are
              * owned by SDL_TEXTINPUT above; forwarding their raw keysyms here
              * would insert garbage (no shift/layout). */
             if (rx_is_control_keysym(sym)) {
-                ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
-                forwarded++;
+                ruxen_canvas_push_event(towner, RX_EV_KEY_DOWN, (double)sym, 0.0);
+                if (is_self) forwarded++;
             }
             break;
         }
         case SDL_WINDOWEVENT_EV: {
             /* SDL_WindowEvent: Uint8 event @ 12, Sint32 data1 @ 16, data2 @ 20.
              * On RESIZED, data1/data2 are the new window size in POINTS; we emit
-             * Resize in DESIGN coords (/ s_scale) and re-size the backing surface. */
+             * Resize in DESIGN coords (/ scale) and re-size the backing surface of
+             * the originating window. */
+            if (!tw) break;
             unsigned char subtype = ev[12];
             if (subtype == SDL_WINDOWEVENT_RESIZED) {
                 int32_t w1, h1;
                 memcpy(&w1, ev + 16, 4); memcpy(&h1, ev + 20, 4);
-                rx_window_on_resized(self);
-                ruxen_canvas_push_event(self, RX_EV_RESIZE,
-                                        rx_map_point(w1), rx_map_point(h1));
-                forwarded++;
+                rx_window_on_resized(tw);
+                ruxen_canvas_push_event(towner, RX_EV_RESIZE,
+                                        rx_map_point_scale(w1, tscale), rx_map_point_scale(h1, tscale));
+                if (is_self) forwarded++;
             }
             break;
         }
         case SDL_QUIT_EV:
-            ruxen_canvas_push_event(self, RX_EV_CLOSE, 0.0, 0.0);
-            forwarded++;
+            /* App-wide quit: no windowID. Deliver a CloseRequested to EVERY live
+             * window so each can tear down. Count it once for `self`. */
+            for (int i = 0; i < RX_MAX_WINDOWS; i++) {
+                if (s_wins[i].owner) {
+                    ruxen_canvas_push_event((int64_t)s_wins[i].owner, RX_EV_CLOSE, 0.0, 0.0);
+                    if ((int64_t)s_wins[i].owner == self) forwarded++;
+                }
+            }
             break;
         default:
             break;
@@ -861,18 +984,17 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
  *
  * The real pump only runs with a live SDL window (gated off in the test
  * harness), so we cannot drive it with synthetic SDL events headless. This seam
- * sets s_scale directly and runs the EXACT mapping the pump uses (rx_map_point)
+ * passes the scale directly and runs the EXACT mapping the pump uses (rx_map_point_scale)
  * on a synthetic window-point pointer event, pushing the design-mapped result
  * into the host's ring. The test then polls it back and asserts point / scale.
  * Test-only; mirrors the pump's arithmetic so a regression in either is caught. */
 int64_t ruxen_canvas_window_pump_test_pointer(int64_t self, int64_t show_scale,
                                               int64_t win_x, int64_t win_y) {
     if (!self) return RXC_ERR_BAD_ARGS;
-    int saved = s_scale;
-    s_scale = (show_scale >= 1) ? (int)show_scale : 1;
+    int sc = (show_scale >= 1) ? (int)show_scale : 1;
     ruxen_canvas_push_event(self, RX_EV_POINTER_DOWN,
-                            rx_map_point((int32_t)win_x), rx_map_point((int32_t)win_y));
-    s_scale = saved;
+                            rx_map_point_scale((int32_t)win_x, sc),
+                            rx_map_point_scale((int32_t)win_y, sc));
     return RXC_OK;
 }
 
@@ -899,40 +1021,51 @@ int64_t ruxen_canvas_window_pump_test_keydown(int64_t self, int64_t sym, int64_t
     return 1;
 }
 
-/* Tear the window down (idempotent). The dlopen handle stays cached.
+/* Tear ONE window slot down (idempotent on a free slot). The dlopen handle
+ * stays cached.
  *
  * Teardown order matters for the GPU path (docs/GPU.md): the Skia GPU surface +
  * gr_direct_context are released by skia_shim.c's host_drop BEFORE this runs
  * (host_drop calls note_host_dropped -> here). By the time we delete the GL
  * context, no Skia object still references it. The GL context is deleted before
  * the window it was created against, the reverse of creation order. */
-int64_t ruxen_canvas_window_destroy(void) {
-    if (s_tex) { s_DestroyTexture(s_tex); s_tex = NULL; }
-    if (s_ren) { s_DestroyRenderer(s_ren); s_ren = NULL; }
-    if (s_glctx) { if (s_GL_DeleteContext) s_GL_DeleteContext(s_glctx); s_glctx = NULL; }
+static void rx_win_teardown(RxWin *w) {
+    if (!w || !w->owner) return;
+    if (w->tex) { s_DestroyTexture(w->tex); w->tex = NULL; }
+    if (w->ren) { s_DestroyRenderer(w->ren); w->ren = NULL; }
+    if (w->glctx) { if (s_GL_DeleteContext) s_GL_DeleteContext(w->glctx); w->glctx = NULL; }
     /* Metal: the GPU surface + gr_context referencing the layer are released by
      * skia_shim's host_drop BEFORE this runs. Any in-flight drawable was already
      * consumed at present (or is dropped here). Order: drawable -> layer (owned
      * by the view) -> view -> window — the reverse of creation. We do not own
      * the device/queue (rx_metal singleton), so they are not destroyed here. */
-    s_mtl_drawable = NULL;
-    s_mtl_layer    = NULL;   /* owned by the view; freed with it */
-    if (s_mtl_view) { if (s_Metal_DestroyView) s_Metal_DestroyView(s_mtl_view); s_mtl_view = NULL; }
-    s_mtl_device = NULL;
-    s_mtl_queue  = NULL;
-    if (s_win) { s_DestroyWindow(s_win); s_win = NULL; }
-    s_tex_w = s_tex_h = 0;
-    s_out_w = s_out_h = 0;
-    s_scale = 1;
-    s_owner = NULL;
+    w->mtl_drawable = NULL;
+    w->mtl_layer    = NULL;   /* owned by the view; freed with it */
+    if (w->mtl_view) { if (s_Metal_DestroyView) s_Metal_DestroyView(w->mtl_view); w->mtl_view = NULL; }
+    w->mtl_device = NULL;
+    w->mtl_queue  = NULL;
+    if (w->win) { s_DestroyWindow(w->win); w->win = NULL; }
+    memset(w, 0, sizeof(RxWin));   /* frees the slot (owner = NULL) */
+}
+
+/* Tear down ALL live windows (idempotent). The legacy no-arg entry point: in a
+ * single-window app this is "destroy the window"; with multiple windows it tears
+ * them all down. Per-window teardown is ruxen_canvas_window_destroy_for. */
+int64_t ruxen_canvas_window_destroy(void) {
+    for (int i = 0; i < RX_MAX_WINDOWS; i++) rx_win_teardown(&s_wins[i]);
     return RXC_OK;
 }
 
-/* Called by skia_shim.c's host_drop: a host being freed while it owns the
- * window must take the window down with it, or present/pump would read
- * freed memory through the stale owner pointer. */
+/* Tear down ONLY the window owned by `self` (idempotent). This is what
+ * Window#hide routes through, so hiding one window leaves the others up. */
+int64_t ruxen_canvas_window_destroy_for(int64_t self) {
+    rx_win_teardown(rx_win_for((void *)self));
+    return RXC_OK;
+}
+
+/* Called by skia_shim.c's host_drop: a host being freed while it owns a window
+ * must take THAT window down with it, or present/pump would read freed memory
+ * through the stale owner pointer. Only this host's slot is torn down. */
 void ruxen_canvas_window_note_host_dropped(int64_t self) {
-    if (s_owner == (void *)self) {
-        ruxen_canvas_window_destroy();
-    }
+    rx_win_teardown(rx_win_for((void *)self));
 }

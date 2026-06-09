@@ -107,8 +107,21 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       when absent); a long unbreakable word renders without looping. Pixel-
       verified in `tests/canvas_paragraph.rx`. **Scope: Latin word-wrap**; proper
       shaping (bidi/complex scripts) is the HarfBuzz/ICU follow-up below.
-- [ ] **Multi-window** — one window per process today; lift to N windows for
-      real apps (engine-level, not blocking the widget library).
+- [x] **Multi-window** — N independent on-screen windows per process
+      (`docs/MULTIWINDOW.md`). The single-window globals in `runtime/sdl_window.c`
+      became a fixed-size table of `RxWin` slots keyed by the owning `RxHost`; each
+      `ruxen_canvas_window_*` entry point resolves its slot by `self`, so a
+      single-window app touches one slot and is byte-for-byte backward compatible.
+      SDL's one process-wide event queue is demuxed per `windowID` in the pump, so
+      each window's input lands only in its own ring. New per-window teardown
+      (`ruxen_canvas_window_destroy_for`, behind `Window#hide`). Headless pin tests
+      (`tests/multiwindow.rx`: independent canvases + event rings, interleaved FIFO,
+      deterministic N-window teardown); live two-window present + demux proven on a
+      real display by `examples/multiwindow_verify.c` (`PASS`), not harness-
+      verifiable (forked/headless harness). **Deferred:** concurrent live GL/Metal
+      multi-window is architected (each slot carries its own GL/Metal state) but
+      pixel-verified only for the raster path here; the GL proc-loader stays a
+      process-global current-context seam (`Q-candidate`, below).
 
 ### Needs an architecture decision (design doc first, then implement)
 
