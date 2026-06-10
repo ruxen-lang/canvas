@@ -15,11 +15,11 @@ class Canvas
   ## Create an offscreen canvas with the given pixel size.
   def self.create(width: Int, height: Int) -> Result[Canvas, String]
     if !Rxc.valid_dimensions(width, height)
-      return Err(String.from("canvas: invalid canvas size #{width}x#{height}"))
+      return Err("canvas: invalid canvas size #{width}x#{height}")
     end
     let raw = RawHost.new(width, height)
     if raw.is_null
-      return Err(String.from("canvas: framebuffer allocation failed (#{width}x#{height})"))
+      return Err("canvas: framebuffer allocation failed (#{width}x#{height})")
     end
     Ok(Canvas.new(raw))
   end
@@ -49,6 +49,24 @@ class Canvas
   ## Present the frame to the surface.
   def var end_frame -> Result[nil, String]
     self.status_to_result(self.raw.end_frame_raw, "end_frame")
+  end
+
+  ## Bracket a whole frame around a drawing block: `begin_frame`, run the block
+  ## with a `&var Canvas`, then `end_frame` — the four-call paint dance collapsed
+  ## to one. The block draws on the borrowed canvas; any error from `begin_frame`
+  ## / `end_frame` short-circuits to `Err` (the block does not run if the frame
+  ## could not be opened). This is the OFFSCREEN bracket (no `present`); use
+  ## `Window#frame` for an on-screen window, which also presents.
+  ##
+  ## A block is REQUIRED: a blockless call is `Err("frame requires a block")`,
+  ## never a silent empty frame.
+  def var frame(&block: Fn[(&var Canvas) -> nil]) -> Result[nil, String]
+    if !block_defined?
+      return Err("canvas: frame requires a block")
+    end
+    self.begin_frame()?
+    yield(&var *self)
+    self.end_frame()
   end
 
   ## Push the current transform + clip onto the state stack; returns a save
@@ -555,6 +573,14 @@ class Canvas
     self.raw.window_show(&title, scale)
   end
 
+  ## `fill_rect` is the Ruby/Skia-idiomatic synonym for `draw_rect` — this draw
+  ## *fills* the rect (source-over). Both names resolve to the one method body.
+  alias fill_rect draw_rect
+
+  ## `line_height` is the standard typographic term for the font's line height —
+  ## a synonym for `text_height`. Both names resolve to the one method body.
+  alias line_height text_height
+
   private
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
@@ -563,15 +589,15 @@ class Canvas
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_no_frame(code)
-      Err(String.from("canvas: #{what} called outside begin_frame/end_frame"))
+      Err("canvas: #{what} called outside begin_frame/end_frame")
     elsif Rxc.is_in_frame(code)
-      Err(String.from("canvas: #{what} called while a frame is already open"))
+      Err("canvas: #{what} called while a frame is already open")
     elsif Rxc.is_bad_args(code)
-      Err(String.from("canvas: #{what} failed: invalid arguments"))
+      Err("canvas: #{what} failed: invalid arguments")
     elsif Rxc.is_no_skia(code)
-      Err(String.from("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
+      Err("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)")
     else
-      Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+      Err("canvas: #{what} failed with unknown status #{code}")
     end
   end
 
@@ -583,7 +609,7 @@ class Canvas
       Ok(code)
     else
       match self.status_to_result(0 - code, what)
-        Ok(_)  -> Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+        Ok(_)  -> Err("canvas: #{what} failed with unknown status #{code}")
         Err(e) -> Err(e)
       end
     end

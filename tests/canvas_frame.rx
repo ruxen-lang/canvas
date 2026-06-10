@@ -151,3 +151,99 @@ Tester.describe("Canvas.clear") do |t: &var Tester|
     t.expect(c.read_pixel(1, 1)).to_eq(black.to_argb as Int)
   end
 end
+
+# Pin tests for the resource-bracket block API (ruxen Ruby-block adoption):
+# Canvas#frame brackets begin_frame -> yield(&var Canvas) -> end_frame.
+Tester.describe("Canvas#frame block bracket") do |t: &var Tester|
+  t.it("runs the block exactly once and the draw lands") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    var runs = 0
+    let r = c.frame do |cv: &var Canvas|
+      runs += 1
+      match cv.clear(Color.rgb(0u8, 0u8, 255u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear inside frame failed")
+      end
+    end
+    match r
+      Ok(_)  -> nil
+      Err(_) -> panic!("frame returned Err")
+    end
+    t.expect(runs).to_eq(1)
+    let blue: Color = Color.rgb(0u8, 0u8, 255u8)
+    t.expect(c.read_pixel(0, 0)).to_eq(blue.to_argb as Int)
+  end
+
+  t.it("a blockless call is an explicit Err, never a silent empty frame") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    var was_err = false
+    # NOTE the parens: `c.frame()` (paren-less `c.frame` hits a ruxen Tier-1
+    # MIR gap for an optional-block method — see ruby-block-semantics ADR).
+    match c.frame()
+      Ok(_)  -> was_err = false
+      Err(_) -> was_err = true
+    end
+    t.expect(was_err).to_eq(true)
+  end
+
+  t.it("a begin_frame failure short-circuits to Err and the block never runs") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # Open a frame manually so frame's own begin_frame fails ("already open").
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("manual begin_frame failed")
+    end
+    var was_err = false
+    let r = c.frame do |cv: &var Canvas|
+      # If this ran, the clear would change pixel (0,0); it must not run.
+      match cv.clear(Color.rgb(9u8, 9u8, 9u8))
+        Ok(_)  -> nil
+        Err(_) -> nil
+      end
+    end
+    match r
+      Ok(_)  -> was_err = false
+      Err(_) -> was_err = true
+    end
+    t.expect(was_err).to_eq(true)
+    t.expect(c.read_pixel(0, 0)).to_eq(0)
+  end
+
+  t.it("the bracket reopens cleanly across consecutive frames") do
+    var c = match Canvas.create(2, 2)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let r1 = c.frame do |cv: &var Canvas|
+      match cv.clear(Color.rgb(255u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+    end
+    match r1
+      Ok(_)  -> nil
+      Err(_) -> panic!("first frame failed")
+    end
+    let r2 = c.frame do |cv: &var Canvas|
+      match cv.clear(Color.rgb(0u8, 255u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+    end
+    match r2
+      Ok(_)  -> nil
+      Err(_) -> panic!("second frame failed")
+    end
+    let green: Color = Color.rgb(0u8, 255u8, 0u8)
+    t.expect(c.read_pixel(0, 0)).to_eq(green.to_argb as Int)
+  end
+end

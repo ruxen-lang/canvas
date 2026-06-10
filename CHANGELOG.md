@@ -6,7 +6,43 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **`Window#frame` and `Canvas#frame` — the resource-bracket block API**
+  (adopts ruxen's new Ruby-block feature, `docs/decisions/ruby-block-semantics.md`).
+  `window.frame do |c: &var Canvas| … end` brackets `begin_frame` → run the block
+  on the borrowed canvas → `end_frame` → `present` (present only when the window
+  is on screen, so headless windows pin fully in the forked harness). The
+  four-call paint dance every render loop did by hand collapses to one block.
+  `Canvas#frame` is the offscreen counterpart (no present). A block is REQUIRED:
+  a blockless call returns `Err("canvas: frame requires a block")` (guarded via
+  `block_defined?`), never a silent empty frame; a `begin_frame`/`end_frame`/
+  `present` error short-circuits to `Err` and a failed `begin_frame` means the
+  block never runs. Pins: `tests/canvas_frame.rx` (runs-once, blockless Err,
+  begin-failure short-circuit, reopen) and `tests/window.rx` (headless bracket +
+  blockless Err). `examples/counter.rx` is converted to the new form.
+  - **Known ruxen Tier-1 gap surfaced:** a paren-LESS blockless call to an
+    optional-block method (`w.frame`) emits one too few MIR args and crashes the
+    verifier; the blockless path is reached via `w.frame()` (parens). This is the
+    documented limitation in the ruby-block ADR, not a canvas bug.
+- **`alias` adoption in the public API** (ruxen's new `alias new old` keyword,
+  `docs/decisions/alias-keyword.md`) — three genuine same-signature method
+  synonyms, each pinned by calling both names: `Rect#overlaps` → `intersects`,
+  `Canvas#fill_rect` → `draw_rect` (this draw fills), `Canvas#line_height` →
+  `text_height`. Each is a pure resolver synonym (one method body, zero extra
+  codegen). Field targets (`alias w width`) and `?`-suffixed alias names were
+  rejected — `alias` can only target a method (E1120), and a `?`-named alias
+  misparses at a paren-less call site; operator aliases are staged upstream
+  (E1123).
+
 ### Changed
+- **Bare string literals replace `String.from("…")` across `src/`, `tests/`, and
+  `examples/`.** The installed toolchain coerces a bare `"…"` literal (including
+  interpolated `"… #{x} …"`) to `String` in every position — params, fields,
+  static-method args (`Window.open("Settings", …)`), `Err("…")` into
+  `Result[_, String]`, and locals — so `String.from("literal")` is now vestigial.
+  ~170 literal sites were rewritten; the ~24 `String.from(var)` sites with a
+  non-literal argument are deliberately left as-is (a coercion only applies to a
+  literal). Suite green before and after the sweep.
 - **`Event` coordinates are `Float32` (sub-pixel) — the `Int` workaround is
   reverted.** `PointerMove`/`PointerDown`/`PointerUp`/`Resize`/`Scroll` payloads
   carry `Float32` logical pixels; `KeyDown`/`TextInput` stay `Int`

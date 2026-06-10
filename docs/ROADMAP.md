@@ -81,6 +81,19 @@ Audited 2026-06-08 against `src/**`, `runtime/**`, and CHANGELOG `[Unreleased]`.
 Ordered by what unblocks `quiver`'s widget library soonest. `→ ruxen #X` marks a
 cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
 
+### Public-API ergonomics (ruxen language-feature adoption)
+
+- [x] **`Window#frame` / `Canvas#frame` — resource-bracket block API** (adopts
+      ruxen Ruby-blocks). `window.frame do |c: &var Canvas| … end` brackets
+      begin → draw → end → present; headless windows skip present so the harness
+      pins it. Blockless → explicit `Err` (never a silent frame). `examples/
+      counter.rx` converted. Pins in `tests/canvas_frame.rx` + `tests/window.rx`.
+- [x] **`alias` adoption** — three genuine method synonyms (`Rect#overlaps`,
+      `Canvas#fill_rect`, `Canvas#line_height`), each a pure resolver synonym,
+      both-name pinned. Field/`?`-name/operator alias forms are out (E1120/E1123).
+- [x] **Bare string literals replace `String.from("…")`** across src/tests/
+      examples (literal args only; `String.from(var)` left intact).
+
 ### Unblocked now (current language is sufficient — additive FFI, 4-step discipline)
 
 - [x] **`draw_path` — arbitrary Skia paths** (`sk_path_*`: moveTo/lineTo/quadTo/

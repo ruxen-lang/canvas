@@ -24,7 +24,7 @@ class Window
   ## `present` blits to. Tests and CI never call `show`.
   def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
     if !Rxc.valid_dimensions(width, height)
-      return Err(String.from("canvas: invalid window size #{width}x#{height}"))
+      return Err("canvas: invalid window size #{width}x#{height}")
     end
     let canvas = Canvas.create(width, height)?
     Ok(Window.new(canvas, title, width, height, false))
@@ -42,13 +42,13 @@ class Window
     if self.windowed
       return Ok(nil)
     end
-    let t = String.from("#{self.title}")
+    let t = "#{self.title}"
     let code = self.canvas.show_window(t)
     if code == 0
       self.windowed = true
       Ok(nil)
     else
-      Err(String.from("canvas: show failed with status #{code}"))
+      Err("canvas: show failed with status #{code}")
     end
   end
 
@@ -101,14 +101,14 @@ class Window
     end
     # interpolation copy: `self.title.clone` mis-reads the field through
     # self (compiler bug family); building a fresh String works
-    let t = String.from("#{self.title}")
+    let t = "#{self.title}"
     let code = self.canvas.show_window_scaled(t, scale)
     if code == 0
       self.windowed = true
       Ok(nil)
     else
       # 6 = SDL unavailable / no display, 1 = bad args (see sdl_window.c)
-      Err(String.from("canvas: show failed with status #{code}"))
+      Err("canvas: show failed with status #{code}")
     end
   end
 
@@ -127,8 +127,37 @@ class Window
     if code == 0
       Ok(nil)
     else
-      Err(String.from("canvas: present failed with status #{code}"))
+      Err("canvas: present failed with status #{code}")
     end
+  end
+
+  ## Render one full frame: `begin_frame`, run the block on this window's
+  ## `&var Canvas`, `end_frame`, then `present` (only when the window is on
+  ## screen — headless windows skip the present, since drawing + readback work
+  ## without an OS window). The four-call paint dance every render loop does
+  ## today collapses to:
+  ##
+  ##   window.frame do |c: &var Canvas|
+  ##     match c.clear(bg) ... end
+  ##     match c.draw_rect(r, fg) ... end
+  ##   end
+  ##
+  ## The block draws on the borrowed canvas. Any error short-circuits to `Err`
+  ## with the failing stage's message: a failed `begin_frame` means the block
+  ## never runs; a failed `end_frame` or `present` propagates after it. A block
+  ## is REQUIRED — a blockless call is `Err("frame requires a block")`, never a
+  ## silent empty frame.
+  def var frame(&block: Fn[(&var Canvas) -> nil]) -> Result[nil, String]
+    if !block_defined?
+      return Err("canvas: frame requires a block")
+    end
+    self.canvas.begin_frame()?
+    yield(&var self.canvas)
+    self.canvas.end_frame()?
+    if self.windowed
+      self.present()?
+    end
+    Ok(nil)
   end
 
   ## Drain pending OS input into the event queue without popping any;
@@ -206,9 +235,9 @@ class Window
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_queue_full(code)
-      Err(String.from("canvas: push_event failed: event queue is full"))
+      Err("canvas: push_event failed: event queue is full")
     else
-      Err(String.from("canvas: push_event failed: invalid arguments"))
+      Err("canvas: push_event failed: invalid arguments")
     end
   end
 end
