@@ -93,14 +93,14 @@ Tester.describe("Canvas.measure_text_shaped kerning + ligatures") do |t: &var Te
       # applies GPOS negative kerning, so it is strictly NARROWER than the sum of
       # the two glyphs shaped alone (no pair => no kerning). A naive per-glyph
       # layout (a stub) would give exactly the sum.
-      let av = c.measure_text_shaped("AV", 24.0f32, String.from(arial), 0)
-      let a = c.measure_text_shaped("A", 24.0f32, String.from(arial), 0)
-      let v = c.measure_text_shaped("V", 24.0f32, String.from(arial), 0)
+      let av = c.measure_text_shaped("AV", 24.0f32, arial.clone, 0)
+      let a = c.measure_text_shaped("A", 24.0f32, arial.clone, 0)
+      let v = c.measure_text_shaped("V", 24.0f32, arial.clone, 0)
       t.expect(av > 0).to_eq(true)
       t.expect(a > 0 && v > 0).to_eq(true)
       t.expect(av < a + v).to_eq(true)   # kerning applied: AV tighter than A+V
     else
-      let z = c.measure_text_shaped("AV", 24.0f32, String.from(arial), 0)
+      let z = c.measure_text_shaped("AV", 24.0f32, arial.clone, 0)
       t.expect(z).to_eq(0)
     end
   end
@@ -115,12 +115,12 @@ Tester.describe("Canvas.measure_text_shaped kerning + ligatures") do |t: &var Te
     if on
       # Arial maps "ffi" to a single ffi ligature glyph, narrower than 3 'f'
       # advances — a ligature can only happen via shaping, never naive placement.
-      let ffi = c.measure_text_shaped("ffi", 24.0f32, String.from(arial), 0)
-      let f = c.measure_text_shaped("f", 24.0f32, String.from(arial), 0)
+      let ffi = c.measure_text_shaped("ffi", 24.0f32, arial.clone, 0)
+      let f = c.measure_text_shaped("f", 24.0f32, arial.clone, 0)
       t.expect(ffi > 0).to_eq(true)
       t.expect(ffi < f * 3).to_eq(true)   # ligature: ffi tighter than f+f+f
     else
-      let z = c.measure_text_shaped("ffi", 24.0f32, String.from(arial), 0)
+      let z = c.measure_text_shaped("ffi", 24.0f32, arial.clone, 0)
       t.expect(z).to_eq(0)
     end
   end

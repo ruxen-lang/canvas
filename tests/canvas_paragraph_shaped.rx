@@ -26,8 +26,8 @@ Tester.describe("Canvas.measure_paragraph_shaped uses shaped line widths") do |t
       # kerning/ligatures) these would diverge; that they agree (±1px rounding)
       # proves the wrap used SHAPED measurement.
       let txt = "Affluent AV Waffle"
-      let w_para = c.measure_paragraph_shaped_width(String.from(txt), 1000.0f32, 24.0f32, String.from(arial), 0)
-      let w_run = c.measure_text_shaped(String.from(txt), 24.0f32, String.from(arial), 0)
+      let w_para = c.measure_paragraph_shaped_width(txt.clone, 1000.0f32, 24.0f32, arial.clone, 0)
+      let w_run = c.measure_text_shaped(txt.clone, 24.0f32, arial.clone, 0)
       t.expect(w_para > 0).to_eq(true)
       t.expect(w_run > 0).to_eq(true)
       let diff = if w_para > w_run
@@ -37,7 +37,7 @@ Tester.describe("Canvas.measure_paragraph_shaped uses shaped line widths") do |t
       end
       t.expect(diff <= 2).to_eq(true)
     else
-      let z = c.measure_paragraph_shaped("hi", 100.0f32, 24.0f32, String.from(arial), 0)
+      let z = c.measure_paragraph_shaped("hi", 100.0f32, 24.0f32, arial.clone, 0)
       t.expect(z).to_eq(0)
     end
   end
@@ -55,9 +55,9 @@ Tester.describe("Canvas.measure_paragraph_shaped uses shaped line widths") do |t
       # a naive per-char layout. The shaped paragraph line of "ffi" must be
       # strictly NARROWER (Arial forms the ffi ligature) — proving wrapping uses
       # real shaped widths, not a naive sum.
-      let line = c.measure_paragraph_shaped_width("ffi", 1000.0f32, 24.0f32, String.from(arial), 0)
-      let f = c.measure_text_shaped("f", 24.0f32, String.from(arial), 0)
-      let i = c.measure_text_shaped("i", 24.0f32, String.from(arial), 0)
+      let line = c.measure_paragraph_shaped_width("ffi", 1000.0f32, 24.0f32, arial.clone, 0)
+      let f = c.measure_text_shaped("f", 24.0f32, arial.clone, 0)
+      let i = c.measure_text_shaped("i", 24.0f32, arial.clone, 0)
       let naive = f + f + i
       t.expect(line > 0).to_eq(true)
       t.expect(naive > 0).to_eq(true)
@@ -76,8 +76,8 @@ Tester.describe("Canvas.measure_paragraph_shaped uses shaped line widths") do |t
     let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
     if on
       let txt = "the quick brown fox jumps over the lazy dog"
-      let wide = c.measure_paragraph_shaped(String.from(txt), 1000.0f32, 20.0f32, String.from(arial), 0)
-      let narrow = c.measure_paragraph_shaped(String.from(txt), 80.0f32, 20.0f32, String.from(arial), 0)
+      let wide = c.measure_paragraph_shaped(txt.clone, 1000.0f32, 20.0f32, arial.clone, 0)
+      let narrow = c.measure_paragraph_shaped(txt.clone, 80.0f32, 20.0f32, arial.clone, 0)
       t.expect(wide > 0).to_eq(true)
       t.expect(narrow > wide).to_eq(true)   # more lines => taller
     else
@@ -104,7 +104,7 @@ Tester.describe("Canvas.draw_paragraph_shaped renders shaped wrapped lines") do 
     end
     let _ = c.clear(black)
     let txt = "Affluent waffle Affirmative Avenue affix Wave"
-    let res = c.draw_paragraph_shaped(String.from(txt), 4.0f32, 18.0f32, 110.0f32, 18.0f32, String.from(arial), 0, 0, white)
+    let res = c.draw_paragraph_shaped(txt.clone, 4.0f32, 18.0f32, 110.0f32, 18.0f32, arial.clone, 0, 0, white)
     let _2 = c.end_frame
 
     var rows = 0
@@ -162,15 +162,15 @@ Tester.describe("Canvas.draw_paragraph_shaped renders shaped wrapped lines") do 
 
     let _a = cl.begin_frame
     let _b = cl.clear(black)
-    let _c = cl.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 0, 0, white)
+    let _c = cl.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, arial.clone, 0, 0, white)
     let _d = cl.end_frame
     let _e = cc.begin_frame
     let _f = cc.clear(black)
-    let _g = cc.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 1, 0, white)
+    let _g = cc.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, arial.clone, 1, 0, white)
     let _h = cc.end_frame
     let _i = cr.begin_frame
     let _j = cr.clear(black)
-    let _k = cr.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, String.from(arial), 2, 0, white)
+    let _k = cr.draw_paragraph_shaped("AVA", 0.0f32, 20.0f32, 160.0f32, 18.0f32, arial.clone, 2, 0, white)
     let _l = cr.end_frame
 
     if on

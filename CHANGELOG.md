@@ -40,9 +40,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interpolated `"… #{x} …"`) to `String` in every position — params, fields,
   static-method args (`Window.open("Settings", …)`), `Err("…")` into
   `Result[_, String]`, and locals — so `String.from("literal")` is now vestigial.
-  ~170 literal sites were rewritten; the ~24 `String.from(var)` sites with a
-  non-literal argument are deliberately left as-is (a coercion only applies to a
-  literal). Suite green before and after the sweep.
+  ~170 literal sites were rewritten. The remaining 19 `String.from(var)` sites
+  (consuming reuses of `let`-bound owned Strings, in `tests/canvas_shaping.rx` +
+  `tests/canvas_paragraph_shaped.rx`) are now `var.clone` — post-Q38 a `let x = "…"`
+  binds an OWNED String and a consuming call reuses it via `x.clone`; no
+  `String.from` survives anywhere in `src/`, `tests/`, or `examples/`. Suite green
+  before and after the sweep.
 - **`Event` coordinates are `Float32` (sub-pixel) — the `Int` workaround is
   reverted.** `PointerMove`/`PointerDown`/`PointerUp`/`Resize`/`Scroll` payloads
   carry `Float32` logical pixels; `KeyDown`/`TextInput` stay `Int`
