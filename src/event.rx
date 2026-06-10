@@ -2,27 +2,30 @@
 ##
 ## L1 exposes a stream of these upward; L2 dispatches them to widget handlers.
 ##
-## Pointer coordinates are whole logical pixels for the first vertical
-## slice (TODO: return to Float32 payloads once enum float payloads
-## compile correctly); the C-side event payloads are already doubles, so
-## the FFI surface won't change.
+## Pointer/scroll/resize coordinates are `Float32` logical pixels: the C-side
+## event payloads are doubles, and the engine maps window points → design
+## coordinates with a fractional show factor, so sub-pixel precision is real.
+## (Restored from the `Int` first-slice workaround once ruxen Q28/Q31 — Float32
+## enum-payload codegen + repeated float-payload construction — were fixed.)
+## `KeyDown`/`TextInput` stay `Int`: a platform keycode / Unicode codepoint is
+## an integer and can exceed Float32's exact-integer range.
 enum Event
   ## The pointer moved to (x, y) in logical pixels.
-  PointerMove(Int, Int)
+  PointerMove(Float32, Float32)
   ## A pointer button was pressed at (x, y).
-  PointerDown(Int, Int)
+  PointerDown(Float32, Float32)
   ## A pointer button was released at (x, y).
-  PointerUp(Int, Int)
+  PointerUp(Float32, Float32)
   ## A CONTROL key was pressed (platform keycode): editing/navigation only —
   ## Backspace (8), Tab (9), Enter (13), Esc (27), Delete (127), and the arrows /
   ## Home / End. Printable characters do NOT come through here; they arrive as
   ## `TextInput`. Auto-repeat is filtered (a held key fires once).
   KeyDown(Int)
   ## The window was resized to (width, height) in DESIGN coordinates.
-  Resize(Int, Int)
+  Resize(Float32, Float32)
   ## The mouse wheel scrolled by (dx, dy) in wheel "clicks" (+y = up / away from
   ## the user, +x = right). L2 routes this to scroll the hovered widget.
-  Scroll(Int, Int)
+  Scroll(Float32, Float32)
   ## A printable character was typed — the Unicode codepoint (layout/shift-correct,
   ## from the OS text-input path). This is the ONLY event that inserts text; held
   ## keys do NOT auto-repeat through it. ASCII letters are 65–90 / 97–122, digits

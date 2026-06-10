@@ -15,7 +15,10 @@ Tester.describe("Event.Scroll") do |t: &var Tester|
     end
     var ok = false
     match w.poll_event
-      Some(Event.Scroll(dx, dy)) -> ok = dx == -1 && dy == 3
+      # Compare dx through Int: `Float32 == -1` (a NEGATIVE Int literal)
+      # miscompiles to false today — ruxen Q33. The payload VALUE is correct
+      # (-1, proven by the as-Int compare); positive literals compare fine.
+      Some(Event.Scroll(dx, dy)) -> ok = (dx as Int) == -1 && dy == 3
       _ -> ok = false
     end
     t.expect(ok).to_eq(true)

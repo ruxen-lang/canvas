@@ -45,7 +45,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
       Err(_) -> panic!("push failed")
     end
     let got = match w.poll_event
-      Some(Event.PointerDown(x, y)) -> x * 100 + y
+      Some(Event.PointerDown(x, y)) -> (x as Int) * 100 + (y as Int)
       Some(_) -> -1
       nil     -> -2
     end

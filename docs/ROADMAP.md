@@ -200,11 +200,23 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
 - [ ] **Accessibility** — platform a11y trees.
 - [ ] **Platform matrix** — Windows → Android/iOS → web (WASM + canvas).
 
-### Compiler-imposed deviations to revert (blocked on ruxen)
+### Compiler-imposed deviations to revert (blocked on ruxen) — ALL REVERTED ✅
 
-- [ ] `Event` pointer coords are `Int` logical pixels — enum **float payloads
-      miscompile**; the C ABI already carries doubles. Revert to float once
-      fixed. **→ ruxen** (file a `Q##` if not already tracked).
-- [ ] `measure_text` forwards a **char count**, not the string, over the FFI —
-      a borrowed `&String` into an FFI call passes the wrong pointer. Revert to
-      real advance width once fixed. **→ ruxen.**
+- [x] **`Event` coords are `Float32` again** (2026-06-09). The `Int`-logical-pixel
+      workaround was reverted once ruxen **Q28** (f32 field/payload width-blind
+      store) and **Q31** (enum under-allocation crashing repeated float-payload
+      construction) were fixed and verified on the installed toolchain. Pointer /
+      Scroll / Resize payloads are `Float32`; decode reads the C double accessors
+      (`event_a`/`event_b`, newly declared) and `push_event` routes coords through
+      the double `ruxen_canvas_push_event`; `KeyDown`/`TextInput` stay `Int`
+      (keycode/codepoint). Sub-pixel round-trip pinned in
+      `tests/subpixel_events.rx`; suite 143 green; the settings example runs a
+      live windowed loop on the new decode. One residual ruxen quirk found while
+      reverting — `Float32 == <negative Int literal>` miscompares (**Q33**, the
+      payload value itself is correct) — worked around in one test with an
+      as-Int compare.
+- [x] **`measure_text` real `&String` advance width** — already the live path
+      (ruxen **Q29** audit: borrowed `&String` over FFI was never broken; the
+      char-count story described the legacy fallback). The dead
+      `measure_text_n_raw` binding had zero callers and its Ruxen-side
+      declaration is now deleted.

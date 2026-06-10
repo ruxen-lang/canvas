@@ -6,6 +6,28 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+- **`Event` coordinates are `Float32` (sub-pixel) — the `Int` workaround is
+  reverted.** `PointerMove`/`PointerDown`/`PointerUp`/`Resize`/`Scroll` payloads
+  carry `Float32` logical pixels; `KeyDown`/`TextInput` stay `Int`
+  (keycode/codepoint, read via the Int accessor so large keycodes never round
+  through f32). Unblocked by ruxen Q28 (f32 field-store width fix) + Q31 (enum
+  slot-rounded allocation — repeated float-payload construction no longer
+  corrupts the heap), both verified on the installed toolchain. Decode now reads
+  the C double accessors `ruxen_canvas_event_a`/`_b` (newly declared in
+  `raw_host.rx`) and `push_event` routes coordinate events through the double
+  `ruxen_canvas_push_event` (declared as `push_event_d_raw`); the C shim is
+  unchanged (it always carried doubles). Sub-pixel precision is pinned by
+  `tests/subpixel_events.rx` (2.5/3.25 round-trip exact); Int literals still
+  construct/compare via coercion so existing call sites kept working. Known
+  ruxen quirk found while reverting: `Float32 == <negative Int literal>`
+  miscompares (Q33; the value is correct) — one test compares through `as Int`.
+
+### Removed
+- Dead `measure_text_n_raw` declaration (the legacy char-count fallback): zero
+  callers since `measure_text` switched to the real borrowed-`&String` path
+  (confirmed sound by the ruxen Q29 audit).
+
 ### Added
 - **Multi-window support — N independent on-screen windows per process**
   (`docs/MULTIWINDOW.md`). `Window.open` can now create and track multiple live

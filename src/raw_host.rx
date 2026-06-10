@@ -48,7 +48,6 @@ class RawHost
     def draw_paragraph_shaped_raw as "ruxen_canvas_draw_paragraph_shaped"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, font_path: &String, align: Int, direction: Int, argb: Int) -> Int
     def measure_paragraph_shaped_raw as "ruxen_canvas_measure_paragraph_shaped"(self, text: &String, max_width: Float, size: Float, font_path: &String, direction: Int) -> Int
     def shaping_available_raw as "ruxen_canvas_shaping_available"(self) -> Bool
-    def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
     def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
@@ -65,9 +64,12 @@ class RawHost
     def set_design_size_raw as "ruxen_canvas_host_set_design_size"(self, design_w: Int, design_h: Int) -> Int
     def content_scale_raw as "ruxen_canvas_content_scale"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
+    def push_event_d_raw as "ruxen_canvas_push_event"(self, kind: Int, a: Float, b: Float) -> Int
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
+    def event_a as "ruxen_canvas_event_a"(self) -> Float
+    def event_b as "ruxen_canvas_event_b"(self) -> Float
     def sleep_ms_raw as "ruxen_canvas_sleep_ms"(self, ms: Int) -> nil
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end

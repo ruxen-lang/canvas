@@ -165,22 +165,26 @@ class Window
     if kind < 0
       return nil
     end
-    let ia = self.canvas.raw.event_ai
-    let ib = self.canvas.raw.event_bi
+    # Coordinate payloads come back as doubles (sub-pixel); KeyDown/TextInput
+    # carry an integer keycode/codepoint, read from the Int accessor so a large
+    # keycode is never rounded through Float32.
+    let fa = self.canvas.raw.event_a as Float32
+    let fb = self.canvas.raw.event_b as Float32
+    let ki = self.canvas.raw.event_ai
     let ev: Event = if kind == 0
-      Event.PointerMove(ia, ib)
+      Event.PointerMove(fa, fb)
     elsif kind == 1
-      Event.PointerDown(ia, ib)
+      Event.PointerDown(fa, fb)
     elsif kind == 2
-      Event.PointerUp(ia, ib)
+      Event.PointerUp(fa, fb)
     elsif kind == 3
-      Event.KeyDown(ia)
+      Event.KeyDown(ki)
     elsif kind == 4
-      Event.Resize(ia, ib)
+      Event.Resize(fa, fb)
     elsif kind == 6
-      Event.Scroll(ia, ib)
+      Event.Scroll(fa, fb)
     elsif kind == 7
-      Event.TextInput(ia)
+      Event.TextInput(ki)
     else
       Event.CloseRequested
     end
@@ -190,13 +194,13 @@ class Window
   ## (SDL later) and the pin tests use to feed the stream.
   def var push_event(event: Event) -> Result[nil, String]
     let code = match event
-      Event.PointerMove(x, y) -> self.canvas.raw.push_event_i_raw(0, x, y)
-      Event.PointerDown(x, y) -> self.canvas.raw.push_event_i_raw(1, x, y)
-      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_i_raw(2, x, y)
+      Event.PointerMove(x, y) -> self.canvas.raw.push_event_d_raw(0, x as Float, y as Float)
+      Event.PointerDown(x, y) -> self.canvas.raw.push_event_d_raw(1, x as Float, y as Float)
+      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_d_raw(2, x as Float, y as Float)
       Event.KeyDown(k)        -> self.canvas.raw.push_event_i_raw(3, k, 0)
-      Event.Resize(w, h)      -> self.canvas.raw.push_event_i_raw(4, w, h)
+      Event.Resize(w, h)      -> self.canvas.raw.push_event_d_raw(4, w as Float, h as Float)
       Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
-      Event.Scroll(dx, dy)    -> self.canvas.raw.push_event_i_raw(6, dx, dy)
+      Event.Scroll(dx, dy)    -> self.canvas.raw.push_event_d_raw(6, dx as Float, dy as Float)
       Event.TextInput(cp)     -> self.canvas.raw.push_event_i_raw(7, cp, 0)
     end
     if Rxc.is_ok(code)
