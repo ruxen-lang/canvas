@@ -8,7 +8,7 @@ def assert_ok(r: Result[nil, String], what: &str)
 end
 
 def main
-  var w = match Window.open(String.from("Ruxen Canvas Demo"), 320, 240)
+  var w = match Window.open("Ruxen Canvas Demo", 320, 240)
     Ok(v)  -> v
     Err(_) -> panic!("Window.open failed")
   end
@@ -17,7 +17,7 @@ def main
   # scene: dark background, header bar, three swatches, button, text
   assert_ok(w.canvas.clear(Color.new(24u8, 26u8, 33u8, 255u8)), "clear")
   assert_ok(w.canvas.draw_rect(Rect.new(0.0f32, 0.0f32, 320.0f32, 36.0f32), Color.new(54u8, 80u8, 160u8, 255u8)), "header")
-  assert_ok(w.canvas.draw_text(String.from("RUXEN CANVAS  L1 ENGINE"), 12.0f32, 23.0f32, Color.rgb(255u8, 255u8, 255u8)), "title")
+  assert_ok(w.canvas.draw_text("RUXEN CANVAS  L1 ENGINE", 12.0f32, 23.0f32, Color.rgb(255u8, 255u8, 255u8)), "title")
 
   assert_ok(w.canvas.draw_rect(Rect.new(20.0f32, 60.0f32, 80.0f32, 56.0f32), Color.rgb(214u8, 64u8, 69u8)), "red swatch")
   assert_ok(w.canvas.draw_rect(Rect.new(120.0f32, 60.0f32, 80.0f32, 56.0f32), Color.rgb(64u8, 178u8, 98u8)), "green swatch")
@@ -26,8 +26,8 @@ def main
   assert_ok(w.canvas.draw_rect(Rect.new(70.0f32, 84.0f32, 180.0f32, 56.0f32), Color.new(255u8, 255u8, 255u8, 96u8)), "overlay")
 
   assert_ok(w.canvas.draw_rect(Rect.new(110.0f32, 168.0f32, 100.0f32, 30.0f32), Color.rgb(54u8, 80u8, 160u8)), "button")
-  assert_ok(w.canvas.draw_text(String.from("COUNT: 42"), 124.0f32, 188.0f32, Color.rgb(255u8, 255u8, 255u8)), "button label")
-  assert_ok(w.canvas.draw_text(String.from("DRAWN BY THE SOFTWARE BACKEND"), 36.0f32, 220.0f32, Color.rgb(140u8, 146u8, 160u8)), "footer")
+  assert_ok(w.canvas.draw_text("COUNT: 42", 124.0f32, 188.0f32, Color.rgb(255u8, 255u8, 255u8)), "button label")
+  assert_ok(w.canvas.draw_text("DRAWN BY THE SOFTWARE BACKEND", 36.0f32, 220.0f32, Color.rgb(140u8, 146u8, 160u8)), "footer")
   assert_ok(w.canvas.end_frame, "end_frame")
 
   # event stream round-trip, just to show it on stdout
@@ -39,10 +39,10 @@ def main
   end
 
   # dump the framebuffer as ASCII PPM (P3)
-  var out = String.from("P3\n320 240\n255\n")
+  var out = "P3\n320 240\n255\n"
   var y = 0
   while y < 240
-    var row = String.from("")
+    var row = ""
     var x = 0
     while x < 320
       let px = w.canvas.read_pixel(x, y)
@@ -55,7 +55,7 @@ def main
     out += row
     y += 1
   end
-  match write(&String.from("/tmp/canvas_demo/out.ppm"), &out)
+  match write(&"/tmp/canvas_demo/out.ppm", &out)
     Ok(_)  -> puts "wrote /tmp/canvas_demo/out.ppm"
     Err(e) -> puts "write failed: #{e.message}"
   end

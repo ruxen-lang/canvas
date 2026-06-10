@@ -6,7 +6,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("present before show errors (never crashes)") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -18,7 +18,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("pump before show forwards zero events") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -26,7 +26,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("hide is idempotent without a window") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -36,7 +36,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("headless event flow still works alongside the window surface") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end

@@ -101,11 +101,11 @@ Tester.describe("HiDPI content scale fills the backing surface") do |t: &var Tes
 
     let _a = c1.begin_frame
     let _b = c1.clear(Color.rgb(0u8, 0u8, 0u8))
-    let _c = c1.draw_text(String.from("Ag"), 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
+    let _c = c1.draw_text("Ag", 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
     let _d = c1.end_frame
     let _e = c2.begin_frame
     let _f = c2.clear(Color.rgb(0u8, 0u8, 0u8))
-    let _g = c2.draw_text(String.from("Ag"), 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
+    let _g = c2.draw_text("Ag", 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
     let _h = c2.end_frame
 
     let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int

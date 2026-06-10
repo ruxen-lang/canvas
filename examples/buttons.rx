@@ -31,15 +31,15 @@ end
 
 def center_label(c: &var Canvas, x: Float32, y: Float32, w: Float32, h: Float32,
                  label: String, fg: Color)
-  let tw = c.measure_text(String.from("#{label}")) as Float32
+  let tw = c.measure_text("#{label}") as Float32
   let th = c.text_height as Float32
   let tx = x + (w - tw) / 2.0f32
   let ty = y + h / 2.0f32 + th / 3.0f32   # baseline a touch below the vertical centre
-  let _ = c.draw_text(String.from("#{label}"), tx, ty, fg)
+  let _ = c.draw_text("#{label}", tx, ty, fg)
 end
 
 def main
-  var w = match Window.open(String.from("Ruxen Canvas — Buttons"), 420, 300)
+  var w = match Window.open("Ruxen Canvas — Buttons", 420, 300)
     Ok(v)  -> v
     Err(_) -> panic!("Window.open failed")
   end
@@ -56,25 +56,25 @@ def main
   let _ = c.clear(Color.rgb(245u8, 247u8, 250u8))
 
   # title (sized Skia text)
-  let _ = c.draw_text_sized(String.from("Skia buttons & styling"), 24.0f32, 42.0f32, 22.0f32, ink)
+  let _ = c.draw_text_sized("Skia buttons & styling", 24.0f32, 42.0f32, 22.0f32, ink)
   let _ = c.draw_line(24.0f32, 54.0f32, 396.0f32, 54.0f32, 1.0f32, Color.rgb(220u8, 224u8, 230u8))
 
   # primary: shadowed vertical-gradient button + secondary (outlined)
-  gradient_button(&var c, 24.0f32, 74.0f32, 150.0f32, 44.0f32, String.from("Submit"),
+  gradient_button(&var c, 24.0f32, 74.0f32, 150.0f32, 44.0f32, "Submit",
     Color.rgb(96u8, 148u8, 255u8), Color.rgb(40u8, 92u8, 214u8), white, 10.0f32)
-  outline_button(&var c, 190.0f32, 74.0f32, 150.0f32, 44.0f32, String.from("Cancel"), Color.rgb(205u8, 210u8, 218u8), ink, 10.0f32)
+  outline_button(&var c, 190.0f32, 74.0f32, 150.0f32, 44.0f32, "Cancel", Color.rgb(205u8, 210u8, 218u8), ink, 10.0f32)
 
   # pill (per-corner radius = half height) + top-rounded tab (per-corner)
-  filled_button(&var c, 24.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Follow"), pink, white, 20.0f32)
+  filled_button(&var c, 24.0f32, 134.0f32, 150.0f32, 40.0f32, "Follow", pink, white, 20.0f32)
   let _ = c.draw_rrect(Rect.new(190.0f32, 134.0f32, 150.0f32, 40.0f32), 14.0f32, 14.0f32, 0.0f32, 0.0f32, green)
-  center_label(&var c, 190.0f32, 134.0f32, 150.0f32, 40.0f32, String.from("Home tab"), white)
+  center_label(&var c, 190.0f32, 134.0f32, 150.0f32, 40.0f32, "Home tab", white)
 
   # radial-gradient circle (bright centre -> rim) + white ring
   let _ = c.fill_circle_radial(50.0f32, 224.0f32, 24.0f32, Color.rgb(120u8, 200u8, 255u8), Color.rgb(40u8, 92u8, 214u8))
   let _ = c.stroke_circle(50.0f32, 224.0f32, 24.0f32, 3.0f32, Color.rgb(255u8, 255u8, 255u8))
-  let _ = c.draw_text(String.from("radial gradient + ring"), 90.0f32, 230.0f32, muted)
+  let _ = c.draw_text("radial gradient + ring", 90.0f32, 230.0f32, muted)
 
-  let _ = c.draw_text(String.from("gradients · shadows · rounded · per-corner · sized text"), 24.0f32, 280.0f32, muted)
+  let _ = c.draw_text("gradients · shadows · rounded · per-corner · sized text", 24.0f32, 280.0f32, muted)
   let _ = c.end_frame
 
   if c.skia_active?
@@ -84,10 +84,10 @@ def main
   end
 
   # dump framebuffer as ASCII PPM (mkdir /tmp/canvas_buttons first)
-  var out = String.from("P3\n420 300\n255\n")
+  var out = "P3\n420 300\n255\n"
   var y = 0
   while y < 300
-    var row = String.from("")
+    var row = ""
     var x = 0
     while x < 420
       let px = c.read_pixel(x, y)
@@ -100,7 +100,7 @@ def main
     out += row
     y += 1
   end
-  match write(&String.from("/tmp/canvas_buttons/out.ppm"), &out)
+  match write(&"/tmp/canvas_buttons/out.ppm", &out)
     Ok(_)  -> puts "wrote /tmp/canvas_buttons/out.ppm"
     Err(_) -> puts "write failed (does /tmp/canvas_buttons exist?)"
   end

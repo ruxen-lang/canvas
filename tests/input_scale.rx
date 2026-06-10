@@ -13,7 +13,7 @@
 
 Tester.describe("windowed pointer coords map window-points -> design coords") do |t: &var Tester|
   t.it("scale 2: a window point (200,300) maps to design (100,150)") do
-    var w = match Window.open(String.from("input scale"), 320, 360)
+    var w = match Window.open("input scale", 320, 360)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -31,7 +31,7 @@ Tester.describe("windowed pointer coords map window-points -> design coords") do
   end
 
   t.it("scale 1: a window point maps 1:1 (no halving)") do
-    var w = match Window.open(String.from("input scale 1"), 64, 48)
+    var w = match Window.open("input scale 1", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -48,7 +48,7 @@ Tester.describe("windowed pointer coords map window-points -> design coords") do
   end
 
   t.it("scale 3: window point (300,360) -> design (100,120)") do
-    var w = match Window.open(String.from("input scale 3"), 100, 120)
+    var w = match Window.open("input scale 3", 100, 120)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -65,7 +65,7 @@ Tester.describe("windowed pointer coords map window-points -> design coords") do
   end
 
   t.it("top of the UI does NOT register near the bottom (the bug)") do
-    var w = match Window.open(String.from("top click"), 320, 360)
+    var w = match Window.open("top click", 320, 360)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

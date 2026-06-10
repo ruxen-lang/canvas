@@ -31,8 +31,8 @@ Tester.describe("Canvas.draw_paragraph wrapping") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    let para = String.from("the quick brown fox jumps over the lazy dog again and again")
-    let res = c.draw_paragraph(para, 4.0f32, 14.0f32, 90.0f32, 14.0f32, String.from(""), 0, white)
+    let para = "the quick brown fox jumps over the lazy dog again and again"
+    let res = c.draw_paragraph(para, 4.0f32, 14.0f32, 90.0f32, 14.0f32, "", 0, white)
     match c.end_frame
       Ok(_)  -> nil
       Err(_) -> panic!("end_frame failed")
@@ -80,12 +80,12 @@ Tester.describe("Canvas.draw_paragraph wrapping") do |t: &var Tester|
     end
     let active = c.skia_active?
     if active
-      let one = c.measure_paragraph(String.from("hello world"), 190.0f32, 14.0f32, String.from(""))
-      let many = c.measure_paragraph(String.from("hello world"), 30.0f32, 14.0f32, String.from(""))
+      let one = c.measure_paragraph("hello world", 190.0f32, 14.0f32, "")
+      let many = c.measure_paragraph("hello world", 30.0f32, 14.0f32, "")
       t.expect(one > 0).to_eq(true)
       t.expect(many > one).to_eq(true)   # narrower column => more lines => taller
     else
-      let z = c.measure_paragraph(String.from("hello world"), 190.0f32, 14.0f32, String.from(""))
+      let z = c.measure_paragraph("hello world", 190.0f32, 14.0f32, "")
       t.expect(z).to_eq(0)
     end
   end
@@ -112,15 +112,15 @@ Tester.describe("Canvas.draw_paragraph alignment") do |t: &var Tester|
 
     let _a = cl.begin_frame
     let _b = cl.clear(black)
-    let _c = cl.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 0, white)
+    let _c = cl.draw_paragraph("hi", 0.0f32, 20.0f32, 150.0f32, 14.0f32, "", 0, white)
     let _d = cl.end_frame
     let _e = cc.begin_frame
     let _f = cc.clear(black)
-    let _g = cc.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 1, white)
+    let _g = cc.draw_paragraph("hi", 0.0f32, 20.0f32, 150.0f32, 14.0f32, "", 1, white)
     let _h = cc.end_frame
     let _i = cr.begin_frame
     let _j = cr.clear(black)
-    let _k = cr.draw_paragraph(String.from("hi"), 0.0f32, 20.0f32, 150.0f32, 14.0f32, String.from(""), 2, white)
+    let _k = cr.draw_paragraph("hi", 0.0f32, 20.0f32, 150.0f32, 14.0f32, "", 2, white)
     let _l = cr.end_frame
 
     if active
@@ -183,7 +183,7 @@ Tester.describe("Canvas.draw_paragraph degenerate input") do |t: &var Tester|
       Err(_) -> panic!("begin_frame failed")
     end
     let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
-    let res = c.draw_paragraph(String.from("Supercalifragilistic"), 2.0f32, 18.0f32, 20.0f32, 14.0f32, String.from(""), 0, Color.rgb(255u8, 255u8, 255u8))
+    let res = c.draw_paragraph("Supercalifragilistic", 2.0f32, 18.0f32, 20.0f32, 14.0f32, "", 0, Color.rgb(255u8, 255u8, 255u8))
     let _2 = c.end_frame
 
     var rows = 0

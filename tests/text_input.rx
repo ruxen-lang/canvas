@@ -9,11 +9,11 @@
 
 Tester.describe("text input -> Event.TextInput(codepoint)") do |t: &var Tester|
   t.it("typing 'A' yields TextInput(65)") do
-    var w = match Window.open(String.from("text"), 64, 48)
+    var w = match Window.open("text", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    let cp = w.canvas.raw.window_pump_test_text(&String.from("A"))
+    let cp = w.canvas.raw.window_pump_test_text(&"A")
     t.expect(cp).to_eq(65)
     var ok = false
     match w.poll_event
@@ -24,11 +24,11 @@ Tester.describe("text input -> Event.TextInput(codepoint)") do |t: &var Tester|
   end
 
   t.it("typing 'a' yields TextInput(97), not a KeyDown") do
-    var w = match Window.open(String.from("text2"), 64, 48)
+    var w = match Window.open("text2", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    let _ = w.canvas.raw.window_pump_test_text(&String.from("a"))
+    let _ = w.canvas.raw.window_pump_test_text(&"a")
     var got = -1
     match w.poll_event
       Some(Event.TextInput(c)) -> got = c
@@ -39,12 +39,12 @@ Tester.describe("text input -> Event.TextInput(codepoint)") do |t: &var Tester|
   end
 
   t.it("a 2-byte UTF-8 char decodes to its codepoint") do
-    var w = match Window.open(String.from("text3"), 64, 48)
+    var w = match Window.open("text3", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
     # U+00E9 'é' = 0xC3 0xA9 -> codepoint 233
-    let cp = w.canvas.raw.window_pump_test_text(&String.from("é"))
+    let cp = w.canvas.raw.window_pump_test_text(&"é")
     t.expect(cp).to_eq(233)
     var ok = false
     match w.poll_event
@@ -57,7 +57,7 @@ end
 
 Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Tester|
   t.it("a printable keysym ('a' = 97) is DROPPED (TextInput owns it)") do
-    var w = match Window.open(String.from("kd1"), 64, 48)
+    var w = match Window.open("kd1", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -72,7 +72,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
   end
 
   t.it("backspace (keysym 8) -> KeyDown(8)") do
-    var w = match Window.open(String.from("kd2"), 64, 48)
+    var w = match Window.open("kd2", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -87,7 +87,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
   end
 
   t.it("Left arrow (1073741904) -> KeyDown") do
-    var w = match Window.open(String.from("kd3"), 64, 48)
+    var w = match Window.open("kd3", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -102,7 +102,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
   end
 
   t.it("Enter (13) -> KeyDown, but its auto-REPEAT is filtered") do
-    var w = match Window.open(String.from("kd4"), 64, 48)
+    var w = match Window.open("kd4", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

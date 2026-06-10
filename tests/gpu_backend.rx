@@ -103,7 +103,7 @@ Tester.describe("Window.show_gpu — live path") do |t: &var Tester|
     # GL / no Ganesh host show_gpu falls back to the raster show path, which
     # itself either shows a raster window or fails cleanly. Either way the
     # canvas keeps working and the window is taken down at the end.
-    var w = match Window.open(String.from("canvas gpu pin"), 32, 24)
+    var w = match Window.open("canvas gpu pin", 32, 24)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -264,7 +264,7 @@ end
 
 Tester.describe("Window.show_gpu ladder falls back cleanly") do |t: &var Tester|
   t.it("show_gpu picks a backend and present is total; never wrong pixels") do
-    var w = match Window.open(String.from("gpu ladder pin"), 48, 32)
+    var w = match Window.open("gpu ladder pin", 48, 32)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

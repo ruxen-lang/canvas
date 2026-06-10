@@ -3,7 +3,7 @@
 
 Tester.describe("Window events") do |t: &var Tester|
   t.it("polling an empty queue returns nil") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -16,7 +16,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("round-trips PointerMove with coordinates") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -33,7 +33,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("round-trips PointerDown and PointerUp") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -62,7 +62,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("round-trips KeyDown with the keycode") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -79,7 +79,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("round-trips Resize with the new size") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -96,7 +96,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("round-trips CloseRequested") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -113,7 +113,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("delivers events in FIFO order and drains") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -151,7 +151,7 @@ Tester.describe("Window events") do |t: &var Tester|
   end
 
   t.it("a full queue reports an explicit error") do
-    var w = match Window.open(String.from("e"), 8, 8)
+    var w = match Window.open("e", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

@@ -17,8 +17,8 @@ Tester.describe("Canvas.measure_text_font") do |t: &var Tester|
     # "Wiii": a proportional (serif) face packs the narrow i's tighter than a
     # fixed-pitch monospace face, so the two advances differ. Both fontconfig
     # generic aliases always resolve to some installed face on Linux CI.
-    let mono = c.measure_text_font(String.from("Wiii"), 16.0f32, String.from("monospace"))
-    let serif = c.measure_text_font(String.from("Wiii"), 16.0f32, String.from("serif"))
+    let mono = c.measure_text_font("Wiii", 16.0f32, "monospace")
+    let serif = c.measure_text_font("Wiii", 16.0f32, "serif")
     let mono_positive = mono > 0
     let serif_positive = serif > 0
     let differ = mono != serif
@@ -41,8 +41,8 @@ Tester.describe("Canvas.measure_text_font missing family") do |t: &var Tester|
       Err(_) -> panic!("create failed")
     end
     let active = c.skia_active?
-    let bogus = c.measure_text_font(String.from("Hello"), 16.0f32, String.from("ThisFontDoesNotExist12345"))
-    let base = c.measure_text_sized(String.from("Hello"), 16.0f32)
+    let bogus = c.measure_text_font("Hello", 16.0f32, "ThisFontDoesNotExist12345")
+    let base = c.measure_text_sized("Hello", 16.0f32)
     # A family that is not installed must measure exactly like the default
     # typeface — graceful fallback, never a crash or zero/garbage width.
     let matches_default = bogus == base
@@ -61,7 +61,7 @@ Tester.describe("Canvas.text_height_font") do |t: &var Tester|
       Err(_) -> panic!("create failed")
     end
     let active = c.skia_active?
-    let h = c.text_height_font(16.0f32, String.from("serif"))
+    let h = c.text_height_font(16.0f32, "serif")
     t.expect(h > 0).to_eq(true)
     if !active
       # bitmap fallback: the fixed 7px glyph height.
@@ -85,7 +85,7 @@ Tester.describe("Canvas.draw_text_font") do |t: &var Tester|
       Err(_) -> panic!("clear failed")
     end
     let active = c.skia_active?
-    let res = c.draw_text_font(String.from("Ag"), 2.0f32, 18.0f32, 16.0f32, String.from("serif"), Color.rgb(255u8, 255u8, 255u8))
+    let res = c.draw_text_font("Ag", 2.0f32, 18.0f32, 16.0f32, "serif", Color.rgb(255u8, 255u8, 255u8))
     if active
       match res
         Ok(_)  -> nil

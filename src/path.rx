@@ -32,7 +32,7 @@ class Path2D
   def self.create -> Result[Path2D, String]
     let raw = RawPath.alloc_raw
     if raw.is_null
-      return Err(String.from("canvas: Path2D requires the Skia backend (run runtime/fetch_skia.sh)"))
+      return Err("canvas: Path2D requires the Skia backend (run runtime/fetch_skia.sh)")
     end
     Ok(Path2D.new(raw))
   end
@@ -102,11 +102,11 @@ class Path2D
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_no_skia(code)
-      Err(String.from("canvas: Path2D##{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
+      Err("canvas: Path2D##{what} requires the Skia backend (run runtime/fetch_skia.sh)")
     elsif Rxc.is_bad_args(code)
-      Err(String.from("canvas: Path2D##{what} failed: invalid arguments"))
+      Err("canvas: Path2D##{what} failed: invalid arguments")
     else
-      Err(String.from("canvas: Path2D##{what} failed with unknown status #{code}"))
+      Err("canvas: Path2D##{what} failed with unknown status #{code}")
     end
   end
 end

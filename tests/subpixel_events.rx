@@ -6,7 +6,7 @@
 
 Tester.describe("sub-pixel event coordinates") do |t: &var Tester|
   t.it("PointerMove(2.5, 3.25) round-trips exactly through the queue") do
-    var w = match Window.open(String.from("subpx"), 16, 16)
+    var w = match Window.open("subpx", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -23,7 +23,7 @@ Tester.describe("sub-pixel event coordinates") do |t: &var Tester|
   end
 
   t.it("whole-pixel Int literals still construct and compare (coercion intact)") do
-    var w = match Window.open(String.from("subpx2"), 16, 16)
+    var w = match Window.open("subpx2", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

@@ -7,27 +7,27 @@
 # display and is smoke-verified by examples/multiwindow_verify.c.
 Tester.describe("Multi-window") do |t: &var Tester|
   t.it("opens N independent windows, each with its own canvas") do
-    var a = match Window.open(String.from("A"), 32, 24)
+    var a = match Window.open("A", 32, 24)
         Ok(v) -> v
         Err(_) -> panic!("Window.open A failed")
       end
-    var b = match Window.open(String.from("B"), 64, 48)
+    var b = match Window.open("B", 64, 48)
         Ok(v) -> v
         Err(_) -> panic!("Window.open B failed")
       end
-    t.expect(a.title).to_eq(String.from("A"))
-    t.expect(b.title).to_eq(String.from("B"))
+    t.expect(a.title).to_eq("A")
+    t.expect(b.title).to_eq("B")
     t.expect(a.width).to_eq(32)
     t.expect(b.width).to_eq(64)
     t.expect(a.canvas.width).to_eq(32)
     t.expect(b.canvas.width).to_eq(64)
   end
   t.it("each window's canvas renders into its OWN framebuffer") do
-    var a = match Window.open(String.from("A"), 8, 8)
+    var a = match Window.open("A", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open A failed")
       end
-    var b = match Window.open(String.from("B"), 8, 8)
+    var b = match Window.open("B", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open B failed")
       end
@@ -61,11 +61,11 @@ Tester.describe("Multi-window") do |t: &var Tester|
     t.expect(b.canvas.read_pixel(0, 0)).to_eq(blue.to_argb as Int)
   end
   t.it("events are isolated per window (no cross-talk between rings)") do
-    var a = match Window.open(String.from("A"), 8, 8)
+    var a = match Window.open("A", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open A failed")
       end
-    var b = match Window.open(String.from("B"), 8, 8)
+    var b = match Window.open("B", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open B failed")
       end
@@ -87,11 +87,11 @@ Tester.describe("Multi-window") do |t: &var Tester|
     t.expect(a_got).to_eq(7)
   end
   t.it("interleaved pushes keep each window's FIFO order independent") do
-    var a = match Window.open(String.from("A"), 8, 8)
+    var a = match Window.open("A", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open A failed")
       end
-    var b = match Window.open(String.from("B"), 8, 8)
+    var b = match Window.open("B", 8, 8)
         Ok(v) -> v
         Err(_) -> panic!("Window.open B failed")
       end
@@ -139,11 +139,11 @@ Tester.describe("Multi-window") do |t: &var Tester|
   t.it("opening and dropping many windows is deterministic") do
     var i = 0
     while i < 8
-      var w1 = match Window.open(String.from("w1"), 16, 16)
+      var w1 = match Window.open("w1", 16, 16)
           Ok(v) -> v
           Err(_) -> panic!("Window.open w1 failed")
         end
-      var w2 = match Window.open(String.from("w2"), 16, 16)
+      var w2 = match Window.open("w2", 16, 16)
           Ok(v) -> v
           Err(_) -> panic!("Window.open w2 failed")
         end

@@ -5,7 +5,7 @@
 
 Tester.describe("Event.Scroll") do |t: &var Tester|
   t.it("round-trips Scroll(dx, dy) through the queue") do
-    var w = match Window.open(String.from("scroll"), 16, 16)
+    var w = match Window.open("scroll", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -22,7 +22,7 @@ Tester.describe("Event.Scroll") do |t: &var Tester|
   end
 
   t.it("a positive y scroll (wheel up) round-trips") do
-    var w = match Window.open(String.from("scroll2"), 16, 16)
+    var w = match Window.open("scroll2", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -41,7 +41,7 @@ end
 
 Tester.describe("Event.Resize") do |t: &var Tester|
   t.it("round-trips Resize(w, h) through the queue") do
-    var w = match Window.open(String.from("resize"), 32, 24)
+    var w = match Window.open("resize", 32, 24)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end

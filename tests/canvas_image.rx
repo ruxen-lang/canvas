@@ -10,7 +10,7 @@ Tester.describe("Image.load") do |t: &var Tester|
       Err(_) -> panic!("create failed")
     end
     let active = c.skia_active?
-    match Image.load(String.from("tests/fixtures/red.png"))
+    match Image.load("tests/fixtures/red.png")
       Ok(img) ->
         t.expect(img.width).to_eq(4)
         t.expect(img.height).to_eq(4)
@@ -21,7 +21,7 @@ Tester.describe("Image.load") do |t: &var Tester|
 
   t.it("errors on a missing file") do
     var failed = false
-    match Image.load(String.from("tests/fixtures/does_not_exist.png"))
+    match Image.load("tests/fixtures/does_not_exist.png")
       Ok(_)  -> nil
       Err(_) -> failed = true
     end
@@ -45,7 +45,7 @@ Tester.describe("Canvas.draw_image_rect") do |t: &var Tester|
     end
     let active = c.skia_active?
     let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
-    match Image.load(String.from("tests/fixtures/red.png"))
+    match Image.load("tests/fixtures/red.png")
       Ok(img) ->
         match c.draw_image_rect(&img, Rect.new(0.0f32, 0.0f32, 16.0f32, 16.0f32))
           Ok(_)  -> nil
@@ -79,7 +79,7 @@ Tester.describe("Canvas.draw_image") do |t: &var Tester|
     let active = c.skia_active?
     let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
     let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
-    match Image.load(String.from("tests/fixtures/red.png"))
+    match Image.load("tests/fixtures/red.png")
       Ok(img) ->
         match c.draw_image(&img, 4.0f32, 4.0f32)   # 4x4 red at (4,4)..(8,8)
           Ok(_)  -> nil
@@ -115,7 +115,7 @@ Tester.describe("Canvas image scaling uses linear sampling") do |t: &var Tester|
     let active = c.skia_active?
     # twopix.png is 2x1: left red, right blue. Upscaled to 32 wide, linear
     # sampling blends to purple at the centre; nearest would be a hard split.
-    match Image.load(String.from("tests/fixtures/twopix.png"))
+    match Image.load("tests/fixtures/twopix.png")
       Ok(img) ->
         match c.draw_image_rect(&img, Rect.new(0.0f32, 0.0f32, 32.0f32, 4.0f32))
           Ok(_)  -> nil
@@ -153,7 +153,7 @@ Tester.describe("Canvas.draw_image_rect_src") do |t: &var Tester|
     let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
     let blue = Color.rgb(0u8, 0u8, 255u8).to_argb as Int
     # halves.png is 8x8: left 4 cols red, right 4 cols blue
-    match Image.load(String.from("tests/fixtures/halves.png"))
+    match Image.load("tests/fixtures/halves.png")
       Ok(img) ->
         match c.draw_image_rect_src(&img, Rect.new(0.0f32, 0.0f32, 4.0f32, 8.0f32), Rect.new(0.0f32, 0.0f32, 8.0f32, 16.0f32))
           Ok(_)  -> nil
