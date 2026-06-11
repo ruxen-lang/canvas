@@ -850,7 +850,7 @@ class Canvas
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
   ## a descriptive `Err` — a not-yet-valid call is never a silent no-op.
-  def status_to_result(code: Int, what: &str) -> Result[nil, String]
+  def status_to_result(code: Int, what: &String) -> Result[nil, String]
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_no_frame(code)
@@ -869,7 +869,7 @@ class Canvas
   ## Map a `save_layer*` return onto `Result[Int, String]`. The shim returns the
   ## layer's save count (>= 1) on success, or a NEGATIVE `-RXC_ERR_*` on failure
   ## (Skia save counts are always >= 1, so the sign is an unambiguous channel).
-  def layer_result(code: Int, what: &str) -> Result[Int, String]
+  def layer_result(code: Int, what: &String) -> Result[Int, String]
     if code >= 0
       Ok(code)
     else

@@ -1,6 +1,6 @@
 use std.fs.{write}
 
-def assert_ok(r: Result[nil, String], what: &str)
+def assert_ok(r: Result[nil, String], what: &String)
   match r
     Ok(_)  -> nil
     Err(e) -> puts "FAILED #{what}: #{e}"

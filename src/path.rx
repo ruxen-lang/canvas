@@ -98,7 +98,7 @@ class Path2D
   private
 
   ## Map a C-shim status code onto the package's error story.
-  def self.result(code: Int, what: &str) -> Result[nil, String]
+  def self.result(code: Int, what: &String) -> Result[nil, String]
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_no_skia(code)
