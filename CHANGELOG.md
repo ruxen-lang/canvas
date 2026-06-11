@@ -7,6 +7,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **KeyDown modifiers — `Window#key_modifiers` + `Window.mod_*` (Phase 2).** A
+  `KeyDown` event now carries the held keyboard modifiers (shift / ctrl / alt /
+  gui) as a side-channel, the discipline quiver's selection API (Shift+Arrow,
+  Ctrl/Cmd+A) was waiting on. **Append-only:** `Event.KeyDown(Int)`'s payload is
+  UNCHANGED (still a bare keycode) — the modifier mask rides a new `RxEvent.mods`
+  ring-slot field and is read back via `Window#key_modifiers` right after polling,
+  exactly like `dropped_file_path` / `composition_text`. The live pump reads
+  `SDL_GetModState()` at pump time (robust across the event-struct layout, unlike
+  decoding `keysym.mod` at a guessed offset) and folds SDL's `KMOD_*` into the
+  stable `RX_MOD_*` bits; `push_event` / `push_event_text` clear the field so the
+  mask never leaks across events. `Window.mod_shift` / `mod_ctrl` / `mod_alt` /
+  `mod_gui` name the bits (`mod_gui` = Cmd/Super/Win). TextInput is unaffected.
+  Pinned via the extended `window_pump_test_keydown` seam (now takes a folded mask
+  arg) in `tests/key_modifiers.rx` (plain arrow → 0; Shift+Right carries shift with
+  the keycode unchanged; a combined Ctrl+Alt mask; no leak to a following
+  TextInput; auto-repeat still filtered).
 - **Drag-and-drop (files) — `Event.FileDrop` + `Window#dropped_file_path`
   (Phase 2).** `SDL_DROPFILE` is surfaced as `Event.FileDrop` (NO coordinates —
   SDL2's file-drop gives no cursor position, and we don't invent one); the dropped

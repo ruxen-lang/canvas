@@ -195,6 +195,17 @@ headless (capability + fallback) and pixel-verify via a standalone
       **Lesson:** a negative `nm` grep is only as good as the symbol name guessed —
       verify against the C-API header's actual naming before declaring a binary
       blocked.
+- [x] **KeyDown modifiers — `Window#key_modifiers` + `Window.mod_*`.** **DONE.**
+      `Event.KeyDown` carries the held shift/ctrl/alt/gui state as a side-channel
+      (the discipline quiver's selection API waits on). **Append-only:**
+      `Event.KeyDown(Int)`'s payload is UNCHANGED — the modifier mask rides a new
+      `RxEvent.mods` ring-slot field, read back via `Window#key_modifiers` right
+      after polling (like `dropped_file_path` / `composition_text`). The live pump
+      reads `SDL_GetModState()` at pump time and folds `KMOD_*` into stable
+      `RX_MOD_*` bits; `push_event` / `push_event_text` clear the field so it never
+      leaks across events. `Window.mod_shift` / `mod_ctrl` / `mod_alt` / `mod_gui`
+      name the bits. Pinned via the extended `window_pump_test_keydown` seam (now
+      takes a folded-mask arg) in `tests/key_modifiers.rx`.
 - [ ] **Render-to-texture / raster cache.**
 - [x] **Drag-and-drop (files).** **DONE.** `SDL_DROPFILE` → `Event.FileDrop` (no
       coords — SDL2's file-drop carries no cursor position, and we do not invent

@@ -54,7 +54,22 @@ typedef struct {
      * still held in `pending` or unpolled ring slots. So no double-free, no leak,
      * no dangling SDL pointer (SDL's own copy is freed at pump time). */
     char   *drop_path;
+    /* Keyboard MODIFIER bitfield for a KeyDown event (RX_MOD_*; 0 otherwise). A
+     * side-channel exactly like drop_path / the marked text: the Event.KeyDown
+     * payload stays a bare keycode (Int), and the shift/ctrl/alt/gui state is read
+     * back via Window#key_modifiers right after polling. Append-only: every other
+     * event kind leaves this 0 (push_event / push_event_text clear it). */
+    int32_t mods;
 } RxEvent;
+
+/* Keyboard modifier bits carried alongside a KeyDown (the RxEvent.mods field).
+ * A small stable canvas-side enum (like the blend-mode ints), mapped from SDL's
+ * KMOD_* in the pump. Keep in sync with the Window.mod_* constants in
+ * src/window.rx. */
+#define RX_MOD_SHIFT 1
+#define RX_MOD_CTRL  2
+#define RX_MOD_ALT   4
+#define RX_MOD_GUI   8
 
 /* ---- the host object ----
  *

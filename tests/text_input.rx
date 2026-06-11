@@ -61,7 +61,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    let emitted = w.canvas.raw.window_pump_test_keydown(97, 0)
+    let emitted = w.canvas.raw.window_pump_test_keydown(97, 0, 0)
     t.expect(emitted).to_eq(0)             # filtered: no event
     var none = true
     match w.poll_event
@@ -76,7 +76,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    let emitted = w.canvas.raw.window_pump_test_keydown(8, 0)
+    let emitted = w.canvas.raw.window_pump_test_keydown(8, 0, 0)
     t.expect(emitted).to_eq(1)
     var ok = false
     match w.poll_event
@@ -91,7 +91,7 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    let emitted = w.canvas.raw.window_pump_test_keydown(1073741904, 0)
+    let emitted = w.canvas.raw.window_pump_test_keydown(1073741904, 0, 0)
     t.expect(emitted).to_eq(1)
     var ok = false
     match w.poll_event
@@ -107,10 +107,10 @@ Tester.describe("keydown: control-only + auto-repeat filtered") do |t: &var Test
       Err(_) -> panic!("Window.open failed")
     end
     # first press (repeat=0) emits
-    let first = w.canvas.raw.window_pump_test_keydown(13, 0)
+    let first = w.canvas.raw.window_pump_test_keydown(13, 0, 0)
     t.expect(first).to_eq(1)
     # held repeat (repeat=1) is filtered -> no event
-    let rep = w.canvas.raw.window_pump_test_keydown(13, 1)
+    let rep = w.canvas.raw.window_pump_test_keydown(13, 1, 0)
     t.expect(rep).to_eq(0)
   end
 end

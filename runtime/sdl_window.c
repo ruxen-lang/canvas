@@ -66,6 +66,10 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
  * into the ring slot, so the SDL buffer never dangles (defined in skia_shim.c). */
 extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
                                             int64_t length, int64_t text_ptr);
+/* push a KeyDown carrying its keyboard MODIFIER bitfield (RX_MOD_*) in the ring
+ * slot's side-channel (defined in skia_shim.c). */
+extern int64_t ruxen_canvas_push_event_mods(int64_t self, int64_t kind, double a, double b,
+                                            int64_t mods);
 
 /* event-kind tags (must match the Rxc module in src/lib.rx) */
 #define RX_EV_POINTER_MOVE 0
@@ -150,6 +154,23 @@ extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t 
 #define SDLK_UP          1073741906
 #define SDLK_HOME        1073741898
 #define SDLK_END         1073741901
+/* SDL_Keymod bits (SDL_keycode.h, stable ABI) — the modifier state SDL_GetModState
+ * returns. We fold left/right into one bit per modifier and map to the canvas-side
+ * RX_MOD_* small enum (rx_canvas_internal.h) for the KeyDown side-channel. */
+#define KMOD_LSHIFT 0x0001u
+#define KMOD_RSHIFT 0x0002u
+#define KMOD_LCTRL  0x0040u
+#define KMOD_RCTRL  0x0080u
+#define KMOD_LALT   0x0100u
+#define KMOD_RALT   0x0200u
+#define KMOD_LGUI   0x0400u
+#define KMOD_RGUI   0x0800u
+/* Canvas-side modifier bits (keep in sync with RX_MOD_* in rx_canvas_internal.h
+ * and the Window.mod_* constants in src/window.rx). */
+#define RX_MOD_SHIFT 1
+#define RX_MOD_CTRL  2
+#define RX_MOD_ALT   4
+#define RX_MOD_GUI   8
 /* SDL_WindowEventID subtype (SDL_WindowEvent.event @ byte 12, Uint8). */
 #define SDL_WINDOWEVENT_RESIZED   5
 /* MINIMIZED/MAXIMIZED/RESTORED: window-state transitions (SDL_WindowEventID).
@@ -241,6 +262,10 @@ static const char *(*s_GetError)(void);
  * UTF-8) instead of relying on raw keysyms. OPTIONAL — a miss just means no text
  * events (control keys via KEYDOWN still work). */
 static void  (*s_StartTextInput)(void);
+/* Current keyboard modifier state (KMOD_* bitfield). Read at pump time to carry
+ * shift/ctrl/alt/gui on each KeyDown. OPTIONAL — a miss just means KeyDown events
+ * carry 0 modifiers (the keycode is unaffected). */
+static uint16_t (*s_GetModState)(void);
 /* Clipboard (E2 desktop services). Work headless under the dummy video driver —
  * no live window needed (verified). SDL_GetClipboardText returns a malloc'd UTF-8
  * string SDL owns; release it with SDL_free. OPTIONAL — a miss reports Err. */
@@ -448,6 +473,7 @@ static int load_sdl(void) {
     s_GetWindowID    = (uint32_t (*)(void *))sym("SDL_GetWindowID");  /* event demux */
     s_GetError       = (const char *(*)(void))sym("SDL_GetError");
     s_StartTextInput = (void (*)(void))sym("SDL_StartTextInput");  /* OPTIONAL */
+    s_GetModState    = (uint16_t (*)(void))sym("SDL_GetModState");  /* OPTIONAL */
     s_GetClipboardText = (char *(*)(void))sym("SDL_GetClipboardText");  /* OPTIONAL */
     s_SetClipboardText = (int (*)(const char *))sym("SDL_SetClipboardText");
     s_SDL_free         = (void (*)(void *))sym("SDL_free");
@@ -1181,6 +1207,17 @@ static int rx_is_control_keysym(int32_t sym) {
     }
 }
 
+/* Fold SDL's KMOD_* bitfield into the canvas-side RX_MOD_* mask (left/right
+ * merged). Pure, so the pump and the keydown test seam share it. */
+static int64_t rx_fold_keymods(uint16_t kmod) {
+    int64_t m = 0;
+    if (kmod & (KMOD_LSHIFT | KMOD_RSHIFT)) m |= RX_MOD_SHIFT;
+    if (kmod & (KMOD_LCTRL  | KMOD_RCTRL))  m |= RX_MOD_CTRL;
+    if (kmod & (KMOD_LALT   | KMOD_RALT))   m |= RX_MOD_ALT;
+    if (kmod & (KMOD_LGUI   | KMOD_RGUI))   m |= RX_MOD_GUI;
+    return m;
+}
+
 /* shim hook: invalidate a windowed GL host's persistent GPU surface so the next
  * begin_frame rebuilds it at the new backing size (defined in skia_shim.c). */
 void ruxen_canvas_host_gl_invalidate_surface(int64_t self);
@@ -1304,7 +1341,14 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
              * owned by SDL_TEXTINPUT above; forwarding their raw keysyms here
              * would insert garbage (no shift/layout). */
             if (rx_is_control_keysym(sym)) {
-                ruxen_canvas_push_event(towner, RX_EV_KEY_DOWN, (double)sym, 0.0);
+                /* Carry the live keyboard modifier state (shift/ctrl/alt/gui) as a
+                 * side-channel on the ring slot — the KeyDown payload stays a bare
+                 * keycode, modifiers are read via Window#key_modifiers post-poll.
+                 * SDL_GetModState is the current global state at pump time (the held
+                 * modifiers when this key fired); robust across the event-struct
+                 * layout, unlike decoding keysym.mod at a guessed offset. */
+                int64_t mods = s_GetModState ? rx_fold_keymods(s_GetModState()) : 0;
+                ruxen_canvas_push_event_mods(towner, RX_EV_KEY_DOWN, (double)sym, 0.0, mods);
                 if (is_self) forwarded++;
             }
             break;
@@ -1428,15 +1472,19 @@ int64_t ruxen_canvas_window_pump_test_textediting(int64_t self, int64_t utf8_ptr
     return ruxen_canvas_push_event_text(self, RX_EV_TEXT_EDITING, start, length, utf8_ptr);
 }
 
-/* Test seam: run the pump's SDL_KEYDOWN handling on a synthetic (keysym, repeat).
- * Applies the SAME filter the pump uses: skip when repeat != 0; emit KeyDown only
- * for control keysyms (printable keysyms are dropped — TextInput owns them).
- * Returns 1 if a KeyDown was emitted, 0 if filtered. */
-int64_t ruxen_canvas_window_pump_test_keydown(int64_t self, int64_t sym, int64_t repeat) {
+/* Test seam: run the pump's SDL_KEYDOWN handling on a synthetic (keysym, repeat,
+ * mods). Applies the SAME filter the pump uses: skip when repeat != 0; emit
+ * KeyDown only for control keysyms (printable keysyms are dropped — TextInput owns
+ * them). `mods` is a canvas-side RX_MOD_* mask (already folded — the test passes
+ * the final bits, the live pump folds them from SDL_GetModState); it rides the
+ * ring slot's side-channel exactly as the live pump's KeyDown does. Returns 1 if a
+ * KeyDown was emitted, 0 if filtered. */
+int64_t ruxen_canvas_window_pump_test_keydown(int64_t self, int64_t sym, int64_t repeat,
+                                              int64_t mods) {
     if (!self) return RXC_ERR_BAD_ARGS;
     if (repeat != 0) return 0;                       /* auto-repeat: filtered */
     if (!rx_is_control_keysym((int32_t)sym)) return 0; /* printable: filtered */
-    ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
+    ruxen_canvas_push_event_mods(self, RX_EV_KEY_DOWN, (double)sym, 0.0, mods);
     return 1;
 }
 

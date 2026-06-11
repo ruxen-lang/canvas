@@ -440,6 +440,38 @@ class Window
   def var composition_text -> String
     self.canvas.raw.event_text
   end
+
+  ## The keyboard MODIFIER state for the `Event.KeyDown` JUST returned by
+  ## `poll_event` — read this immediately after polling a `KeyDown`. Returns a
+  ## bitmask of the `Window.mod_*` constants (shift / ctrl / alt / gui), e.g.
+  ## `(mods & Window.mod_shift) != 0` tells you Shift was held. The mask is a
+  ## side-channel the ring carries alongside the bare keycode (the `KeyDown(Int)`
+  ## payload is unchanged), so quiver's selection API (Shift+Arrow extends the
+  ## selection, Ctrl/Cmd+A selects all) can read modifiers without a payload
+  ## change. Returns 0 for an unmodified key and for any non-KeyDown event. Left
+  ## and right variants of each modifier are folded into one bit.
+  def var key_modifiers -> Int
+    self.canvas.raw.event_mods
+  end
+
+  ## Modifier-mask constants for `key_modifiers` (see its doc): test with
+  ## `(mods & Window.mod_shift) != 0`. `mod_gui` is Cmd on macOS / Super on Linux /
+  ## Win on Windows. Stable small bits, mirrored from `RX_MOD_*` in the C shim.
+  def self.mod_shift -> Int
+    1
+  end
+
+  def self.mod_ctrl -> Int
+    2
+  end
+
+  def self.mod_alt -> Int
+    4
+  end
+
+  def self.mod_gui -> Int
+    8
+  end
   ## Inject an event into the queue. This is the hook the platform pump
   ## (SDL later) and the pin tests use to feed the stream.
   def var push_event(event: Event) -> Result[nil, String]

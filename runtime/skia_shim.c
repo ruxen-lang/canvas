@@ -3205,6 +3205,27 @@ int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) 
     h->events[tail].a = a;
     h->events[tail].b = b;
     h->events[tail].text[0] = '\0';   /* no marked text (clear stale slot content) */
+    h->events[tail].mods = 0;         /* no key modifiers (clear stale slot content) */
+    h->ev_count++;
+    return RXC_OK;
+}
+
+/* Push a KeyDown carrying its keyboard MODIFIER bitfield (RX_MOD_*). The live
+ * pump (sdl_window.c) reads SDL_GetModState() and the keydown test seam passes a
+ * synthetic mask; both funnel here so the mods side-channel rides the SAME ring
+ * slot as the keycode. Identical to push_event except it also stamps `mods`. */
+int64_t ruxen_canvas_push_event_mods(int64_t self, int64_t kind, double a, double b,
+                                     int64_t mods) {
+    RxHost *h = (RxHost *)self;
+    if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
+    if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
+    int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
+    h->events[tail].kind = (int32_t)kind;
+    h->events[tail].a = a;
+    h->events[tail].b = b;
+    h->events[tail].text[0] = '\0';
+    h->events[tail].mods = (int32_t)mods;
     h->ev_count++;
     return RXC_OK;
 }
@@ -3244,6 +3265,7 @@ int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
     } else {
         h->events[tail].text[0] = '\0';
     }
+    h->events[tail].mods = 0;   /* text events carry no key modifiers */
     h->ev_count++;
     return RXC_OK;
 }
@@ -3282,6 +3304,16 @@ int64_t ruxen_canvas_event_drop_path(int64_t self) {
     RxHost *h = (RxHost *)self;
     const char *p = (h && h->pending.drop_path) ? h->pending.drop_path : "";
     return (int64_t)ruxen_string_from(p);
+}
+
+/* The keyboard MODIFIER bitfield (RX_MOD_*) of the most-recently-polled event.
+ * Non-zero only for a KeyDown whose modifiers were set (shift/ctrl/alt/gui); 0
+ * for every other event kind and for a plain unmodified key. Read it right after
+ * polling an Event.KeyDown, the same side-channel discipline as event_drop_path /
+ * event_text. */
+int64_t ruxen_canvas_event_mods(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? (int64_t)h->pending.mods : 0;
 }
 
 double ruxen_canvas_event_a(int64_t self) {
