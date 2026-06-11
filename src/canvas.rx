@@ -127,6 +127,27 @@ class Canvas
     self.status_to_result(self.raw.rotate_raw(degrees as Float), "rotate")
   end
 
+  ## Skew the coordinate system by (sx, sy): a point's x shifts by `sx * y` and
+  ## its y by `sy * x` — italic slants, shear effects. Composes with the current
+  ## transform; scope inside `save`/`restore`. Applied on the Skia backend (a
+  ## no-op under the software fallback, like the other transforms).
+  def var skew(sx: Float32, sy: Float32) -> Result[nil, String]
+    self.status_to_result(self.raw.skew_raw(sx as Float, sy as Float), "skew")
+  end
+
+  ## Concatenate a full 2D affine matrix onto the current transform. The six
+  ## values are the matrix's top two rows (row-major): `a` scaleX, `b` skewX,
+  ## `c` translateX / `d` skewY, `e` scaleY, `f` translateY (the perspective row
+  ## is fixed to identity). This is the general primitive that
+  ## translate/scale/rotate/skew are special cases of — use it to apply a matrix
+  ## composed elsewhere (e.g. a layout transform). Composes with the current
+  ## matrix; scope inside `save`/`restore`. Skia backend (no-op under software).
+  def var concat(a: Float32, b: Float32, c: Float32, d: Float32, e: Float32, f: Float32) -> Result[nil, String]
+    self.status_to_result(
+      self.raw.concat_raw(a as Float, b as Float, c as Float, d as Float, e as Float, f as Float),
+      "concat")
+  end
+
   ## Intersect the clip with `rect` — subsequent drawing is confined to it
   ## (overflow/masking). Scope inside `save`/`restore`. Applied on the Skia
   ## backend; under the software fallback this returns `Ok` without clipping

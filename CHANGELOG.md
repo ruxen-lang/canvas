@@ -7,6 +7,21 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Transforms — `Canvas#skew` + `Canvas#concat` (full 2D affine).** Completes the
+  transform set (`translate`/`scale`/`rotate` already shipped). `skew(sx, sy)`
+  (`sk_canvas_skew`) shears the coordinate system; `concat(a, b, c, d, e, f)`
+  (`sk_canvas_concat`) concatenates an arbitrary affine given as the matrix's top
+  two rows (`a` scaleX, `b` skewX, `c` transX / `d` skewY, `e` scaleY, `f` transY)
+  — the general primitive the others are special cases of. Both compose with the
+  current matrix and are scoped by `save`/`restore`; Skia-only (no-op under the
+  software fallback, like the existing transforms). **Binding gotcha (pinned):**
+  this fetched `libSkiaSharp`'s `sk_canvas_concat` consumes a 4x4 SkM44 in
+  COLUMN-MAJOR order (16 floats), **not** a 3x3 `sk_matrix_t` — determined
+  empirically by round-tripping `sk_canvas_get_matrix` through `sk_canvas_concat`
+  (a 3x3 struct silently produces no transform). The shim builds the 16-float
+  column-major matrix (scaleX@0, scaleY@5, transX@12, transY@13, skewY@1, skewX@4);
+  documented in `runtime/skia/skia_capi.h`. Pixel-pinned in
+  `tests/canvas_transforms.rx`.
 - **Frame pacing / vsync seam — the engine timebase + paced present**
   (ADR: `docs/decisions/frame-pacing.md`). Replaces the examples' blind
   `sleep_ms(16)` with a real, work-aware cadence and gives L2's future animation

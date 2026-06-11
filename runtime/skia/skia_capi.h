@@ -160,6 +160,18 @@ typedef void (*pfn_canvas_translate)(sk_canvas_t *, float dx, float dy);
 typedef void (*pfn_canvas_scale)(sk_canvas_t *, float sx, float sy);
 typedef void (*pfn_canvas_rotate_degrees)(sk_canvas_t *, float degrees);
 typedef void (*pfn_canvas_reset_matrix)(sk_canvas_t *);
+typedef void (*pfn_canvas_skew)(sk_canvas_t *, float sx, float sy);
+/* sk_canvas_concat in THIS libSkiaSharp build takes a 4x4 SkM44 — sixteen floats
+ * in COLUMN-MAJOR order, NOT a 3x3 sk_matrix_t. Empirically pinned (see the shim
+ * comment on ruxen_canvas_concat): sk_canvas_get_matrix round-trips through
+ * sk_canvas_concat only as 16 column-major floats, with the 2D affine occupying:
+ *   col0 = (scaleX, skewY,  0, 0)
+ *   col1 = (skewX,  scaleY, 0, 0)
+ *   col2 = (0,      0,      1, 0)
+ *   col3 = (transX, transY, 0, 1)
+ * i.e. scaleX@[0] scaleY@[5] transX@[12] transY@[13] skewY@[1] skewX@[4]. The
+ * 6-arg Canvas#concat fills these slots; all other entries are the 4x4 identity. */
+typedef void (*pfn_canvas_concat)(sk_canvas_t *, const float m44_colmajor[16]);
 /* clip op: 1 = intersect (ABI-pinned by probe); doAA != 0 for antialiased edges */
 typedef void (*pfn_canvas_clip_rect)(sk_canvas_t *, const sk_rect_t *, int op, int do_aa);
 typedef void (*pfn_canvas_clip_rrect)(sk_canvas_t *, const sk_rrect_t *, int op, int do_aa);
@@ -452,6 +464,8 @@ typedef struct {
     pfn_canvas_scale            canvas_scale;
     pfn_canvas_rotate_degrees   canvas_rotate_degrees;
     pfn_canvas_reset_matrix     canvas_reset_matrix;
+    pfn_canvas_skew             canvas_skew;
+    pfn_canvas_concat           canvas_concat;
     pfn_canvas_clip_rect        canvas_clip_rect;
     pfn_canvas_clip_rrect       canvas_clip_rrect;
 

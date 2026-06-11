@@ -88,8 +88,15 @@ headless (capability + fallback) and pixel-verify via a standalone
       animation ticker has a real timebase. Pins: `tests/frame_pacing.rx`
       (monotonicity, both wait_frame branches, ms=ns/1e6, refresh-rate Err
       contract).
-- [ ] **Transforms — `skew` + `concat`** (full 2D matrix), composing with the
-      existing `save`/`restore`/`translate`/`scale`/`rotate`.
+- [x] **Transforms — `skew` + `concat`** (full 2D matrix), composing with the
+      existing `save`/`restore`/`translate`/`scale`/`rotate`. `Canvas#skew(sx,sy)`
+      (`sk_canvas_skew`) and `Canvas#concat(a,b,c,d,e,f)` (the 6-value top-two-rows
+      affine; `sk_canvas_concat`). **Binding gotcha pinned:** this `libSkiaSharp`'s
+      `sk_canvas_concat` takes a 4x4 SkM44 in COLUMN-MAJOR order (16 floats), NOT a
+      3x3 `sk_matrix_t` — empirically determined via `sk_canvas_get_matrix`
+      round-trip (a 3x3 silently no-ops). Pixel-pinned in `tests/canvas_transforms.rx`
+      (skew shears a rect into a parallelogram at predicted pixels; concat applies a
+      2x-scale + (6,6)-translate matrix and the rect lands in the mapped box).
 - [ ] **Blend modes** — a `Canvas#set_blend_mode(mode)` state (small int enum),
       reset per frame; covers src-over / clear / src / multiply / screen.
 - [ ] **Blur image filter + drop-shadow generalization** (`sk_imagefilter_new_blur`).

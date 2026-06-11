@@ -76,6 +76,85 @@ Tester.describe("Canvas.scale") do |t: &var Tester|
   end
 end
 
+Tester.describe("Canvas.skew") do |t: &var Tester|
+  t.it("shears subsequent drawing: x shifts by sx*y") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    # skew(1, 0): each point's x is shifted right by 1*y. A 4x4 rect spanning
+    # rows y∈[8,12) shears into a parallelogram; at row y its x-span is [y, y+4).
+    # So at y=10 the ink covers x∈[10,14): (12,10) is interior, (2,10) is empty.
+    let _ = c.skew(1.0f32, 0.0f32)
+    match c.draw_rect(Rect.new(0.0f32, 8.0f32, 4.0f32, 4.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(12, 10)).to_eq(red)    # sheared interior at y=10, x∈[10,14)
+      t.expect(c.read_pixel(2, 10)).to_eq(black)   # original un-sheared x is clear
+    else
+      t.expect(c.read_pixel(2, 10)).to_eq(red)     # unskewed fallback: rect at x=0
+    end
+  end
+end
+
+Tester.describe("Canvas.concat") do |t: &var Tester|
+  t.it("applies a full affine: a 2x scale + (6,6) translate matrix") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let _ = c.save
+    # matrix [2 0 6 / 0 2 6]: scale 2x then translate (6,6). A 2x2 rect at origin
+    # maps to device box x,y in [6, 10).
+    let _ = c.concat(2.0f32, 0.0f32, 6.0f32, 0.0f32, 2.0f32, 6.0f32)
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 2.0f32, 2.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    let _ = c.restore
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let red = Color.rgb(255u8, 0u8, 0u8).to_argb as Int
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(8, 8)).to_eq(red)     # inside the mapped [6,10) box
+      t.expect(c.read_pixel(2, 2)).to_eq(black)   # origin is empty (translated away)
+    else
+      t.expect(c.read_pixel(1, 1)).to_eq(red)     # un-transformed fallback at origin
+    end
+  end
+end
+
 Tester.describe("Canvas.clip_rect") do |t: &var Tester|
   t.it("confines drawing to the clip region") do
     var c = match Canvas.create(32, 32)

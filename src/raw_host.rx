@@ -20,6 +20,8 @@ class RawHost
     def translate_raw as "ruxen_canvas_translate"(self, dx: Float, dy: Float) -> Int
     def scale_raw as "ruxen_canvas_scale"(self, sx: Float, sy: Float) -> Int
     def rotate_raw as "ruxen_canvas_rotate"(self, degrees: Float) -> Int
+    def skew_raw as "ruxen_canvas_skew"(self, sx: Float, sy: Float) -> Int
+    def concat_raw as "ruxen_canvas_concat"(self, a: Float, b: Float, c: Float, d: Float, e: Float, f: Float) -> Int
     def clip_rect_raw as "ruxen_canvas_clip_rect"(self, x: Float, y: Float, w: Float, h: Float) -> Int
     def clip_round_rect_raw as "ruxen_canvas_clip_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float) -> Int
     def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int

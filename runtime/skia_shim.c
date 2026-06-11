@@ -179,6 +179,8 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(canvas_scale,              "sk_canvas_scale");
     RX_SK_OPTIONAL(canvas_rotate_degrees,     "sk_canvas_rotate_degrees");
     RX_SK_OPTIONAL(canvas_reset_matrix,       "sk_canvas_reset_matrix");
+    RX_SK_OPTIONAL(canvas_skew,               "sk_canvas_skew");
+    RX_SK_OPTIONAL(canvas_concat,             "sk_canvas_concat");
     RX_SK_OPTIONAL(canvas_clip_rect,          "sk_canvas_clip_rect_with_operation");
     RX_SK_OPTIONAL(canvas_clip_rrect,         "sk_canvas_clip_rrect_with_operation");
     RX_SK_OPTIONAL(data_new_from_file,        "sk_data_new_from_file");
@@ -1353,6 +1355,52 @@ int64_t ruxen_canvas_rotate(int64_t self, double degrees) {
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
     if (canvas && sk->canvas_rotate_degrees) sk->canvas_rotate_degrees(canvas, (float)degrees);
+    return RXC_OK;
+}
+
+/* Skew the coordinate system by (sx, sy): x' = x + sx*y, y' = y + sy*x. Composes
+ * with the current matrix, scoped by save/restore — like translate/scale/rotate.
+ * Skia-only (no software-fallback transform); a no-op when the backend is absent. */
+int64_t ruxen_canvas_skew(int64_t self, double sx, double sy) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(sx) || !rxc_finite_pixels(sy)) return RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_skew) sk->canvas_skew(canvas, (float)sx, (float)sy);
+    return RXC_OK;
+}
+
+/* Concatenate a full 2D affine onto the current matrix. The six args are the top
+ * two rows of the 3x3 (row-major): a=scaleX b=skewX c=transX / d=skewY e=scaleY
+ * f=transY; the perspective row is fixed to identity (0,0,1). This is the general
+ * primitive translate/scale/rotate/skew are special cases of. Composes + is scoped
+ * by save/restore. Skia-only; a no-op when the backend is absent. */
+int64_t ruxen_canvas_concat(int64_t self, double a, double b, double c,
+                            double d, double e, double f) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(a) || !rxc_finite_pixels(b) || !rxc_finite_pixels(c) ||
+        !rxc_finite_pixels(d) || !rxc_finite_pixels(e) || !rxc_finite_pixels(f)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_concat) {
+        /* a=scaleX b=skewX c=transX / d=skewY e=scaleY f=transY -> a 4x4 SkM44 in
+         * COLUMN-MAJOR order (this build's sk_canvas_concat ABI; see skia_capi.h).
+         * col0=(scaleX,skewY,0,0) col1=(skewX,scaleY,0,0) col2=(0,0,1,0)
+         * col3=(transX,transY,0,1). */
+        float m44[16] = {
+            (float)a, (float)d, 0.0f, 0.0f,   /* col0: scaleX, skewY */
+            (float)b, (float)e, 0.0f, 0.0f,   /* col1: skewX,  scaleY */
+            0.0f,     0.0f,     1.0f, 0.0f,   /* col2 */
+            (float)c, (float)f, 0.0f, 1.0f,   /* col3: transX, transY */
+        };
+        sk->canvas_concat(canvas, m44);
+    }
     return RXC_OK;
 }
 
