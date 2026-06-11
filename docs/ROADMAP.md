@@ -294,7 +294,6 @@ headless (capability + fallback) and pixel-verify via a standalone
       Resize emission via the `window_pump_test_window_event` headless seam). Live
       proof: `examples/window_mgmt_verify.c` (`PASS` on a real display —
       fullscreen 320×240→1710×1073, maximize→1710×951, both restores→320×240).
-- [ ] **Vulkan** (additive behind the GPU seam, per `docs/GPU.md`).
 - [x] **Per-window / multi-monitor refresh rate** (Phase-1 `refresh_rate` is
       display-0 only). **DONE.** `Window#refresh_rate -> Result[Int, String]` (an
       INSTANCE method, distinct from the existing static `Window.refresh_rate` which
@@ -309,6 +308,21 @@ headless (capability + fallback) and pixel-verify via a standalone
       harness opens no real window, so it Errs there; the contract is pinned in
       `tests/frame_pacing.rx` (per-window block), the live per-monitor behavior is a
       real-multi-display-desktop concern.
+- [~] **Vulkan — DEFERRED to a later cycle (per `docs/GPU.md`).** Additive behind
+      the unchanged GPU context seam (the Metal + GL rungs already prove the seam);
+      Vulkan is the Linux/Android path Apple's Metal and desktop GL don't need yet,
+      so it is intentionally not built this cycle. This is the one Phase-2 item that
+      stays open by design — not a gap, a sequencing decision. (See the GPU-surface
+      backend entry below: "Still deferred: Vulkan — additive behind the same seam,
+      per the ADR.")
+
+> **Group-opacity / `save_layer_alpha` — NOT a canvas Phase-2 item (cross-ref).**
+> The opacity compositing primitive `Canvas#save_layer_alpha` ALREADY EXISTS in
+> canvas (landed under "Layers" below: `sk_canvas_save_layer` with an
+> alpha-carrying paint; pinned in `tests/canvas_layers.rx`). The remaining
+> "opacity-op" work — exposing group opacity as an ergonomic widget mixin — is a
+> QUIVER-side (L2) concern, tracked in quiver's roadmap, NOT here. Canvas's job
+> (the primitive) is done; L2 owns the DSL sugar over it.
 
 ## Later cycles
 
