@@ -8,7 +8,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 - **Drag-and-drop (files) — `Event.FileDrop` + `Window#dropped_file_path`
-  (Phase-1.5).** `SDL_DROPFILE` is surfaced as `Event.FileDrop` (NO coordinates —
+  (Phase 2).** `SDL_DROPFILE` is surfaced as `Event.FileDrop` (NO coordinates —
   SDL2's file-drop gives no cursor position, and we don't invent one); the dropped
   PATH is a side-channel read via `Window#dropped_file_path` right after polling.
   **Memory contract:** SDL owns the dropped-path string (SDL-malloc'd); the pump
@@ -26,7 +26,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   >32-byte path intact; multi-file FIFO; FileDrop/TextEditing side-channels stay
   separate; seam matches live handler).
 - **Desktop window management — `Window#set_fullscreen` / `#maximize` /
-  `#minimize` / `#restore` / `#set_min_size` / `#set_max_size` (Phase-1.5).**
+  `#minimize` / `#restore` / `#set_min_size` / `#set_max_size` (Phase 2).**
   Per-window setters, each resolving its `RxWin` slot by the owning host
   (multi-window correct). `set_fullscreen(on:)` uses `SDL_WINDOW_FULLSCREEN_DESKTOP`
   (borderless desktop fullscreen — no display-mode switch, instant alt-tab, the
@@ -44,7 +44,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is unchanged). Pins: `tests/window_mgmt.rx` (Err-without-window + bad-args; the
   minimized flag + each subtype's Resize via the `window_pump_test_window_event`
   seam). Live proof: `examples/window_mgmt_verify.c` (`PASS` on a real display).
-- **Dash path effect — `Canvas#draw_dashed_line` (Phase-1.5).** A stroked line
+- **Dash path effect — `Canvas#draw_dashed_line` (Phase 2).** A stroked line
   with an `[on_len, off_len]` dash pattern and a `phase` offset, via
   `sk_path_effect_create_dash`. **Re-verdict on Phase-1's "binary blocked":** that
   conclusion was a FALSE NEGATIVE from grepping `sk_patheffect_*` (no underscore
@@ -57,7 +57,7 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `RXC_ERR_NO_SKIA` if a build lacks the symbols — an honest probe, never a
   NULL-stub). Pixel-pinned in `tests/canvas_dash.rx` (an on-run pixel is inked, an
   off-gap pixel stays background, and a solid-line control inks that same gap
-  column). See `docs/ROADMAP.md` Phase-1.5 for the full symbol table.
+  column). See `docs/ROADMAP.md` Phase 2 for the full symbol table.
 - **Mouse cursors — `Window.set_cursor(kind)` (E2).** Stock system cursors via
   `SDL_CreateSystemCursor`, a small int enum (0 arrow / 1 ibeam / 2 hand /
   3 crosshair / 4 resize-h / 5 resize-v — `Window.cursor_*` constants name them),

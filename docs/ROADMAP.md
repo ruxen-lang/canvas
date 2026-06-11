@@ -114,7 +114,7 @@ headless (capability + fallback) and pixel-verify via a standalone
       soft shadows of any shape). `sigma <= 0` is `Err`; Skia-only. Pixel-pinned in
       `tests/canvas_blur.rx` (ink spreads past a hard edge under blur; a control
       without the layer keeps the same pixel hard; sigma validation).
-- [x] **Dash path effect** — **LANDED in Phase-1.5. The Phase-1 "blocked" verdict
+- [x] **Dash path effect** — **LANDED in Phase 2. The Phase-1 "blocked" verdict
       was a FALSE NEGATIVE** — it searched for `sk_patheffect_*` (no underscore
       split) + `sk_paint_set_patheffect`, neither of which is SkiaSharp's naming.
       The pinned 3.119.4 `libSkiaSharp` DOES export the path-effect C API under
@@ -123,7 +123,7 @@ headless (capability + fallback) and pixel-verify via a standalone
       [on, off] interval dash with a phase offset. Owned effect created → set on the
       paint → unref'd → paint deleted (no leak). `on_len<=0` / `off_len<0` /
       `width<=0` is `Err`; Skia-only. Pixel-pinned in `tests/canvas_dash.rx`. Full
-      re-verdict + symbol table in the Phase-1.5 section below.
+      re-verdict + symbol table in the Phase 2 section below.
 
 ### E2 — desktop services core
 
@@ -162,7 +162,13 @@ headless (capability + fallback) and pixel-verify via a standalone
       host with a real display the live cursor path runs in-harness; on a headless
       host the clean-Err branch is asserted — both covered.
 
-## Phase 1.5 — deferred (explicit checklist; NOT implemented in Phase 1)
+## Prod-parity Phase 2 — desktop completeness
+
+> Numbering note (2026-06-11): this section was briefly labeled "Phase 1.5"
+> (items deferred out of Phase 1). The stack now uses ONE whole-number phase
+> scheme across all repos — canvas Phase 2 runs alongside quiver Phase 2
+> (animation + text editing). Items below marked DONE landed in this phase;
+> unchecked items are the Phase 2 backlog (or later, where noted).
 
 - [x] **Dash path effect** — **DONE. Re-verdict (2026-06-11): the Phase-1 "binary
       blocked" conclusion was a false negative from searching the WRONG symbol
