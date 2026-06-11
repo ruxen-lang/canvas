@@ -62,6 +62,10 @@ typedef struct {
 
 /* push into the host's event ring (defined in skia_shim.c) */
 extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b);
+/* push an IME composition event (marked text + start/length) — text is COPIED
+ * into the ring slot, so the SDL buffer never dangles (defined in skia_shim.c). */
+extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
+                                            int64_t length, int64_t text_ptr);
 
 /* event-kind tags (must match the Rxc module in src/lib.rx) */
 #define RX_EV_POINTER_MOVE 0
@@ -72,6 +76,7 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define RX_EV_CLOSE        5
 #define RX_EV_SCROLL       6
 #define RX_EV_TEXT_INPUT   7
+#define RX_EV_TEXT_EDITING 8   /* IME composition (marked text + cursor) */
 
 /* ---- SDL2 constants (from the stable public ABI) ---- */
 #define SDL_INIT_VIDEO            0x00000020u
@@ -84,6 +89,7 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define SDL_WINDOWEVENT_EV        0x200u
 #define SDL_KEYDOWN_EV            0x300u
 #define SDL_TEXTINPUT_EV          0x303u
+#define SDL_TEXTEDITING_EV        0x302u
 #define SDL_MOUSEMOTION_EV        0x400u
 #define SDL_MOUSEBUTTONDOWN_EV    0x401u
 #define SDL_MOUSEBUTTONUP_EV      0x402u
@@ -93,6 +99,15 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
 #define SDL_KEY_REPEAT_OFF        13
 /* SDL_TextInputEvent: the UTF-8 NUL-terminated text starts at offset 12. */
 #define SDL_TEXTINPUT_TEXT_OFF    12
+/* SDL_TextEditingEvent ABI: { Uint32 type@0; Uint32 timestamp@4; Uint32 windowID@8;
+ * char text[32]@12; Sint32 start@44; Sint32 length@48; }. The marked composition
+ * text (NUL-terminated UTF-8, up to 32 bytes) is at offset 12; the composition
+ * cursor `start` and selection `length` (codepoints) at 44 / 48. This is the
+ * UNcommitted, in-progress IME text (CJK/diacritic composition) — distinct from
+ * the committed SDL_TEXTINPUT path. */
+#define SDL_TEXTEDITING_TEXT_OFF   12
+#define SDL_TEXTEDITING_START_OFF  44
+#define SDL_TEXTEDITING_LENGTH_OFF 48
 /* Every window-associated SDL event struct begins {Uint32 type; Uint32
  * timestamp; Uint32 windowID; ...}, so the originating window's SDL windowID is
  * at byte offset 8 for mouse motion/button/wheel, keyboard, text-input, and
@@ -1031,6 +1046,23 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
             }
             break;
         }
+        case SDL_TEXTEDITING_EV: {
+            /* SDL_TextEditingEvent: the IN-PROGRESS (uncommitted) IME composition —
+             * marked UTF-8 text @ offset 12, cursor `start` @ 44, selection
+             * `length` @ 48. This is what CJK / diacritic input needs BEYOND the
+             * committed TEXTINPUT path: emit Event.TextEditing(start, length) with
+             * the marked text carried in the ring slot (copied, never a dangling
+             * SDL pointer). An empty marked text (composition cleared) is still a
+             * valid event — the app uses it to erase the marked region. */
+            if (!tw) break;
+            int32_t start = 0, length = 0;
+            memcpy(&start,  ev + SDL_TEXTEDITING_START_OFF,  4);
+            memcpy(&length, ev + SDL_TEXTEDITING_LENGTH_OFF, 4);
+            ruxen_canvas_push_event_text(towner, RX_EV_TEXT_EDITING, start, length,
+                                         (int64_t)(ev + SDL_TEXTEDITING_TEXT_OFF));
+            if (is_self) forwarded++;
+            break;
+        }
         case SDL_KEYDOWN_EV: {
             /* Skip auto-repeat (held key) so a control key doesn't machine-gun. */
             if (ev[SDL_KEY_REPEAT_OFF] != 0) break;
@@ -1106,6 +1138,17 @@ int64_t ruxen_canvas_window_pump_test_text(int64_t self, int64_t utf8_ptr) {
     int32_t cp = rx_utf8_first_codepoint(s);
     if (cp >= 0) ruxen_canvas_push_event(self, RX_EV_TEXT_INPUT, (double)cp, 0.0);
     return (int64_t)cp;
+}
+
+/* Test seam: run the pump's SDL_TEXTEDITING handling on a synthetic composition
+ * (marked UTF-8 text + start + length). Emits Event.TextEditing exactly as the
+ * pump does — pushing the marked text (copied into the ring) + cursor. The real
+ * pump can't be driven headless (no live SDL window), so this exercises the same
+ * push_event_text path the live handler uses. Returns RXC_OK. */
+int64_t ruxen_canvas_window_pump_test_textediting(int64_t self, int64_t utf8_ptr,
+                                                  int64_t start, int64_t length) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    return ruxen_canvas_push_event_text(self, RX_EV_TEXT_EDITING, start, length, utf8_ptr);
 }
 
 /* Test seam: run the pump's SDL_KEYDOWN handling on a synthetic (keysym, repeat).

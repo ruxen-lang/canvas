@@ -285,10 +285,25 @@ class Window
       Event.Scroll(fa, fb)
     elsif kind == 7
       Event.TextInput(ki)
+    elsif kind == 8
+      # IME composition: start = event_ai, length = event_bi. The marked text
+      # string is read separately via `composition_text` (the side-channel).
+      Event.TextEditing(ki, self.canvas.raw.event_bi)
     else
       Event.CloseRequested
     end
     ev
+  end
+
+  ## The IME marked (composition) text of the event JUST returned by `poll_event`
+  ## — read this immediately after polling an `Event.TextEditing`. The string is a
+  ## side-channel the C ring carries alongside the `(start, length)` ints (the ring
+  ## copies it at poll time, so it is never a dangling SDL pointer). Returns the
+  ## empty string for any non-TextEditing event (or when the composition was
+  ## cleared). Apps render this inline (often underlined) until the matching
+  ## `TextInput` commits.
+  def var composition_text -> String
+    self.canvas.raw.event_text
   end
   ## Inject an event into the queue. This is the hook the platform pump
   ## (SDL later) and the pin tests use to feed the stream.
@@ -302,6 +317,11 @@ class Window
       Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
       Event.Scroll(dx, dy)    -> self.canvas.raw.push_event_d_raw(6, dx as Float, dy as Float)
       Event.TextInput(cp)     -> self.canvas.raw.push_event_i_raw(7, cp, 0)
+      # An Event value carries only (start, length); the marked text is a separate
+      # side-channel, so injecting an Event.TextEditing pushes an EMPTY marked text.
+      # Tests that need real marked text use `push_composition` (below), which
+      # carries the string through the dedicated text seam.
+      Event.TextEditing(s, l) -> self.canvas.raw.push_event_text_raw(8, s, l, &"")
     end
     if Rxc.is_ok(code)
       Ok(nil)
@@ -309,6 +329,23 @@ class Window
       Err("canvas: push_event failed: event queue is full")
     else
       Err("canvas: push_event failed: invalid arguments")
+    end
+  end
+
+  ## Inject an IME COMPOSITION (TextEditing) event carrying the marked `text`
+  ## plus the composition cursor `start` and selection `length`. This is the hook
+  ## the SDL pump uses for `SDL_TEXTEDITING` and the one tests use to feed marked
+  ## text (the plain `push_event` can't carry the string). The text is copied into
+  ## the ring, so no caller buffer needs to outlive the call. Poll it back as
+  ## `Event.TextEditing(start, length)` + `composition_text`.
+  def var push_composition(text: String, start: Int, length: Int) -> Result[nil, String]
+    let code = self.canvas.raw.push_event_text_raw(8, start, length, &text)
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err("canvas: push_composition failed: event queue is full")
+    else
+      Err("canvas: push_composition failed: invalid arguments")
     end
   end
 end

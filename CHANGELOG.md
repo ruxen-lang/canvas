@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **IME composition events — `Event.TextEditing(start, length)` (E2).** The
+  in-progress (uncommitted) "marked" text from `SDL_TEXTEDITING` — what CJK /
+  diacritic input produces while composing, before the committed `TextInput`. The
+  two ints are the composition cursor `start` and selection `length`; the marked
+  text STRING is a side-channel: each event self-carries it in the ring slot
+  (`RxEvent.text[32]`, SDL's composition cap), COPIED at push time so no SDL buffer
+  dangles, and read via `Window#composition_text` (a Ruxen-owned String through
+  `ruxen_string_from`) immediately after polling. `Window#push_composition` injects
+  one with its marked text; the live SDL pump (`SDL_TEXTEDITING` handler) and a
+  `window_pump_test_textediting` headless seam share one `push_event_text` path.
+  The `Event` variant is APPENDED last so prior tag values stay stable (the C shim
+  dispatches by integer tag; existing events pin green). Multi-byte CJK marked text
+  round-trips verbatim. Pinned in `tests/ime_editing.rx`.
 - **Clipboard — `Window.clipboard_text` / `Window.set_clipboard_text` (E2).** The
   system clipboard via `SDL_GetClipboardText` / `SDL_SetClipboardText` (dlopen
   tier). `clipboard_text -> Result[String, String]` (`Ok(text)`, possibly empty;

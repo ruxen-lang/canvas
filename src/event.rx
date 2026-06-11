@@ -33,4 +33,15 @@ enum Event
   TextInput(Int)
   ## The application/window was asked to close.
   CloseRequested
+  ## An IME COMPOSITION update (uncommitted "marked" text) — what CJK / diacritic
+  ## input produces while composing, BEFORE the committed `TextInput`. The two
+  ## ints are the composition cursor `start` and the selection `length` (in
+  ## codepoints) within the marked text; the marked text STRING itself is read via
+  ## `Window#composition_text` right after polling this event (the ring carries the
+  ## two ints; the text is a side-channel copied at poll time, never a dangling
+  ## pointer). An empty marked text signals the composition was cleared/committed.
+  ## Apps render the marked text inline (often underlined) and replace it when the
+  ## matching `TextInput` commits. Appended LAST so the prior tag values stay
+  ## stable (the C shim dispatches events by integer tag).
+  TextEditing(Int, Int)
 end

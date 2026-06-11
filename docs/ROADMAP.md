@@ -128,7 +128,19 @@ headless (capability + fallback) and pixel-verify via a standalone
       harness the dummy driver is forced for fork-safety (the real Cocoa pasteboard
       is unsafe post-`fork()`). Pinned in `tests/clipboard.rx` (set->get round-trip,
       overwrite replaces, set/get availability agree).
-- [ ] **IME composition events** — `Event.TextEditing` + marked-text side-channel.
+- [x] **IME composition events** — `Event.TextEditing(start, length)` (the
+      composition cursor + selection) from `SDL_TEXTEDITING`, the in-progress
+      (uncommitted) marked text CJK / diacritic input needs beyond the committed
+      `TextInput`. The marked-text STRING is a side-channel: each TextEditing event
+      self-carries it in the ring slot (`RxEvent.text[32]`, SDL's composition cap),
+      COPIED at push time so no SDL pointer dangles, and read back via
+      `Window#composition_text` (a Ruxen-owned String via `ruxen_string_from`)
+      right after polling. `Window#push_composition` injects one (carrying the
+      string, which plain `push_event` can't); the live SDL pump and a
+      `window_pump_test_textediting` seam share the same `push_event_text` path.
+      The `Event` variant is APPENDED last so prior tag values stay stable. The
+      full sound subset landed (multi-byte CJK round-trip pinned) — no Q-candidate
+      needed. Pinned in `tests/ime_editing.rx`.
 - [ ] **Mouse cursors** — `Window#set_cursor(kind)`.
 
 ## Phase 1.5 — deferred (explicit checklist; NOT implemented in Phase 1)

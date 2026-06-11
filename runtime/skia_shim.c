@@ -33,6 +33,11 @@
 #include "rx_canvas_internal.h"
 #include "skia/skia_capi.h"
 
+/* Ruxen's String runtime constructor (library/std/string/runtime/string.c): a
+ * Ruxen String IS a malloc'd NUL-terminated char*. Used to return the IME marked
+ * text to the Ruxen side as a Ruxen-owned String (see ruxen_canvas_event_text). */
+extern char *ruxen_string_from(const char *s);
+
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
 static int64_t rxc_floor_to_i64(double v) {
@@ -3127,8 +3132,46 @@ int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) 
     h->events[tail].kind = (int32_t)kind;
     h->events[tail].a = a;
     h->events[tail].b = b;
+    h->events[tail].text[0] = '\0';   /* no marked text (clear stale slot content) */
     h->ev_count++;
     return RXC_OK;
+}
+
+/* Push an IME composition (TextEditing) event carrying the marked composition
+ * TEXT alongside the (start, length) cursor/selection. The text is a
+ * NUL-terminated UTF-8 C string (an SDL marked-text chunk, or a Ruxen &String in
+ * the test seam); it is COPIED into the ring slot (truncated to RXC_EVENT_TEXT_CAP-1
+ * bytes — SDL caps composition chunks at 32 bytes anyway), so no pointer outlives
+ * the call (never a dangling SDL buffer). kind must be the TextEditing tag. */
+int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
+                                     int64_t length, int64_t text_ptr) {
+    RxHost *h = (RxHost *)self;
+    const char *t = (const char *)text_ptr;
+    if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
+    if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
+    int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    h->events[tail].kind = (int32_t)kind;
+    h->events[tail].a = (double)start;
+    h->events[tail].b = (double)length;
+    if (t) {
+        size_t n = strlen(t);
+        if (n >= RXC_EVENT_TEXT_CAP) n = RXC_EVENT_TEXT_CAP - 1;
+        memcpy(h->events[tail].text, t, n);
+        h->events[tail].text[n] = '\0';
+    } else {
+        h->events[tail].text[0] = '\0';
+    }
+    h->ev_count++;
+    return RXC_OK;
+}
+
+/* The marked composition TEXT of the most-recently-polled event (a Ruxen-owned
+ * String via ruxen_string_from). Empty string for non-TextEditing events. The
+ * text was copied into `pending` at poll time, so this never dereferences a
+ * foreign/stale pointer. */
+int64_t ruxen_canvas_event_text(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return (int64_t)ruxen_string_from(h ? h->pending.text : "");
 }
 
 int64_t ruxen_canvas_poll_event(int64_t self) {

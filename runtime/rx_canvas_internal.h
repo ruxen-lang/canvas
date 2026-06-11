@@ -31,12 +31,19 @@
 /* ---- events ---- */
 
 #define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 7  /* TextInput — keep in sync with Event in src/lib.rx */
+#define RXC_EVENT_KIND_MAX 8  /* TextEditing — keep in sync with Event in src/event.rx */
+/* SDL_TextEditingEvent caps its marked-text chunk at 32 bytes (incl. NUL); each
+ * TextEditing event self-carries its composition string in the ring slot so the
+ * (start, length) cursor and the marked text stay associated (no ambiguity when
+ * several composition updates queue). Other event kinds leave it empty. */
+#define RXC_EVENT_TEXT_CAP 32
 
 typedef struct {
-    int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
-    double  a;      /* x / keycode / width  (event-kind dependent) */
-    double  b;      /* y / unused  / height (event-kind dependent) */
+    int32_t kind;   /* event-kind tag; see the Rxc module in src/event.rx */
+    double  a;      /* x / keycode / composition-start (event-kind dependent) */
+    double  b;      /* y / unused  / composition-length (event-kind dependent) */
+    /* IME composition marked text (TextEditing only; "" otherwise). NUL-terminated. */
+    char    text[RXC_EVENT_TEXT_CAP];
 } RxEvent;
 
 /* ---- the host object ----

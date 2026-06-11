@@ -69,6 +69,9 @@ class RawHost
     def content_scale_raw as "ruxen_canvas_content_scale"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
     def push_event_d_raw as "ruxen_canvas_push_event"(self, kind: Int, a: Float, b: Float) -> Int
+    # IME composition (TextEditing): carries the marked text + (start, length).
+    def push_event_text_raw as "ruxen_canvas_push_event_text"(self, kind: Int, start: Int, length: Int, text: &String) -> Int
+    def event_text as "ruxen_canvas_event_text"(self) -> String
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
@@ -124,6 +127,7 @@ class RawHost
     # repeat + control-only filter -> KeyDown (returns 1 emitted / 0 filtered).
     def window_pump_test_pointer as "ruxen_canvas_window_pump_test_pointer"(self, show_scale: Int, win_x: Int, win_y: Int) -> Int
     def window_pump_test_text as "ruxen_canvas_window_pump_test_text"(self, utf8: &String) -> Int
+    def window_pump_test_textediting as "ruxen_canvas_window_pump_test_textediting"(self, utf8: &String, start: Int, length: Int) -> Int
     def window_pump_test_keydown as "ruxen_canvas_window_pump_test_keydown"(self, sym: Int, repeat: Int) -> Int
   end
 end

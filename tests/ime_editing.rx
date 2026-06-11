@@ -1,0 +1,99 @@
+# Pin tests for IME composition events (E2 desktop services): Event.TextEditing
+# carrying the in-progress (uncommitted) marked text + cursor, the side-channel
+# the real SDL_TEXTEDITING path delivers for CJK / diacritic input. The ring
+# carries (start, length) as ints; the marked text is copied into the ring slot at
+# push time and read back via Window#composition_text (never a dangling pointer).
+#
+# Driven through Window#push_composition (and the window_pump_test_textediting
+# seam it mirrors), since the live SDL pump can't run in the forked harness.
+
+Tester.describe("Event.TextEditing composition") do |t: &var Tester|
+  t.it("round-trips marked text + cursor start/length through the ring") do
+    var w = match Window.open("ime", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # Inject a composition: marked text "ni" with cursor at 2, no selection.
+    match w.push_composition("ni", 2, 0)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_composition failed: #{e}")
+    end
+    let ev = w.poll_event
+    match ev
+      Some(Event.TextEditing(start, length)) ->
+        t.expect(start).to_eq(2)
+        t.expect(length).to_eq(0)
+      _ -> panic!("expected Event.TextEditing")
+    end
+    # The marked text is read right after polling, via the side-channel.
+    t.expect(w.composition_text).to_eq("ni")
+  end
+
+  t.it("delivers a multi-byte (CJK) marked string intact") do
+    var w = match Window.open("ime", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # A composed CJK string (UTF-8 multi-byte) must survive the ring copy verbatim.
+    match w.push_composition("你好", 1, 1)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_composition failed: #{e}")
+    end
+    match w.poll_event
+      Some(Event.TextEditing(start, length)) ->
+        t.expect(start).to_eq(1)
+        t.expect(length).to_eq(1)
+      _ -> panic!("expected Event.TextEditing")
+    end
+    t.expect(w.composition_text).to_eq("你好")
+  end
+
+  t.it("an empty marked text (composition cleared) is still a valid event") do
+    var w = match Window.open("ime", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_composition("", 0, 0)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_composition failed: #{e}")
+    end
+    match w.poll_event
+      Some(Event.TextEditing(start, length)) ->
+        t.expect(start).to_eq(0)
+        t.expect(length).to_eq(0)
+      _ -> panic!("expected Event.TextEditing")
+    end
+    t.expect(w.composition_text).to_eq("")
+  end
+
+  t.it("the pump test seam emits the same TextEditing the live handler would") do
+    var w = match Window.open("ime", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # The seam mirrors the live SDL_TEXTEDITING handler's push path exactly.
+    let code = w.canvas.raw.window_pump_test_textediting(&"abc", 3, 0)
+    t.expect(code).to_eq(0)
+    match w.poll_event
+      Some(Event.TextEditing(start, length)) ->
+        t.expect(start).to_eq(3)
+        t.expect(length).to_eq(0)
+      _ -> panic!("expected Event.TextEditing from the seam")
+    end
+    t.expect(w.composition_text).to_eq("abc")
+  end
+
+  t.it("composition_text is empty for a non-TextEditing event") do
+    var w = match Window.open("ime", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let _ = w.push_event(Event.TextInput(65))   # 'A'
+    match w.poll_event
+      Some(Event.TextInput(cp)) -> t.expect(cp).to_eq(65)
+      _ -> panic!("expected Event.TextInput")
+    end
+    # No marked text for a committed character.
+    t.expect(w.composition_text).to_eq("")
+  end
+end
