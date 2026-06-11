@@ -114,7 +114,12 @@ headless (capability + fallback) and pixel-verify via a standalone
       soft shadows of any shape). `sigma <= 0` is `Err`; Skia-only. Pixel-pinned in
       `tests/canvas_blur.rx` (ink spreads past a hard edge under blur; a control
       without the layer keeps the same pixel hard; sigma validation).
-- [ ] **Dash path effect** — **BLOCKED on the fetched binary** (see Phase-1.5).
+- [~] **Dash path effect** — **DEFERRED to Phase-1.5: BLOCKED on the fetched
+      binary.** This `libSkiaSharp` exports zero `sk_patheffect_*` symbols, so a
+      sound binding is impossible without re-fetching a build that has them (a
+      NULL-returning stub that lies in its probe is forbidden by the FFI
+      invariants). Full rationale + the precise `fetch_skia.sh` remediation are in
+      the Phase-1.5 checklist below. No code landed (honest scope, not a no-op).
 
 ### E2 — desktop services core
 
