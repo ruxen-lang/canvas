@@ -501,6 +501,16 @@ zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reaso
         + a cap-boundary success in `tests/canvas_surface.rx`, and at the raw
         `host_new` ABI in `error_inject_verify.c`. **Audit finding: no overflow bug —
         the existing cap closes the class; pins lock it.**
+- [x] **Perf budget baseline — `examples/bench_frame.c` + `docs/PERF.md`
+      (recorded, NOT gated).** Times a representative frame (clear + 100 rects + 20
+      text runs incl. 10 shaped + an image blit) over 1000 frames on raster AND
+      offscreen Metal, plus the steady-state shape-cache hit-rate. Numbers written to
+      `docs/PERF.md` with the host (Apple M4 / macOS 26.5 / arm64) + date, explicitly
+      a diff-against baseline, not a threshold (perf assertions on a shared machine
+      flake — `scripts/check.sh` runs it report-only). **Baseline 2026-06-11:** raster
+      median ~2.2 ms / p95 ~6.6 ms; gpu-offscreen median ~3.5 ms / p95 ~10.6 ms
+      (offscreen Metal's per-frame submit overhead dominates a small frame — recorded,
+      explained); shape-cache hit-rate 100% at steady state.
 
 ## Later cycles
 

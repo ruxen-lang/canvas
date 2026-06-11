@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Perf baseline — `examples/bench_frame.c` + `docs/PERF.md` (Prod-hardening,
+  recorded not gated).** Times a representative frame (clear + 100 rects + 20 text
+  runs incl. 10 shaped + image blit) over 1000 frames on raster and offscreen Metal,
+  plus the steady-state shape-cache hit-rate, and records them with host+date as a
+  diff-against baseline (NOT a build-failing threshold). Baseline on Apple M4 /
+  macOS 26.5: raster median ~2.2 ms, gpu-offscreen median ~3.5 ms, shape-cache
+  hit-rate 100% at steady state.
 - **Error-injection proof — `examples/error_inject_verify.c` + overflow pins
   (Prod-hardening).** Forces two failure classes against the real shim and asserts
   honest degradation: (a) missing Skia dylib (via the existing `RUXEN_CANVAS_SKIA`
