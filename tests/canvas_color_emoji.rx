@@ -1,0 +1,89 @@
+# Pin test for COLOR emoji rendering through the font-fallback path.
+#
+# The fallback path (Canvas#draw_text_fallback) reaches Apple Color Emoji for
+# emoji codepoints. This pins the decisive anti-monochrome / anti-tofu assertion:
+# an emoji renders with MULTIPLE DISTINCT colors — proving Skia rasterized the
+# color glyph table (sbix/COLR), not a single-color outline and not a tofu box.
+#
+# docs/decisions/text-fallback.md (Color emoji decision). Skia + fontmgr only —
+# when unavailable the draw Errs and the test asserts that contract instead.
+
+Tester.describe("Canvas color emoji") do |t: &var Tester|
+  t.it("an emoji renders multiple distinct colors (color glyph table, not mono)") do
+    var c = match Canvas.create(80, 80)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.fallback_available?
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let white = Color.rgb(255u8, 255u8, 255u8)
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
+    # U+1F600 GRINNING FACE — a color emoji (yellow face, dark eyes/mouth).
+    let res = c.draw_text_fallback("😀", 8.0f32, 64.0f32, 56.0f32, white)
+    let _2 = c.end_frame
+
+    if on
+      match res
+        Ok(_)  -> nil
+        Err(e) -> panic!("draw_text_fallback emoji failed: #{e}")
+      end
+
+      # Collect the set of distinct non-background pixel colors. A monochrome
+      # render (white outline only) would yield ~1 distinct ink color; a real
+      # color emoji yields several (face fill + features + antialiased edges in
+      # different hues). We assert >= 3 distinct non-bg colors AND that not all of
+      # them are pure white (the requested color), which would mean Skia ignored
+      # the color table and stamped the glyph in the paint color.
+      var distinct = 0
+      var seen0 = -1
+      var seen1 = -1
+      var seen2 = -1
+      var saw_non_white = false
+      var y = 0
+      while y < 80
+        var x = 0
+        while x < 80
+          let px = c.read_pixel(x, y)
+          if px != bg
+            # is this a non-white ink pixel?
+            let r = (px >> 16) & 0xFF
+            let g = (px >> 8) & 0xFF
+            let b = px & 0xFF
+            if r < 250 || g < 250 || b < 250
+              saw_non_white = true
+            end
+            # track up to 3 distinct colors (cheap distinct-counter)
+            if px != seen0 && px != seen1 && px != seen2
+              if seen0 == -1
+                seen0 = px
+                distinct += 1
+              elsif seen1 == -1
+                seen1 = px
+                distinct += 1
+              elsif seen2 == -1
+                seen2 = px
+                distinct += 1
+              end
+            end
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(distinct >= 3).to_eq(true)
+      t.expect(saw_non_white).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

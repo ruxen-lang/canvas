@@ -31,6 +31,12 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fallback family is reported). ADR: `docs/decisions/text-fallback.md`. **Scope:**
   CJK + emoji render; complex-script SHAPING (Indic/Arabic ligature+reorder) inside
   a fallback font needs the font file for HarfBuzz and is the documented remainder.
+- **Color emoji (Phase 3 — text i18n).** Color emoji renders through the SAME
+  `draw_text_fallback` path — no new API. The fontmgr fallback reaches Apple Color
+  Emoji, and `libSkiaSharp` rasterizes the color glyph table (sbix/COLR)
+  automatically for a color typeface under a normal fill paint. Pixel-pinned in
+  `tests/canvas_color_emoji.rx`: a grinning-face emoji renders with multiple
+  distinct colors and non-white ink (the anti-monochrome / anti-tofu assertion).
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

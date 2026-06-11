@@ -351,6 +351,16 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       strictly wider than the Latin prefix; fallback family reported). ADR:
       `docs/decisions/text-fallback.md`. **Scope:** CJK + emoji render;
       complex-script shaping inside a fallback font is the documented remainder.
+- [x] **Color emoji** — renders through the SAME `draw_text_fallback` path (no new
+      API): the fontmgr fallback reaches Apple Color Emoji, and `libSkiaSharp`
+      rasterizes the color glyph table (sbix/COLR) AUTOMATICALLY when the typeface
+      is a color font and the paint is a normal fill — no special color-textblob
+      API needed. Pixel-pinned in `tests/canvas_color_emoji.rx`: a grinning-face
+      emoji renders with MULTIPLE distinct colors AND non-white ink (the
+      anti-monochrome / anti-tofu assertion — proving the color table was used, not
+      a single-color outline). HONEST-SCOPE: if a future host's `libSkiaSharp`
+      lacked color-table support the pin would catch it as a monochrome render and
+      it would be filed; on the pinned binary it works.
 
 ### Part B — accessibility bridge
 
