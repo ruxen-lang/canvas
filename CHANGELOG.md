@@ -82,6 +82,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ADR: `docs/decisions/text-fallback.md`. **Scope:** single-line visual reordering,
   LTR (auto) base; wrapped bidi paragraphs + explicit RTL base are the documented
   remainder — never renders visually-wrong RTL (clean Err when bidi is absent).
+- **Accessibility bridge — engine-side a11y tree intake + macOS NSAccessibility
+  window touch (Phase 3 — Part B).** L2 (quiver) describes its a11y tree to L1 as a
+  FLAT list of nodes (`Window.push_a11y_node(id, role, label, x,y,w,h)` /
+  `clear_a11y_tree` / `a11y_node_count` / `a11y_node_role` / `a11y_node_label` +
+  `Window.a11y_role_*` constants) — the quiver arena idiom, no objc / no Ruxen
+  objects cross the FFI. The intake is pure C (engine-side), so it round-trips
+  HEADLESS in the forked harness; re-pushing an id replaces (wholesale re-push,
+  Tier-1). The live macOS exposure (`Window.a11y_available?` probe +
+  `Window.set_a11y_title` → `[NSApp setAccessibilityLabel:]` via objc) is
+  fork-gated (false / Err under the harness, the file-dialog discipline). No new
+  dependency: objc + AppKit are already dlopen'd. Pinned in
+  `tests/accessibility.rx`; the live NSAccessibility round-trip is proven by
+  `examples/a11y_verify.c` (compiles + `PASS`). **Staged (filed):** exposing the
+  stored nodes as NSAccessibility CHILD elements + focus — needs a live window +
+  VoiceOver (unpinnable in the forked harness), a manual `examples/a11y_verify.c`
+  remainder. ADR: `docs/decisions/accessibility.md`.
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

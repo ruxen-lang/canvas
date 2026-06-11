@@ -162,6 +162,18 @@ class RawHost
     def self.open_file_dialog as "ruxen_canvas_open_file_dialog" -> String
     def self.save_file_dialog as "ruxen_canvas_save_file_dialog"(default_name: &String) -> String
     def self.file_dialog_available as "ruxen_canvas_file_dialog_available" -> Int
+    # Accessibility (Phase 3, docs/decisions/accessibility.md). The intake trio
+    # (push/clear/count) is ENGINE-SIDE — pure C, headless-testable. The live
+    # window touches (available / set_a11y_title) are macOS NSAccessibility via
+    # objc, fork-gated (false / Err under the forked harness). All static
+    # (process-global a11y store / app-level title).
+    def self.push_a11y_node as "ruxen_canvas_push_a11y_node"(id: Int, role: Int, label: &String, x: Float, y: Float, w: Float, h: Float) -> Int
+    def self.clear_a11y_tree as "ruxen_canvas_clear_a11y_tree" -> Int
+    def self.a11y_node_count as "ruxen_canvas_a11y_node_count" -> Int
+    def self.a11y_node_role as "ruxen_canvas_a11y_node_role"(n: Int) -> Int
+    def self.a11y_node_label as "ruxen_canvas_a11y_node_label"(n: Int) -> String
+    def self.a11y_available as "ruxen_canvas_window_a11y_available" -> Int
+    def self.set_a11y_title as "ruxen_canvas_window_set_a11y_title"(title: &String) -> Int
     # Window management (Phase-1.5). Per-window setters resolve their slot by self;
     # each Errs RXC_ERR_PRESENT with no live window, RXC_ERR_NO_SDL if the SDL
     # entry point is absent. set_fullscreen uses FULLSCREEN_DESKTOP (borderless).

@@ -419,6 +419,91 @@ class Window
     RawHost.file_dialog_available == 1
   end
 
+  ## --- Accessibility bridge (Phase 3, docs/decisions/accessibility.md) ---
+  ## L2 (quiver) describes its a11y tree to L1 as a FLAT list of nodes; L1 stores
+  ## it (the intake below — engine-side, headless) and exposes it to macOS
+  ## NSAccessibility (the live window touches — fork-gated). Tree updates are
+  ## wholesale re-push: `clear_a11y_tree` then `push_a11y_node` per node.
+
+  ## True when the live macOS a11y bridge can run here (objc + AppKit reachable,
+  ## not under the forked harness). a11y is a live-window-only capability; false
+  ## headless, so callers degrade cleanly. The engine-side intake works regardless.
+  def self.a11y_available? -> Bool
+    RawHost.a11y_available == 1
+  end
+
+  ## Set the application's accessibility title/label (the window-level a11y
+  ## exposure). `Ok(nil)` on success; `Err` headless / not macOS / forked harness.
+  def self.set_a11y_title(title: String) -> Result[nil, String]
+    let code = RawHost.set_a11y_title(&title)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_a11y_title unavailable (headless / not macOS)")
+    end
+  end
+
+  ## Push (append or replace by `id`) one accessibility node into the engine's
+  ## a11y tree: `role` is a stable int (0 group / 1 button / 2 static-text /
+  ## 3 image / 4 heading / 5 link — `Window.a11y_role_*`), `label` the spoken
+  ## label, `(x, y, w, h)` the element frame in window points. `Ok(nil)` on
+  ## success; `Err` when the tree is full. Engine-side, so it works headless (the
+  ## macOS exposure of these nodes as child elements is the staged remainder).
+  def self.push_a11y_node(id: Int, role: Int, label: String, x: Float32, y: Float32, w: Float32, h: Float32) -> Result[nil, String]
+    let code = RawHost.push_a11y_node(id, role, &label, x as Float, y as Float, w as Float, h as Float)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: a11y tree full")
+    end
+  end
+
+  ## Drop all accessibility nodes (the start of a wholesale re-push).
+  def self.clear_a11y_tree -> nil
+    let _ = RawHost.clear_a11y_tree
+    nil
+  end
+
+  ## The number of accessibility nodes currently stored.
+  def self.a11y_node_count -> Int
+    RawHost.a11y_node_count
+  end
+
+  ## The role of the n-th stored a11y node (0-based), or -1 if out of range.
+  def self.a11y_node_role(n: Int) -> Int
+    RawHost.a11y_node_role(n)
+  end
+
+  ## The label of the n-th stored a11y node (0-based), or "" if out of range.
+  def self.a11y_node_label(n: Int) -> String
+    RawHost.a11y_node_label(n)
+  end
+
+  ## Accessibility role constants for `push_a11y_node`.
+  def self.a11y_role_group -> Int
+    0
+  end
+
+  def self.a11y_role_button -> Int
+    1
+  end
+
+  def self.a11y_role_static_text -> Int
+    2
+  end
+
+  def self.a11y_role_image -> Int
+    3
+  end
+
+  def self.a11y_role_heading -> Int
+    4
+  end
+
+  def self.a11y_role_link -> Int
+    5
+  end
+
   ## Stock cursor-kind constants for `set_cursor` (see its doc), so call sites read
   ## `Window.set_cursor(Window.cursor_ibeam)` rather than a bare `1`.
   def self.cursor_arrow -> Int

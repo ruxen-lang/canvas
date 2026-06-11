@@ -88,6 +88,7 @@ into anything automated (the harness pins the headless contract instead).
 cc -O2 -o metal_window_verify  examples/metal_window_verify.c   && ./metal_window_verify
 cc -O2 -o window_mgmt_verify    examples/window_mgmt_verify.c   && ./window_mgmt_verify
 cc -O2 -o file_dialog_verify    examples/file_dialog_verify.c   && ./file_dialog_verify
+cc -O2 -framework AppKit -o a11y_verify examples/a11y_verify.c  && ./a11y_verify
 ```
 
 `file_dialog_verify.c` drives a real macOS **NSOpenPanel** then **NSSavePanel**
@@ -95,3 +96,9 @@ through the objc runtime (the Phase-2 `Window.open_file_dialog` /
 `save_file_dialog` path) — pick a file / a save location and it prints the chosen
 paths. A modal needs a human click, so it is manual by nature; the automated bar is
 the headless `Err` contract in `tests/file_dialog.rx` plus this file compiling.
+
+`a11y_verify.c` sets the app's **NSAccessibility** label via objc (the Phase-3
+`Window.set_a11y_title` path) and reads it back — run with VoiceOver on to hear it.
+The engine-side a11y tree intake is pinned headless in `tests/accessibility.rx`;
+exposing the stored nodes as NSAccessibility CHILD elements (the ADR §4 remainder)
+is the VoiceOver-verified follow-up this file will grow.

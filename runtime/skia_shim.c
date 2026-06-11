@@ -4213,6 +4213,89 @@ int64_t ruxen_canvas_icu_available(int64_t self) {
     return rx_icu()->available ? 1 : 0;
 }
 
+/* ---- accessibility tree intake (docs/decisions/accessibility.md) ----
+ *
+ * L2 (quiver) describes its a11y tree to L1 as a FLAT list of nodes, each a fixed
+ * tuple of primitives keyed by a node id — the same flat-array/arena idiom quiver
+ * uses for retained data (no objc, no Ruxen objects cross the FFI). This is the
+ * ENGINE-SIDE store: pure C, NO Cocoa, so it is fully headless-testable in the
+ * forked harness (unlike the live NSAccessibility exposure, which is window-only
+ * and gated in sdl_window.c). Updates are WHOLESALE re-push (Tier-1): L2 clears +
+ * re-pushes on a tree change. The store is a process-wide fixed-capacity table,
+ * each slot owning its label string copy (the never-freed-singleton model). The
+ * macOS exposure of these nodes as NSAccessibility CHILD elements is the staged
+ * remainder (see the ADR); this intake is the contract L2 codes against today. */
+#define RXC_A11Y_CAP 256
+#define RXC_A11Y_LABEL_MAX 127
+
+typedef struct {
+    int64_t id;
+    int32_t role;
+    char    label[RXC_A11Y_LABEL_MAX + 1];
+    float   x, y, w, h;
+    int     used;
+} RxA11yNode;
+
+static RxA11yNode rxc_a11y_nodes[RXC_A11Y_CAP];
+static int        rxc_a11y_count = 0;
+
+/* Append or replace (by id) one a11y node. Returns RXC_OK, or RXC_ERR_QUEUE_FULL
+ * when the table is full (a new id with no free slot). role is a small stable int
+ * enum (0 group / 1 button / 2 static-text / 3 image / 4 heading / 5 link). The
+ * label is COPIED into engine-owned storage (truncated at RXC_A11Y_LABEL_MAX). */
+int64_t ruxen_canvas_push_a11y_node(int64_t id, int64_t role,
+        int64_t label, double x, double y, double w, double h) {
+    const char *lbl = (const char *)label;
+    /* replace if the id already exists (wholesale re-push reuses ids) */
+    RxA11yNode *slot = NULL;
+    for (int i = 0; i < rxc_a11y_count; i++) {
+        if (rxc_a11y_nodes[i].used && rxc_a11y_nodes[i].id == id) { slot = &rxc_a11y_nodes[i]; break; }
+    }
+    if (!slot) {
+        if (rxc_a11y_count >= RXC_A11Y_CAP) return RXC_ERR_QUEUE_FULL;
+        slot = &rxc_a11y_nodes[rxc_a11y_count++];
+    }
+    slot->id = id;
+    slot->role = (int32_t)role;
+    slot->x = (float)x; slot->y = (float)y; slot->w = (float)w; slot->h = (float)h;
+    slot->used = 1;
+    if (lbl) {
+        strncpy(slot->label, lbl, RXC_A11Y_LABEL_MAX);
+        slot->label[RXC_A11Y_LABEL_MAX] = '\0';
+    } else {
+        slot->label[0] = '\0';
+    }
+    return RXC_OK;
+}
+
+/* Drop all a11y nodes (the start of a wholesale re-push). */
+int64_t ruxen_canvas_clear_a11y_tree(void) {
+    rxc_a11y_count = 0;
+    /* zero so a stale label can't be read; cheap, bounded. */
+    memset(rxc_a11y_nodes, 0, sizeof(rxc_a11y_nodes));
+    return RXC_OK;
+}
+
+/* The number of stored a11y nodes — the headless pin reads this to prove the
+ * intake round-trips with no live window. */
+int64_t ruxen_canvas_a11y_node_count(void) {
+    return (int64_t)rxc_a11y_count;
+}
+
+/* The role of the n-th stored a11y node (0-based), or -1 if out of range — lets a
+ * pin verify the stored tuple, and (later) the macOS exposure read the store. */
+int64_t ruxen_canvas_a11y_node_role(int64_t n) {
+    if (n < 0 || n >= rxc_a11y_count) return -1;
+    return (int64_t)rxc_a11y_nodes[n].role;
+}
+
+/* The label of the n-th stored a11y node as a Ruxen-owned String, or "" if out of
+ * range. Lets a pin verify the label round-tripped. */
+int64_t ruxen_canvas_a11y_node_label(int64_t n) {
+    if (n < 0 || n >= rxc_a11y_count) return (int64_t)ruxen_string_from("");
+    return (int64_t)ruxen_string_from(rxc_a11y_nodes[n].label);
+}
+
 /* ---- event queue ---- */
 /* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the

@@ -415,7 +415,33 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
 
 ### Part B — accessibility bridge
 
-- _(in progress — ADR + minimal subset, see `docs/decisions/accessibility.md`.)_
+- [x] **ADR + minimal sound subset** (`docs/decisions/accessibility.md`). The ADR
+      fixes the L2→L1→macOS contract: L2 pushes a FLAT a11y tree (roles/labels/
+      frames keyed by node id — the quiver arena idiom); L1 stores it and exposes it
+      to macOS NSAccessibility via the objc runtime (the file-dialog pattern);
+      updates are wholesale re-push (Tier-1); a11y is live-window-only (fork-gated,
+      headless = clean unavailable). **Landed:**
+      - **Engine-side intake** (`Window.push_a11y_node(id, role, label, x,y,w,h)` /
+        `clear_a11y_tree` / `a11y_node_count` / `a11y_node_role` / `a11y_node_label`)
+        — pure C, NO Cocoa, so it round-trips HEADLESS. Re-pushing an id REPLACES
+        (wholesale re-push). This is the contract L2 codes against today.
+      - **Live window touch** (`Window.a11y_available?` probe + `Window.set_a11y_title`)
+        — the smallest real NSAccessibility setter (`[NSApp setAccessibilityLabel:]`)
+        on a real Cocoa object through objc, fork-gated (false / Err under the
+        harness, the file-dialog discipline).
+      - `Window.a11y_role_*` constants (group/button/static-text/image/heading/link).
+      Pins: `tests/accessibility.rx` (intake round-trips headless — push N → count
+      N, role/label stored, re-push-by-id replaces, clear → 0; the
+      `a11y_available?` / `set_a11y_title` contract under the forked harness — set
+      succeeds iff available). Live proof: `examples/a11y_verify.c` (compiles +
+      `PASS` — the NSAccessibility label round-trips through objc).
+      **Staged (the ADR §4 remainder, filed with reason):** exposing the stored
+      nodes as NSAccessibility CHILD elements (a custom `NSAccessibilityElement` /
+      `objc_allocateClassPair` dance) + focus — its CORRECTNESS needs a live window +
+      VoiceOver, which the forked harness can't run (Cocoa after fork is blocked,
+      exactly like file dialogs / on-screen Metal), so it is a manual
+      `examples/a11y_verify.c`-grown remainder, not automated. The automated bar
+      this cycle is the headless intake pin + the probe contract.
 
 ## Later cycles
 

@@ -718,6 +718,54 @@ int64_t ruxen_canvas_file_dialog_available(void) {
     return rx_appkit_init() ? 1 : 0;
 }
 
+/* ---- accessibility: live macOS NSAccessibility window touch ----
+ * docs/decisions/accessibility.md. The ENGINE-SIDE a11y tree intake is in
+ * skia_shim.c (pure C, headless). HERE is the live macOS exposure, which needs
+ * Cocoa and is therefore window-only + fork-gated (the file-dialog discipline:
+ * NSAccessibility on a real object is unsafe after fork()). This cycle's minimal
+ * sound subset is the WINDOW-level a11y touch: an availability probe + setting the
+ * shared NSApplication's accessibility label — the smallest real NSAccessibility
+ * setter on a real Cocoa object, proving the objc path. The CHILD-element array
+ * exposure (each stored node as an NSAccessibilityElement) is the staged remainder
+ * (a custom objc class / NSAccessibilityElement dance, VoiceOver-verified — the
+ * ADR's §4), filed for a manual examples/a11y_verify.c. */
+
+/* True (1) when the live macOS a11y bridge COULD run: not under the forked harness
+ * and the objc runtime + AppKit are reachable. Headless / forked -> 0 so callers
+ * degrade cleanly (a11y is a live-window-only capability). */
+int64_t ruxen_canvas_window_a11y_available(void) {
+    if (!rx_window_allowed()) return 0;
+    return rx_appkit_init() ? 1 : 0;
+}
+
+/* Set the application's accessibility title/label (the window-level a11y exposure
+ * — the window/app IS an a11y element before any child is). RXC_OK on success;
+ * RXC_ERR_NO_SDL when headless / forked / objc unavailable (never a crash, never a
+ * silent no-op). The deeper per-window NSWindow.setAccessibilityTitle: via
+ * SDL_GetWindowWMInfo is deferred with the child-element work (it needs the
+ * version-dependent SysWMinfo struct ABI); [NSApp setAccessibilityLabel:] is a
+ * real NSAccessibility setter on a real Cocoa object reached through the existing
+ * objc path, with no struct-ABI risk — the smallest sound touch. */
+int64_t ruxen_canvas_window_set_a11y_title(int64_t title) {
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;
+    if (!rx_appkit_init())    return RXC_ERR_NO_SDL;
+    const char *t = (const char *)title;
+    if (!t) return RXC_ERR_BAD_ARGS;
+    void *appCls = ak_cls("NSApplication");
+    if (!appCls) return RXC_ERR_NO_SDL;
+    void *app = ak_msg(appCls, "sharedApplication");
+    if (!app) return RXC_ERR_NO_SDL;
+    void *strCls = ak_cls("NSString");
+    if (!strCls) return RXC_ERR_NO_SDL;
+    void *(*mk)(void *, void *, const char *) =
+        (void *(*)(void *, void *, const char *))s_objc_msgSend;
+    void *ns = mk(strCls, s_sel("stringWithUTF8String:"), t);
+    if (!ns) return RXC_ERR_NO_SDL;
+    /* [NSApp setAccessibilityLabel:ns] — a real NSAccessibility protocol setter. */
+    ak_msg_p(app, "setAccessibilityLabel:", ns);
+    return RXC_OK;
+}
+
 /* Whether opening a REAL OS window is permitted in this process. macOS forbids
  * CoreFoundation / AppKit / Metal windowing after fork() without exec(); the
  * `ruxen test` harness forks per test case, so opening real windows there is
