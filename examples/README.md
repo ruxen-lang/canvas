@@ -75,3 +75,23 @@ exits.
 cp /path/to/canvas/examples/counter.rx /tmp/counter_app/src/main.rx
 cd /tmp/counter_app && RUXEN_ALLOW_EXTERNAL_PATH=1 ruxen run
 ```
+
+## Standalone `*_verify.c` live proofs (manual, on a real desktop)
+
+Some engine paths need a real window / GPU / display / human click and so CANNOT
+run in the forked, headless test harness. Each is a self-contained C file (dlopen,
+no link deps) that replicates the shim's exact call sequence and prints `PASS` /
+`SKIP`. They are MANUAL — compiled and run by a human on a desktop, never wired
+into anything automated (the harness pins the headless contract instead).
+
+```bash
+cc -O2 -o metal_window_verify  examples/metal_window_verify.c   && ./metal_window_verify
+cc -O2 -o window_mgmt_verify    examples/window_mgmt_verify.c   && ./window_mgmt_verify
+cc -O2 -o file_dialog_verify    examples/file_dialog_verify.c   && ./file_dialog_verify
+```
+
+`file_dialog_verify.c` drives a real macOS **NSOpenPanel** then **NSSavePanel**
+through the objc runtime (the Phase-2 `Window.open_file_dialog` /
+`save_file_dialog` path) — pick a file / a save location and it prints the chosen
+paths. A modal needs a human click, so it is manual by nature; the automated bar is
+the headless `Err` contract in `tests/file_dialog.rx` plus this file compiling.

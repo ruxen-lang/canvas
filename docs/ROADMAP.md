@@ -246,7 +246,30 @@ headless (capability + fallback) and pixel-verify via a standalone
       `tests/file_drop.rx` (path round-trip; a >32-byte path intact proving no
       truncation; multi-file FIFO; the FileDrop/TextEditing side-channels stay
       separate; the `window_pump_test_dropfile` seam matches the live handler).
-- [ ] **File dialogs.**
+- [x] **File dialogs.** **DONE (macOS).** `Window.open_file_dialog ->
+      Result[String, String]` and `Window.save_file_dialog(default_name) ->
+      Result[String, String]` drive a real **NSOpenPanel / NSSavePanel** through the
+      objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend` to `[NSOpenPanel
+      openPanel]` / `[NSSavePanel savePanel]`, foreground-app activation so the modal
+      can take key focus, `[panel runModal]`, then `[[panel URL] path].UTF8String`)
+      — no new link dependency, the SAME pattern the Metal device path already uses.
+      Modal + main-thread (the engine is single-threaded on main, so `runModal` is a
+      direct synchronous call). The chosen path returns as a Ruxen-owned String
+      (`ruxen_string_from`); cancel / unavailable returns the EMPTY string (never
+      NULL), which the Ruxen wrapper maps to `Err` — and `Window.file_dialogs_available?`
+      gates the capability. **HONEST-SCOPE — landed subset + the precise remainder:**
+      Cocoa is unsafe after `fork()`-without-`exec()` (the same constraint as
+      Metal/CF), and the test harness forks per case, so under the harness the
+      dialogs are gated OFF (`RUXEN_TEST_FORMAT`, via the shared `rx_window_allowed`
+      gate) and return a clean, PROMPT `Err` — never a hang, never a silent no-op,
+      never a String from NULL. The LIVE modal needs a real human click, so it is
+      proven by the MANUAL `examples/file_dialog_verify.c` (compile-checked, run by a
+      human on a desktop), NOT wired into anything automated. The automated bar is
+      the headless `Err` pin (`tests/file_dialog.rx`) + the example compiling.
+      **Remaining (filed, not blocking):** non-macOS backends (GTK
+      `GtkFileChooser` on Linux, `IFileDialog` on Windows) are a later
+      platform-matrix item — `file_dialogs_available?` is simply false off macOS
+      today, so callers degrade cleanly.
 - [x] **Fullscreen / minimize-maximize / DPI-change events.** **DONE.** Per-window
       setters, each resolving its `RxWin` slot by the owning host (multi-window
       correct): `Window#set_fullscreen(on:)` (`SDL_SetWindowFullscreen` with

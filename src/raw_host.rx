@@ -139,6 +139,14 @@ class RawHost
     # static (no self); cursor_available gates the Err contract.
     def self.set_cursor as "ruxen_canvas_set_cursor"(kind: Int) -> Int
     def self.cursor_available as "ruxen_canvas_cursor_available" -> Int
+    # Native file dialogs (Phase 2, macOS NSOpenPanel/NSSavePanel via objc). Modal,
+    # process-global, so static. Each returns the chosen path (a Ruxen-owned String
+    # via ruxen_string_from) or the EMPTY string on cancel/unavailable/headless —
+    # NEVER NULL, so the `-> String` binding is always safe. file_dialog_available
+    # gates whether Cocoa is reachable (false under the forked harness).
+    def self.open_file_dialog as "ruxen_canvas_open_file_dialog" -> String
+    def self.save_file_dialog as "ruxen_canvas_save_file_dialog"(default_name: &String) -> String
+    def self.file_dialog_available as "ruxen_canvas_file_dialog_available" -> Int
     # Window management (Phase-1.5). Per-window setters resolve their slot by self;
     # each Errs RXC_ERR_PRESENT with no live window, RXC_ERR_NO_SDL if the SDL
     # entry point is absent. set_fullscreen uses FULLSCREEN_DESKTOP (borderless).

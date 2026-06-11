@@ -1,0 +1,38 @@
+# Pin tests for native file dialogs (docs/ROADMAP.md Phase 2): NSOpenPanel /
+# NSSavePanel via the objc runtime through dlopen (macOS).
+#
+# HONEST-SCOPE: a modal dialog needs a real click and Cocoa is unsafe after the
+# fork() the test harness does per case, so the LIVE modal can't run in-harness.
+# These pins assert the HEADLESS CONTRACT only: under the forked harness, file
+# dialogs report unavailable and each call Errs cleanly and PROMPTLY (never a hang,
+# never a String built from NULL, never a silent no-op). The live behaviour is
+# proven by the manual examples/file_dialog_verify.c (a human picks a file).
+
+Tester.describe("native file dialogs — headless contract") do |t: &var Tester|
+  t.it("reports unavailable under the forked harness (Cocoa-after-fork is unsafe)") do
+    # The harness sets RUXEN_TEST_FORMAT, which gates the Cocoa path off, so the
+    # capability probe is false here. On a real single-threaded run it would be true.
+    t.expect(Window.file_dialogs_available?).to_eq(false)
+  end
+
+  t.it("open_file_dialog Errs cleanly when unavailable (no hang, no crash)") do
+    match Window.open_file_dialog
+      Ok(_)  -> panic!("expected Err headless — a modal cannot run in the forked harness")
+      Err(_) -> t.expect(true).to_eq(true)
+    end
+  end
+
+  t.it("save_file_dialog Errs cleanly when unavailable") do
+    match Window.save_file_dialog("untitled.txt")
+      Ok(_)  -> panic!("expected Err headless")
+      Err(_) -> t.expect(true).to_eq(true)
+    end
+  end
+
+  t.it("save_file_dialog tolerates an empty default name") do
+    match Window.save_file_dialog("")
+      Ok(_)  -> panic!("expected Err headless")
+      Err(_) -> t.expect(true).to_eq(true)
+    end
+  end
+end

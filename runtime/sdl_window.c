@@ -329,6 +329,12 @@ static void *(*s_sel)(const char *);
 static int   s_metal_have_fns = 0;
 static int   s_metal_objc_ok = 0;
 
+/* objc_getClass — look a class up by name (NSOpenPanel / NSSavePanel /
+ * NSApplication / NSURL). Resolved lazily in rx_appkit_init() for the file-dialog
+ * path; a miss forecloses native dialogs (clean Err). */
+static void *(*s_objc_getClass)(const char *);
+static int   s_appkit_ok = 0;
+
 /* ---- multi-window state (docs/MULTIWINDOW.md) ----
  *
  * Each live OS window is one RxWin slot, keyed by the RxHost pointer that owns
@@ -563,6 +569,153 @@ static void mtl_set_drawable_size(void *layer, double w, double h) {
     void (*m)(void *, void *, double, double) =
         (void (*)(void *, void *, double, double))s_objc_msgSend;
     m(layer, s_sel("setDrawableSize:"), w, h);
+}
+
+/* ---- native file dialogs (macOS NSOpenPanel / NSSavePanel, docs/ROADMAP.md) ----
+ *
+ * Reached through the objc runtime + AppKit by dlopen — no new link dependency,
+ * exactly the discipline the Metal device path already uses (objc_msgSend dances).
+ * A modal NSOpenPanel/NSSavePanel runs on the MAIN thread (the engine is
+ * single-threaded on main, so runModal is a direct synchronous call).
+ *
+ * HONEST-SCOPE: Cocoa is unsafe after fork()-without-exec() (the same constraint
+ * as Metal/CF — the test harness forks per case), so under the harness these are
+ * gated OFF (rx_window_allowed) and return a clean Err. The live modal is proven by
+ * the human-interactive examples/file_dialog_verify.c (a modal needs a real click),
+ * which is a MANUAL example, not wired into anything automated. */
+static int rx_window_allowed(void);   /* fwd: the fork gate (shared with windowing) */
+
+/* Resolve objc_getClass + ensure AppKit is loaded so the panel classes exist.
+ * Reuses s_objc_msgSend / s_sel from metal_objc_init. A miss -> 0 (no dialogs). */
+static int rx_appkit_init(void) {
+    if (s_appkit_ok) return 1;
+    if (!metal_objc_init()) return 0;   /* gives us objc_msgSend + sel_registerName */
+    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) return 0;
+    s_objc_getClass = (void *(*)(const char *))dlsym(objc, "objc_getClass");
+    if (!s_objc_getClass) return 0;
+    /* AppKit must be loaded so NSOpenPanel / NSSavePanel / NSApplication are
+     * registered with the runtime before objc_getClass can find them. */
+    if (!dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW | RTLD_GLOBAL))
+        return 0;
+    s_appkit_ok = 1;
+    return 1;
+}
+
+/* objc message-send wrappers for the dialog path (object-returning, and the
+ * NSInteger-returning runModal). Cast per signature for the arm64/x86_64 ABI. */
+static void *ak_cls(const char *name)            { return s_objc_getClass(name); }
+static void *ak_msg(void *o, const char *s)      { return s_objc_msgSend(o, s_sel(s)); }
+static void *ak_msg_p(void *o, const char *s, void *a) {
+    void *(*m)(void *, void *, void *) = (void *(*)(void *, void *, void *))s_objc_msgSend;
+    return m(o, s_sel(s), a);
+}
+/* [panel setXxx:(BOOL)flag] — BOOL is a signed char in the ABI. */
+static void ak_msg_b(void *o, const char *s, int flag) {
+    void (*m)(void *, void *, signed char) = (void (*)(void *, void *, signed char))s_objc_msgSend;
+    m(o, s_sel(s), (signed char)(flag ? 1 : 0));
+}
+/* [panel runModal] -> NSInteger (long). A distinct cast: the return register/type
+ * differs from the object-returning send. */
+static long ak_msg_l(void *o, const char *s) {
+    long (*m)(void *, void *) = (long (*)(void *, void *))s_objc_msgSend;
+    return m(o, s_sel(s));
+}
+
+/* NSModalResponseOK on modern macOS is 1 ([NSApplication runModalForWindow] / the
+ * panel's runModal returns this when the user confirms; cancel returns 0). */
+#define RX_NS_MODAL_OK 1
+
+/* Bring the process up as a foreground app so a modal panel can take focus +
+ * key-window, which a plain CLI (no NSApplication) otherwise can't. Best-effort
+ * and idempotent: [NSApplication sharedApplication];
+ * [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+ * [NSApp activateIgnoringOtherApps:YES]. */
+static void rx_appkit_activate(void) {
+    void *appCls = ak_cls("NSApplication");
+    if (!appCls) return;
+    void *app = ak_msg(appCls, "sharedApplication");
+    if (!app) return;
+    /* setActivationPolicy: takes an NSInteger (0 == NSApplicationActivationPolicyRegular). */
+    long (*setpol)(void *, void *, long) = (long (*)(void *, void *, long))s_objc_msgSend;
+    setpol(app, s_sel("setActivationPolicy:"), 0);
+    ak_msg_b(app, "activateIgnoringOtherApps:", 1);
+}
+
+/* An EMPTY Ruxen-owned String — the return for every non-success dialog path
+ * (cancel / unavailable / headless). The shim NEVER returns NULL for these
+ * String-returning functions, so the Ruxen `-> String` binding is always safe; the
+ * wrapper maps an empty path to Err (cancel/unavailable) and a non-empty one to
+ * Ok(path). A file dialog never legitimately returns the empty path, so "" is an
+ * unambiguous failure sentinel that is still a valid Ruxen String. */
+static int64_t rx_empty_rx_string(void) { return (int64_t)ruxen_string_from(""); }
+
+/* Run a modal NSOpenPanel and return the chosen path as a Ruxen-owned String, or
+ * the EMPTY string on cancel / unavailable / headless (never NULL). */
+int64_t ruxen_canvas_open_file_dialog(void) {
+    if (!rx_window_allowed()) return rx_empty_rx_string();  /* forked harness: no Cocoa */
+    if (!rx_appkit_init())    return rx_empty_rx_string();
+    rx_appkit_activate();
+    void *cls = ak_cls("NSOpenPanel");
+    if (!cls) return rx_empty_rx_string();
+    void *panel = ak_msg(cls, "openPanel");
+    if (!panel) return rx_empty_rx_string();
+    ak_msg_b(panel, "setCanChooseFiles:", 1);
+    ak_msg_b(panel, "setCanChooseDirectories:", 0);
+    ak_msg_b(panel, "setAllowsMultipleSelection:", 0);
+    long resp = ak_msg_l(panel, "runModal");
+    if (resp != RX_NS_MODAL_OK) return rx_empty_rx_string();   /* user cancelled */
+    void *url = ak_msg(panel, "URL");
+    if (!url) return rx_empty_rx_string();
+    void *nsstr = ak_msg(url, "path");
+    if (!nsstr) return rx_empty_rx_string();
+    const char *cpath = (const char *)ak_msg(nsstr, "UTF8String");
+    if (!cpath) return rx_empty_rx_string();
+    return (int64_t)ruxen_string_from(cpath);   /* Ruxen-owned copy of the path */
+}
+
+/* Run a modal NSSavePanel (with an optional suggested filename) and return the
+ * chosen save path as a Ruxen-owned String, or the EMPTY string on cancel /
+ * unavailable (never NULL). */
+int64_t ruxen_canvas_save_file_dialog(int64_t default_name) {
+    if (!rx_window_allowed()) return rx_empty_rx_string();
+    if (!rx_appkit_init())    return rx_empty_rx_string();
+    rx_appkit_activate();
+    void *cls = ak_cls("NSSavePanel");
+    if (!cls) return rx_empty_rx_string();
+    void *panel = ak_msg(cls, "savePanel");
+    if (!panel) return rx_empty_rx_string();
+    const char *dn = (const char *)default_name;
+    if (dn && dn[0]) {
+        /* [panel setNameFieldStringValue:[NSString stringWithUTF8String:dn]] */
+        void *strCls = ak_cls("NSString");
+        if (strCls) {
+            void *(*mk)(void *, void *, const char *) =
+                (void *(*)(void *, void *, const char *))s_objc_msgSend;
+            void *ns = mk(strCls, s_sel("stringWithUTF8String:"), dn);
+            if (ns) ak_msg_p(panel, "setNameFieldStringValue:", ns);
+        }
+    }
+    long resp = ak_msg_l(panel, "runModal");
+    if (resp != RX_NS_MODAL_OK) return rx_empty_rx_string();
+    void *url = ak_msg(panel, "URL");
+    if (!url) return rx_empty_rx_string();
+    void *nsstr = ak_msg(url, "path");
+    if (!nsstr) return rx_empty_rx_string();
+    const char *cpath = (const char *)ak_msg(nsstr, "UTF8String");
+    if (!cpath) return rx_empty_rx_string();
+    return (int64_t)ruxen_string_from(cpath);
+}
+
+/* True (1) when native file dialogs COULD run here: not under the forked harness,
+ * and the objc runtime + AppKit are reachable. Gates the Ruxen Ok/Err so a String
+ * is never built from a NULL path. Does NOT prove a display/WindowServer is present
+ * (a fully headless host may still get a nil panel), but the dialog functions
+ * return 0 cleanly in that case too. */
+int64_t ruxen_canvas_file_dialog_available(void) {
+    if (!rx_window_allowed()) return 0;
+    return rx_appkit_init() ? 1 : 0;
 }
 
 /* Whether opening a REAL OS window is permitted in this process. macOS forbids

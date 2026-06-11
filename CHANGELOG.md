@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native file dialogs (macOS) — `Window.open_file_dialog` /
+  `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
+  through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,
+  foreground-app activation, `[panel runModal]`, `[[panel URL] path]`) — no new link
+  dependency, the same pattern the Metal device path uses. The chosen path returns
+  as a Ruxen-owned String; cancel / unavailable returns the empty string (never
+  NULL) which the wrapper maps to `Err`, and `Window.file_dialogs_available?` gates
+  the capability. **Honest-scope:** Cocoa is unsafe after `fork()`, and the harness
+  forks per case, so the dialogs are gated OFF under the harness and return a clean,
+  PROMPT `Err` (never a hang). The live modal (needs a human click) is the manual
+  `examples/file_dialog_verify.c` (compile-checked, not automated); the headless Err
+  contract is pinned in `tests/file_dialog.rx`. Non-macOS backends (GTK/Win32) are a
+  later platform-matrix item — `file_dialogs_available?` is false off macOS, so
+  callers degrade cleanly.
 - **Per-window / multi-monitor refresh rate — `Window#refresh_rate` (Phase 2).**
   An INSTANCE `Window#refresh_rate -> Result[Int, String]` (distinct from the
   existing static `Window.refresh_rate`, which stays display-0) reports the Hz of

@@ -367,6 +367,58 @@ class Window
     RawHost.cursor_available == 1
   end
 
+  ## ---- native file dialogs (Phase 2, macOS) ----
+  ##
+  ## NSOpenPanel / NSSavePanel via the objc runtime through `dlopen` — no new link
+  ## dependency (the same pattern the Metal device path uses). The panels are MODAL
+  ## and run on the main thread; the engine is single-threaded on main, so these are
+  ## direct synchronous calls that return once the user confirms or cancels.
+  ##
+  ## HONEST-SCOPE: Cocoa is unsafe after `fork()`-without-`exec()` (the same
+  ## constraint as Metal/CF), and the test harness forks per case, so under the
+  ## harness these are gated OFF and return `Err` — the headless contract the pin
+  ## asserts. The live modal (which needs a real click) is proven by the manual
+  ## `examples/file_dialog_verify.c`, not by any automated test.
+
+  ## Show a modal "Open file" dialog and return the chosen file's path. `Ok(path)`
+  ## when the user picks a file; `Err` when they cancel, or when file dialogs are
+  ## unavailable (headless / not macOS / the forked harness). Process-global modal,
+  ## so a class method.
+  def self.open_file_dialog -> Result[String, String]
+    if RawHost.file_dialog_available != 1
+      return Err("canvas: file dialogs unavailable (headless / not macOS)")
+    end
+    let path = RawHost.open_file_dialog
+    if path == ""
+      Err("canvas: open file dialog cancelled")
+    else
+      Ok(path)
+    end
+  end
+
+  ## Show a modal "Save file" dialog (pre-filling the name field with
+  ## `default_name`) and return the chosen save path. `Ok(path)` when the user
+  ## confirms a location; `Err` on cancel or when file dialogs are unavailable.
+  ## Process-global modal, so a class method.
+  def self.save_file_dialog(default_name: String) -> Result[String, String]
+    if RawHost.file_dialog_available != 1
+      return Err("canvas: file dialogs unavailable (headless / not macOS)")
+    end
+    let path = RawHost.save_file_dialog(&default_name)
+    if path == ""
+      Err("canvas: save file dialog cancelled")
+    else
+      Ok(path)
+    end
+  end
+
+  ## True when native file dialogs can run here (objc + AppKit reachable, not under
+  ## the forked test harness). A capability probe so callers can hide a "browse…"
+  ## button on a host without dialogs.
+  def self.file_dialogs_available? -> Bool
+    RawHost.file_dialog_available == 1
+  end
+
   ## Stock cursor-kind constants for `set_cursor` (see its doc), so call sites read
   ## `Window.set_cursor(Window.cursor_ibeam)` rather than a bare `1`.
   def self.cursor_arrow -> Int
