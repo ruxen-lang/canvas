@@ -220,6 +220,14 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(path_set_filltype,         "sk_path_set_filltype");
     RX_SK_OPTIONAL(canvas_draw_path,          "sk_canvas_draw_path");
 
+    /* Path effects (dashing). The symbols ARE present in the pinned 3.119.4
+     * libSkiaSharp — Phase-1 searched `sk_patheffect_*` (wrong) and missed the
+     * real `sk_path_effect_*` names (docs/ROADMAP.md Phase-1.5). OPTIONAL: a miss
+     * makes ruxen_canvas_draw_dashed_line return RXC_ERR_NO_SKIA (honest probe). */
+    RX_SK_OPTIONAL(path_effect_create_dash,   "sk_path_effect_create_dash");
+    RX_SK_OPTIONAL(path_effect_unref,         "sk_path_effect_unref");
+    RX_SK_OPTIONAL(paint_set_path_effect,     "sk_paint_set_path_effect");
+
     /* Ganesh GL backend (docs/GPU.md). OPTIONAL: a miss leaves gpu_gl_ok = 0,
      * disabling only the GPU rung — the raster backend is untouched. */
     RX_SK_OPTIONAL(gr_glinterface_assemble_gl,    "gr_glinterface_assemble_gl_interface");
@@ -1794,6 +1802,55 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
     sk_paint_t *paint = rx_make_paint(sk, h, argb, width);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Stroked DASHED line from (x0,y0) to (x1,y1): a 2-interval [on_len, off_len]
+ * dash pattern with a `phase` offset into it (Skia repeats the pattern along the
+ * stroke). `phase` shifts the start of the dash run (e.g. animate it for a
+ * marching-ants selection). Skia-only — RXC_ERR_NO_SKIA when the backend or the
+ * dash symbols are absent (the symbols ARE present in the pinned build, see the
+ * loader note; this is the honest fallback, never a NULL-stub lie). A
+ * non-positive on_len, a negative off_len, or a non-positive stroke_w is
+ * RXC_ERR_BAD_ARGS (a dash needs a real stroke + a real "on" run).
+ *
+ * Memory: the dash path-effect is OWNED — created, set on the paint (the paint
+ * takes its own reference), then unref'd here, then the paint is deleted. No
+ * leak on any exit path. */
+int64_t ruxen_canvas_draw_dashed_line(int64_t self, double x0, double y0,
+                                      double x1, double y1, double stroke_w,
+                                      double on_len, double off_len, double phase,
+                                      int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    /* gate on BOTH the line draw AND the dash creator so a build missing dash
+     * Errs cleanly rather than drawing a solid line that lies about being dashed. */
+    sk_canvas_t *canvas = rx_skia_draw_begin(
+        h, h ? (const void *)rx_skia()->canvas_draw_line : NULL, &sk, &err);
+    if (!canvas) return err;
+    if (!sk->path_effect_create_dash || !sk->path_effect_unref ||
+        !sk->paint_set_path_effect) {
+        return RXC_ERR_NO_SKIA;
+    }
+    if (!rxc_finite_pixels(x0) || !rxc_finite_pixels(y0) ||
+        !rxc_finite_pixels(x1) || !rxc_finite_pixels(y1) ||
+        !rxc_finite_pixels(stroke_w) || !rxc_finite_pixels(on_len) ||
+        !rxc_finite_pixels(off_len) || !rxc_finite_pixels(phase)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    if (!(stroke_w > 0.0) || !(on_len > 0.0) || off_len < 0.0) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    const float intervals[2] = { (float)on_len, (float)off_len };
+    sk_path_effect_t *dash = sk->path_effect_create_dash(intervals, 2, (float)phase);
+    if (!dash) { sk->paint_delete(paint); return RXC_ERR_NO_SKIA; }
+    sk->paint_set_path_effect(paint, dash);
+    sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->path_effect_unref(dash);   /* paint holds its own ref; safe to drop ours */
     sk->paint_delete(paint);
     return RXC_OK;
 }

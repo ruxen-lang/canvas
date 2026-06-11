@@ -7,6 +7,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Dash path effect — `Canvas#draw_dashed_line` (Phase-1.5).** A stroked line
+  with an `[on_len, off_len]` dash pattern and a `phase` offset, via
+  `sk_path_effect_create_dash`. **Re-verdict on Phase-1's "binary blocked":** that
+  conclusion was a FALSE NEGATIVE from grepping `sk_patheffect_*` (no underscore
+  split); the pinned 3.119.4 `libSkiaSharp` exports the real `sk_path_effect_*`
+  names (`_create_dash` / `_unref`) plus `sk_paint_set_path_effect`, confirmed by
+  `nm -gU`. So dash bound on the EXISTING binary — no `fetch_skia.sh` change, no
+  re-fetch, no new SHA. The owned path-effect is created → set on the paint (which
+  takes its own ref) → unref'd → the paint deleted (no leak on any path).
+  `on_len<=0` / `off_len<0` / `width<=0` is `Err`; Skia-only (clean
+  `RXC_ERR_NO_SKIA` if a build lacks the symbols — an honest probe, never a
+  NULL-stub). Pixel-pinned in `tests/canvas_dash.rx` (an on-run pixel is inked, an
+  off-gap pixel stays background, and a solid-line control inks that same gap
+  column). See `docs/ROADMAP.md` Phase-1.5 for the full symbol table.
 - **Mouse cursors — `Window.set_cursor(kind)` (E2).** Stock system cursors via
   `SDL_CreateSystemCursor`, a small int enum (0 arrow / 1 ibeam / 2 hand /
   3 crosshair / 4 resize-h / 5 resize-v — `Window.cursor_*` constants name them),

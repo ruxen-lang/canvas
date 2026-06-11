@@ -34,6 +34,7 @@ typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
 typedef struct sk_path_t       sk_path_t;
+typedef struct sk_path_effect_t sk_path_effect_t;
 typedef struct sk_fontstyle_t  sk_fontstyle_t;
 typedef struct sk_textblob_t         sk_textblob_t;
 typedef struct sk_textblob_builder_t sk_textblob_builder_t;
@@ -261,6 +262,19 @@ typedef void       (*pfn_path_arc_to)(sk_path_t *, float rx, float ry, float x_a
 typedef void       (*pfn_path_close)(sk_path_t *);
 typedef void       (*pfn_path_set_filltype)(sk_path_t *, int /*sk_path_filltype_t*/);
 typedef void       (*pfn_canvas_draw_path)(sk_canvas_t *, const sk_path_t *, const sk_paint_t *);
+
+/* ---- path effects (dashing) ----
+ * SkiaSharp's flat C API names these `sk_path_effect_*` and the setter
+ * `sk_paint_set_path_effect` (the Phase-1 "blocked" verdict searched the wrong
+ * name, `sk_patheffect_*`, and missed them — see docs/ROADMAP.md). The dash
+ * effect takes an interval array [on, off, on, off, ...] (count must be EVEN and
+ * >= 2; Skia repeats the pattern) and a phase offset into the pattern; the
+ * returned effect is OWNED — release it with sk_path_effect_unref after setting
+ * it on the paint (the paint takes its own reference). */
+typedef sk_path_effect_t *(*pfn_path_effect_create_dash)(const float intervals[],
+        int count, float phase);
+typedef void              (*pfn_path_effect_unref)(sk_path_effect_t *);
+typedef void              (*pfn_paint_set_path_effect)(sk_paint_t *, sk_path_effect_t *);
 
 /* ---- Ganesh GL backend (the GPU surface, docs/GPU.md) ----
  *
@@ -532,6 +546,11 @@ typedef struct {
     pfn_path_close         path_close;
     pfn_path_set_filltype  path_set_filltype;
     pfn_canvas_draw_path   canvas_draw_path;
+
+    /* Path effects (dashing) — OPTIONAL; absence makes draw_dashed_line Err. */
+    pfn_path_effect_create_dash path_effect_create_dash;
+    pfn_path_effect_unref       path_effect_unref;
+    pfn_paint_set_path_effect   paint_set_path_effect;
 
     /* Ganesh GL backend (OPTIONAL; absence disables only the GPU rung). */
     pfn_gr_glinterface_assemble_gl       gr_glinterface_assemble_gl;

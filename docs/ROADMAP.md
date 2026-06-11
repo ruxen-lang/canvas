@@ -114,12 +114,16 @@ headless (capability + fallback) and pixel-verify via a standalone
       soft shadows of any shape). `sigma <= 0` is `Err`; Skia-only. Pixel-pinned in
       `tests/canvas_blur.rx` (ink spreads past a hard edge under blur; a control
       without the layer keeps the same pixel hard; sigma validation).
-- [~] **Dash path effect** — **DEFERRED to Phase-1.5: BLOCKED on the fetched
-      binary.** This `libSkiaSharp` exports zero `sk_patheffect_*` symbols, so a
-      sound binding is impossible without re-fetching a build that has them (a
-      NULL-returning stub that lies in its probe is forbidden by the FFI
-      invariants). Full rationale + the precise `fetch_skia.sh` remediation are in
-      the Phase-1.5 checklist below. No code landed (honest scope, not a no-op).
+- [x] **Dash path effect** — **LANDED in Phase-1.5. The Phase-1 "blocked" verdict
+      was a FALSE NEGATIVE** — it searched for `sk_patheffect_*` (no underscore
+      split) + `sk_paint_set_patheffect`, neither of which is SkiaSharp's naming.
+      The pinned 3.119.4 `libSkiaSharp` DOES export the path-effect C API under
+      `sk_path_effect_*`. Bound on the EXISTING binary (no re-fetch, no new SHA):
+      `Canvas#draw_dashed_line(x0,y0,x1,y1,width,on_len,off_len,phase,color)` — an
+      [on, off] interval dash with a phase offset. Owned effect created → set on the
+      paint → unref'd → paint deleted (no leak). `on_len<=0` / `off_len<0` /
+      `width<=0` is `Err`; Skia-only. Pixel-pinned in `tests/canvas_dash.rx`. Full
+      re-verdict + symbol table in the Phase-1.5 section below.
 
 ### E2 — desktop services core
 
@@ -160,18 +164,31 @@ headless (capability + fallback) and pixel-verify via a standalone
 
 ## Phase 1.5 — deferred (explicit checklist; NOT implemented in Phase 1)
 
-- [ ] **Dash path effect** (`sk_patheffect_create_dash`). **Blocked on the fetched
-      `libSkiaSharp` binary:** `nm -gU` on the fetched dylib shows **zero
-      `sk_patheffect_*` symbols** — the prebuilt does not export the path-effect C
-      API at all (same class as the absent SkParagraph/SkShaper). Binding it would
-      either fail to resolve or (worse) resolve to a NULL-returning stub that lies
-      in its capability probe — exactly the "silent no-op / silently-wrong" path
-      the repo's FFI invariants forbid. **Remediation:** point
-      `runtime/fetch_skia.sh` at a `libSkiaSharp` build that exports
-      `sk_patheffect_create_dash` + `sk_patheffect_unref` (and verify
-      `sk_paint_set_patheffect` is present), add a new per-RID SHA pin, then the
-      binding is the usual additive 4-step + a pin (dashed line has gaps at
-      predicted pixels). Until that binary is wired, dash stays unimplemented.
+- [x] **Dash path effect** — **DONE. Re-verdict (2026-06-11): the Phase-1 "binary
+      blocked" conclusion was a false negative from searching the WRONG symbol
+      name.** Phase-1 ran `nm -gU | grep patheffect` and found nothing, concluding
+      the prebuilt lacked the path-effect C API. But SkiaSharp's flat C API spells
+      these with an underscore between `path` and `effect`. Re-running `nm -gU` on
+      the SAME pinned `~/.cache/ruxen-canvas/libSkiaSharp.dylib` (3.119.4) shows the
+      full path-effect surface IS exported:
+
+      | Phase-1 searched (not found) | Actual symbol (PRESENT) |
+      |---|---|
+      | `sk_patheffect_create_dash` | `sk_path_effect_create_dash` ✅ |
+      | `sk_patheffect_unref`       | `sk_path_effect_unref` ✅ |
+      | `sk_paint_set_patheffect`   | `sk_paint_set_path_effect` ✅ |
+
+      (the build also exports `sk_path_effect_create_{compose,sum,discrete,corner,
+      1d_path,2d_line,2d_path,trim}` — the whole family.) So **no `fetch_skia.sh`
+      change, no re-fetch, no new SHA** — dash was bindable on the pinned binary all
+      along. Bound as the usual additive 4-step (3 OPTIONAL loader symbols + one
+      `ruxen_canvas_draw_dashed_line` shim entry + `Canvas#draw_dashed_line`) with
+      the owned-effect lifecycle (create → set-on-paint → unref → delete, no leak)
+      and an honest `RXC_ERR_NO_SKIA` if a build ever lacks the symbols. Pixel-pinned
+      in `tests/canvas_dash.rx` (on-run inked, off-gap blank, solid-line control).
+      **Lesson:** a negative `nm` grep is only as good as the symbol name guessed —
+      verify against the C-API header's actual naming before declaring a binary
+      blocked.
 - [ ] **Render-to-texture / raster cache.**
 - [ ] **Drag-and-drop.**
 - [ ] **File dialogs.**

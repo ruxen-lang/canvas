@@ -32,6 +32,7 @@ class RawHost
     def draw_round_rect_raw as "ruxen_canvas_draw_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
     def draw_rrect_radii_raw as "ruxen_canvas_draw_rrect_radii"(self, x: Float, y: Float, w: Float, h: Float, tl: Float, tr: Float, br: Float, bl: Float, stroke_w: Float, argb: Int) -> Int
     def draw_line_raw as "ruxen_canvas_draw_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_dashed_line_raw as "ruxen_canvas_draw_dashed_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, on_len: Float, off_len: Float, phase: Float, argb: Int) -> Int
     def draw_path_raw as "ruxen_canvas_draw_path"(self, path: Int, stroke_w: Float, argb: Int) -> Int
     def fill_rect_gradient_raw as "ruxen_canvas_fill_rect_gradient"(self, x: Float, y: Float, w: Float, h: Float, gx0: Float, gy0: Float, gx1: Float, gy1: Float, argb0: Int, argb1: Int) -> Int
     def fill_round_rect_gradient_raw as "ruxen_canvas_fill_round_rect_gradient"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, gx0: Float, gy0: Float, gx1: Float, gy1: Float, argb0: Int, argb1: Int) -> Int

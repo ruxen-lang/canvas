@@ -1,0 +1,125 @@
+# Pin tests for Canvas#draw_dashed_line (docs/ROADMAP.md Phase-1.5): a stroked
+# line with an [on_len, off_len] dash pattern via sk_path_effect_create_dash.
+#
+# Phase-1 deferred dash as "blocked: the fetched libSkiaSharp exports zero
+# sk_patheffect_* symbols". That was a FALSE NEGATIVE — the symbol search used
+# the wrong name. The pinned 3.119.4 build DOES export the path-effect C API
+# under `sk_path_effect_*` (+ `sk_paint_set_path_effect`), so dash binds on the
+# existing binary with no re-fetch (see the ROADMAP re-verdict + symbol table).
+#
+# Decisive pixel proof: a horizontal dashed line has INKED pixels in an "on" run
+# and BACKGROUND pixels in an "off" gap, at predicted x positions. A control
+# solid line inks the same gap pixel — proving the gap is the dash, not a miss.
+
+Tester.describe("Canvas.draw_dashed_line") do |t: &var Tester|
+  # Line at y=16 from x=2..30, width 3, dash on=4 off=4 phase=0. Relative to the
+  # line start (x=2), pattern runs: on [2,6), off [6,10), on [10,14), ...
+  # So x=3 is firmly in the first ON run; x=8 is firmly in the first OFF gap.
+  t.it("inks an on-run pixel and leaves an off-gap pixel as background") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let res = c.draw_dashed_line(2.0f32, 16.0f32, 30.0f32, 16.0f32, 3.0f32, 4.0f32, 4.0f32, 0.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      match res
+        Ok(_)  -> nil
+        Err(e) -> panic!("draw_dashed_line failed: #{e}")
+      end
+      # x=3 is in the first ON run → inked (not pure background black).
+      t.expect(c.read_pixel(3, 16) != black).to_eq(true)
+      # x=8 is in the first OFF gap → background black (the dash made a hole).
+      t.expect(c.read_pixel(8, 16)).to_eq(black)
+    else
+      # No Skia: a dashed line can't be faked — must be a clean Err.
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+
+  t.it("control: a SOLID line inks the gap pixel the dash left blank") do
+    # Same geometry, plain draw_line — proves x=8 being black above is the dash's
+    # gap, not the line missing that column.
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    match c.draw_line(2.0f32, 16.0f32, 30.0f32, 16.0f32, 3.0f32, Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_line failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(8, 16) != black).to_eq(true)   # solid: gap column inked
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+
+  t.it("rejects a non-positive on-length") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    var bad = false
+    match c.draw_dashed_line(0.0f32, 0.0f32, 8.0f32, 0.0f32, 2.0f32, 0.0f32, 4.0f32, 0.0f32, Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    let _ = c.end_frame
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("rejects a negative off-length") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    var bad = false
+    match c.draw_dashed_line(0.0f32, 0.0f32, 8.0f32, 0.0f32, 2.0f32, 4.0f32, -1.0f32, 0.0f32, Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    let _ = c.end_frame
+    t.expect(bad).to_eq(true)
+  end
+end

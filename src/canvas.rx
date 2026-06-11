@@ -289,6 +289,21 @@ class Canvas
     self.status_to_result(code, "draw_line")
   end
 
+  ## Stroke a DASHED line from (x0, y0) to (x1, y1): the stroke alternates an
+  ## `on_len`-pixel painted run and an `off_len`-pixel gap, repeated along the
+  ## line (`sk_path_effect_create_dash`). `phase` offsets the start of the dash
+  ## pattern (animate it for marching-ants selection borders). `on_len` must be
+  ## > 0 and `off_len` >= 0 (a 0 gap is a solid line); `width` must be > 0 (a
+  ## dash needs a real stroke). Antialiased; Skia-only — `Err` when the backend
+  ## or the dash symbols are absent. Use for dotted dividers, focus rings, and
+  ## selection outlines.
+  def var draw_dashed_line(x0: Float32, y0: Float32, x1: Float32, y1: Float32, width: Float32, on_len: Float32, off_len: Float32, phase: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_dashed_line_raw(
+      x0 as Float, y0 as Float, x1 as Float, y1 as Float, width as Float,
+      on_len as Float, off_len as Float, phase as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_dashed_line")
+  end
+
   ## Fill an arbitrary `path` (lines, béziers, arcs) with a solid color, using
   ## the path's fill rule. The general primitive for icons and custom shapes.
   ## Antialiased; Skia-only (Err otherwise — no software fallback for paths).
