@@ -13,9 +13,22 @@ The toolchain is the `ruxen` CLI (`~/.ruxen/bin/ruxen`).
 - `ruxen check` — type-check without codegen (fastest feedback loop)
 - `ruxen build` — compile the library
 - `ruxen test` — run all tests in `tests/**.rx`
-- `ruxen test tests/<file>.rx` — run a single test file
+- `ruxen test <stem>` — run a single test file by its FILE STEM (the basename
+  without the `tests/` prefix or `.rx` suffix). E.g. `ruxen test accessibility`
+  runs `tests/accessibility.rx`. **NOT** `ruxen test tests/accessibility.rx` —
+  that path form matches nothing ("no test files found"). The filter is the stem.
 - `ruxen fmt` — format `.rx` files in-place
 - `ruxen explain E0001` — explain a compiler error code
+
+### The pre-commit gate
+
+- `scripts/check.sh` — **THE one-command local gate; run it before committing.**
+  Stages, in order: (1) the C shim compiles warnings-clean (`-Wall -Wextra`, with
+  only the load-bearing `objc_msgSend` cast idiom excepted); (2) `ruxen test` (the
+  full pin suite); (3) the leak soak in short mode (`SOAK_ITERS`, default 2000 —
+  gated: a detected leak fails); (4) the perf bench (REPORT-ONLY, never gated —
+  shared-machine perf flakes, see `docs/PERF.md`). Exits nonzero on any gated
+  failure. Tunables: `SOAK_ITERS=N`, `SKIP_BENCH=1`, `CHECK_CC=...`.
 
 ## Test framework
 

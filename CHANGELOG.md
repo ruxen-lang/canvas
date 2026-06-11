@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Packaging — `docs/decisions/packaging.md` + `scripts/bundle_libs.sh` + an
+  executable-relative dylib loader (Prod-hardening).** A shipped `.app` can now
+  carry `libSkiaSharp` / `libHarfBuzzSharp` in `Contents/Frameworks/` and run with
+  zero env setup: the shim's dlopen search order gained an exe-relative probe
+  (`_NSGetExecutablePath` → `<exe>/../Frameworks` then `<exe>/`) ahead of the dev
+  cache, so the carried SHA-verified dylib wins. `bundle_libs.sh <App.app>`
+  SHA-verifies the fetched dylibs against the `fetch_skia.sh` pins, copies them in,
+  and writes `THIRD_PARTY_LICENSES`. Proven end-to-end (loads from a bundle with
+  `HOME`/`RUXEN_CANVAS_CACHE` blanked). Backward-compatible with the dev cache flow.
+- **`scripts/check.sh` — the one-command pre-commit gate (Prod-hardening).** Shim
+  warnings-clean compile + full `ruxen test` + leak soak (short, gated) + perf bench
+  (report-only); nonzero on any gated failure. Documented in CLAUDE.md, which also
+  corrects the stale `ruxen test tests/<file>.rx` note (the filter is the file STEM).
 - **Perf baseline — `examples/bench_frame.c` + `docs/PERF.md` (Prod-hardening,
   recorded not gated).** Times a representative frame (clear + 100 rects + 20 text
   runs incl. 10 shaped + image blit) over 1000 frames on raster and offscreen Metal,

@@ -511,6 +511,30 @@ zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reaso
       median ~2.2 ms / p95 ~6.6 ms; gpu-offscreen median ~3.5 ms / p95 ~10.6 ms
       (offscreen Metal's per-frame submit overhead dominates a small frame — recorded,
       explained); shape-cache hit-rate 100% at steady state.
+- [x] **Packaging ADR + bundle script — `docs/decisions/packaging.md` +
+      `scripts/bundle_libs.sh`.** Fixes the prod gap that a SHIPPED `.app` handed to
+      a user who never ran `fetch_skia.sh` had no way to find `libSkiaSharp` /
+      `libHarfBuzzSharp`. The ADR: ship them in `App.app/Contents/Frameworks/`; the
+      shim's dlopen search order gains an **executable-relative probe**
+      (`_NSGetExecutablePath` → `<exe>/../Frameworks` then `<exe>/`) BEFORE the dev
+      cache, so a bundled app "just works" with zero env setup (the carried,
+      SHA-verified dylib wins over a dev `~/.cache`); SHA verification at BUNDLE time
+      (not load time — the bundle is code-signed); licensing notes for the
+      redistributed BSD/MIT binaries. `bundle_libs.sh <App.app>` SHA-verifies the
+      fetched dylibs against the `fetch_skia.sh` pins (single source of truth),
+      copies them in, and writes `THIRD_PARTY_LICENSES`. **Proven end-to-end:** a
+      binary in `TestApp.app/Contents/MacOS/` loads Skia+HarfBuzz from the bundle's
+      Frameworks/ with `HOME`/`RUXEN_CANVAS_CACHE` blanked (`skia_available=1
+      shaping_available=1`). Backward-compatible: dev machines with a populated cache
+      are unaffected (exe-relative probe misses, falls through). **Filed remainder:**
+      Linux/Windows exe-relative arms (`/proc/self/exe`, `GetModuleFileName`).
+- [x] **`scripts/check.sh` — THE one-command pre-commit gate.** Stages: (1) shim
+      warnings-clean (`-Wall -Wextra`, the load-bearing `objc_msgSend` cast idiom
+      excepted + documented); (2) full `ruxen test`; (3) leak soak short mode
+      (`SOAK_ITERS`, gated); (4) perf bench (report-only, never gated). Exits nonzero
+      on any gated failure. Documented in CLAUDE.md as the pre-commit gate, alongside
+      the corrected `ruxen test <stem>` convention note (the prior `tests/<file>.rx`
+      form was stale — the filter is the file STEM).
 
 ## Later cycles
 

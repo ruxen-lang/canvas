@@ -76,6 +76,49 @@ static const char *const rx_skia_basenames[] = { "libSkiaSharp.so", "libSkiaShar
 #endif
 #define RX_SKIA_NBASENAMES (int)(sizeof(rx_skia_basenames) / sizeof(rx_skia_basenames[0]))
 
+/* ---- executable-relative dylib probe (packaging, docs/decisions/packaging.md) ----
+ *
+ * A SHIPPED app bundle carries libSkiaSharp / libHarfBuzzSharp inside
+ * MyApp.app/Contents/Frameworks/, and a user who never ran fetch_skia.sh has no
+ * ~/.cache copy. We never LINK these (so no @rpath), so to find a bundled dylib
+ * with zero env setup the loader probes RELATIVE TO THE MAIN EXECUTABLE: the
+ * canonical Frameworks/ dir (one level up + over from a Contents/MacOS binary) and
+ * the binary's own directory. Returns 1 + writes the directory of the running
+ * executable into `out` (capacity `cap`), 0 if it can't be determined. macOS arm;
+ * Linux/Windows arms are the filed remainder (the ADR). */
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#include <libgen.h>        /* dirname */
+static int rx_exe_dir(char *out, size_t cap) {
+    char raw[4096];
+    uint32_t n = (uint32_t)sizeof(raw);
+    if (_NSGetExecutablePath(raw, &n) != 0) return 0;   /* path too long */
+    /* dirname may modify its arg and returns a pointer into static/arg storage;
+     * copy out immediately. */
+    char *d = dirname(raw);
+    if (!d) return 0;
+    size_t len = strlen(d);
+    if (len + 1 > cap) return 0;
+    memcpy(out, d, len + 1);
+    return 1;
+}
+/* Try `<exe-dir>/../Frameworks/<basename>` then `<exe-dir>/<basename>`. The first
+ * is the .app bundle convention; the second covers a flat dist (dylib beside the
+ * binary). Returns the handle or NULL. */
+static void *rx_dlopen_exe_relative(const char *basename) {
+    char dir[4096];
+    if (!rx_exe_dir(dir, sizeof(dir))) return NULL;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/../Frameworks/%s", dir, basename);
+    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    snprintf(path, sizeof(path), "%s/%s", dir, basename);
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+#else
+static void *rx_dlopen_exe_relative(const char *basename) { (void)basename; return NULL; }
+#endif
+
 /* dlopen each basename inside `dir` (absolute), returning the first that loads
  * or NULL. dlopen of an absolute path is CWD-independent. */
 static void *rx_skia_dlopen_in_dir(const char *dir) {
@@ -96,6 +139,12 @@ static void *rx_skia_dlopen(void) {
     if (env && env[0]) {
         /* An explicit override is a full path (no basename guessing). */
         void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    /* A SHIPPED app prefers the dylib it CARRIES (a known, SHA-verified version)
+     * over a dev ~/.cache, so the bundled-app probe comes before the cache. */
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        void *h = rx_dlopen_exe_relative(rx_skia_basenames[i]);
         if (h) return h;
     }
     const char *cache = getenv("RUXEN_CANVAS_CACHE");
@@ -357,6 +406,12 @@ static void *rx_hb_dlopen(void) {
     const char *env = getenv("RUXEN_CANVAS_HARFBUZZ");
     if (env && env[0]) {
         void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    /* Bundled-app probe (packaging.md): the carried dylib wins over a dev cache. */
+    {
+        void *h = rx_dlopen_exe_relative("libHarfBuzzSharp.dylib");
+        if (!h) h = rx_dlopen_exe_relative("libHarfBuzzSharp.so");
         if (h) return h;
     }
     char path[4096];
