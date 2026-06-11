@@ -3053,3 +3053,37 @@ void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
     ts.tv_nsec = (ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
 }
+
+/* Monotonic nanosecond clock for the engine timebase (docs/decisions/
+ * frame-pacing.md). CLOCK_MONOTONIC never jumps backward (NTP/DST-immune), so a
+ * frame delta is always >= 0. The epoch is unspecified-but-fixed for the process;
+ * only differences are meaningful — which is all an animation/frame clock needs.
+ * int64 nanoseconds does not overflow for ~292 years. The handle is accepted-and-
+ * ignored (the clock is process-wide, like sleep_ms). */
+int64_t ruxen_canvas_ticks_ns(int64_t self) {
+    (void)self;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+/* Paced-present wait to an ABSOLUTE monotonic target tick (docs/decisions/
+ * frame-pacing.md). Sleeps remaining = target_ns - now; returns immediately when
+ * the frame already overran (remaining <= 0) — pacing fills the slack of an early
+ * frame, it never ADDS latency to a late one. The absolute target makes the
+ * cadence self-correcting (the caller advances target += interval each frame, so
+ * early/late frames converge back onto the grid with no drift). nanosleep
+ * guarantees a MINIMUM sleep; a few hundred µs of scheduler over-sleep is correct
+ * for a 2D UI (we never want to present BEFORE the boundary). On the Metal/GL
+ * on-screen paths the present already blocks on vsync, so remaining is <= 0 and
+ * this is a no-op-by-design there; it is the software clock for raster/headless. */
+void ruxen_canvas_wait_until_ns(int64_t self, int64_t target_ns) {
+    (void)self;
+    int64_t now = ruxen_canvas_ticks_ns(0);
+    int64_t remaining = target_ns - now;
+    if (remaining <= 0) return;
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(remaining / 1000000000LL);
+    ts.tv_nsec = (long)(remaining % 1000000000LL);
+    nanosleep(&ts, NULL);
+}

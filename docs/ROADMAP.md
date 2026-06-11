@@ -68,6 +68,61 @@ configurable font size/family; then the GPU (Ganesh GL) surface.
   Metal on Apple, OpenGL on Linux/Windows behind one context seam, Vulkan
   deferred. Implementation is a later cycle.)_
 
+## Prod-parity Phase 1 — engine essentials (E1) + desktop services (E2)
+
+The tier that unblocks quiver's animation (F4) and text editing (F3). Each item
+is the usual additive 4-step FFI binding + a pin; live-window/GPU paths pin
+headless (capability + fallback) and pixel-verify via a standalone
+`examples/*_verify.c` where a real window/GPU is required.
+
+### E1 — engine essentials
+
+- [x] **Frame pacing / vsync seam** (ADR: `docs/decisions/frame-pacing.md`). A
+      monotonic-ns timebase (`Window#ticks_ns` / `#ticks_ms`,
+      `clock_gettime(CLOCK_MONOTONIC)`), a paced-present wait to an ABSOLUTE
+      target tick (`Window#wait_frame` — fills an early frame's slack, never adds
+      latency to a late one; no-op-by-design where the Metal/GL present already
+      blocks on vsync), and a refresh-rate hint (`Window.refresh_rate` via
+      `SDL_GetDesktopDisplayMode`, clean `Err` headless — never a bogus `Ok(0)`).
+      NO callback/timer system — just the timebase + paced present, so L2's
+      animation ticker has a real timebase. Pins: `tests/frame_pacing.rx`
+      (monotonicity, both wait_frame branches, ms=ns/1e6, refresh-rate Err
+      contract).
+- [ ] **Transforms — `skew` + `concat`** (full 2D matrix), composing with the
+      existing `save`/`restore`/`translate`/`scale`/`rotate`.
+- [ ] **Blend modes** — a `Canvas#set_blend_mode(mode)` state (small int enum),
+      reset per frame; covers src-over / clear / src / multiply / screen.
+- [ ] **Blur image filter + drop-shadow generalization** (`sk_imagefilter_new_blur`).
+- [ ] **Dash path effect** — **BLOCKED on the fetched binary** (see Phase-1.5).
+
+### E2 — desktop services core
+
+- [ ] **Clipboard** — `Window.clipboard_text` / `set_clipboard_text`.
+- [ ] **IME composition events** — `Event.TextEditing` + marked-text side-channel.
+- [ ] **Mouse cursors** — `Window#set_cursor(kind)`.
+
+## Phase 1.5 — deferred (explicit checklist; NOT implemented in Phase 1)
+
+- [ ] **Dash path effect** (`sk_patheffect_create_dash`). **Blocked on the fetched
+      `libSkiaSharp` binary:** `nm -gU` on the fetched dylib shows **zero
+      `sk_patheffect_*` symbols** — the prebuilt does not export the path-effect C
+      API at all (same class as the absent SkParagraph/SkShaper). Binding it would
+      either fail to resolve or (worse) resolve to a NULL-returning stub that lies
+      in its capability probe — exactly the "silent no-op / silently-wrong" path
+      the repo's FFI invariants forbid. **Remediation:** point
+      `runtime/fetch_skia.sh` at a `libSkiaSharp` build that exports
+      `sk_patheffect_create_dash` + `sk_patheffect_unref` (and verify
+      `sk_paint_set_patheffect` is present), add a new per-RID SHA pin, then the
+      binding is the usual additive 4-step + a pin (dashed line has gaps at
+      predicted pixels). Until that binary is wired, dash stays unimplemented.
+- [ ] **Render-to-texture / raster cache.**
+- [ ] **Drag-and-drop.**
+- [ ] **File dialogs.**
+- [ ] **Fullscreen / minimize-maximize / DPI-change events.**
+- [ ] **Vulkan** (additive behind the GPU seam, per `docs/GPU.md`).
+- [ ] **Per-window / multi-monitor refresh rate** (Phase-1 `refresh_rate` is
+      display-0 only).
+
 ## Later cycles
 
 - Full canvas surface: `draw_path`, `draw_image`, transforms, clips, layers.

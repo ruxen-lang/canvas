@@ -71,6 +71,10 @@ class RawHost
     def event_a as "ruxen_canvas_event_a"(self) -> Float
     def event_b as "ruxen_canvas_event_b"(self) -> Float
     def sleep_ms_raw as "ruxen_canvas_sleep_ms"(self, ms: Int) -> nil
+    # Frame pacing (docs/decisions/frame-pacing.md): a monotonic-ns timebase +
+    # paced wait to an ABSOLUTE target tick. Process-wide clock; self ignored.
+    def ticks_ns_raw as "ruxen_canvas_ticks_ns"(self) -> Int
+    def wait_until_ns_raw as "ruxen_canvas_wait_until_ns"(self, target_ns: Int) -> nil
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end
 
@@ -102,6 +106,9 @@ class RawHost
     def window_metal_drawable_size as "ruxen_canvas_window_metal_drawable_size"(self) -> Int
     def self.sdl_available as "ruxen_canvas_sdl_available" -> Int
     def self.window_metal_available as "ruxen_canvas_window_metal_available" -> Int
+    # Display refresh rate (Hz) for the frame-pacing hint (docs/decisions/
+    # frame-pacing.md): > 0 on success, negative -RXC_ERR_NO_SDL when unavailable.
+    def self.refresh_rate as "ruxen_canvas_refresh_rate" -> Int
     # Test seams: run the pump's exact handling on synthetic events headlessly.
     # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
     # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:

@@ -7,6 +7,29 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Frame pacing / vsync seam — the engine timebase + paced present**
+  (ADR: `docs/decisions/frame-pacing.md`). Replaces the examples' blind
+  `sleep_ms(16)` with a real, work-aware cadence and gives L2's future animation
+  ticker a monotonic timebase. Three additive bindings:
+  - `Window#ticks_ns` / `#ticks_ms` — a monotonic-nanosecond clock over
+    `clock_gettime(CLOCK_MONOTONIC)` (NTP/DST-immune, difference-only epoch;
+    `int64` ns, no overflow for ~292 years). No new dependency — `skia_shim.c`
+    already used `<time.h>`.
+  - `Window#wait_frame(target_ns)` — paces a frame to an ABSOLUTE monotonic
+    target tick: sleeps the remainder of an early frame, returns immediately on a
+    late one (fills slack, never adds latency). Absolute target self-corrects
+    (advance `target += interval`; early/late frames converge, no drift). On the
+    on-screen Metal/GL paths the present already blocks on vsync, so it is a
+    no-op-by-design there; it is the software clock for raster/headless and the
+    one uniform pacing seam L2 calls regardless of backend.
+  - `Window.refresh_rate -> Result[Int, String]` — the display refresh rate (Hz)
+    via `SDL_GetDesktopDisplayMode` (new OPTIONAL SDL symbol), a HINT for sizing
+    the interval. `Err` when headless / no SDL / unspecified — never a bogus
+    `Ok(0)` a caller would divide by.
+  - **Out of scope by design:** no callback/timer/scheduler — that is L2's
+    animation loop to own; the engine provides the clock + the frame-boundary
+    wait. Pins: `tests/frame_pacing.rx` (monotonicity, both `wait_frame`
+    branches, `ms = ns/1e6`, refresh-rate Err contract — all headless).
 - **`Window#frame` and `Canvas#frame` — the resource-bracket block API**
   (adopts ruxen's new Ruby-block feature, `docs/decisions/ruby-block-semantics.md`).
   `window.frame do |c: &var Canvas| … end` brackets `begin_frame` → run the block

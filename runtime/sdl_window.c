@@ -148,6 +148,12 @@ extern int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, dou
  * host 0xAARRGGBB packing so Skia's BGRA surface renders correctly. */
 #define MTL_PIXELFORMAT_BGRA8     80
 
+/* SDL_DisplayMode ABI: { Uint32 format; int w; int h; int refresh_rate; void
+ * *driverdata; }. refresh_rate (Hz, int) is at byte offset 12 (format@0, w@4,
+ * h@8). We over-allocate the out buffer to be safe against trailing fields.
+ * Used by the frame-pacing refresh-rate hint (docs/decisions/frame-pacing.md). */
+#define SDL_DISPLAYMODE_REFRESH_OFF 12
+
 /* ---- dlsym'd entry points ---- */
 static void *s_lib = NULL;
 static int   (*s_Init)(uint32_t);
@@ -181,6 +187,10 @@ static void  (*s_GL_SwapWindow)(void *window);
 static void  (*s_GL_GetDrawableSize)(void *window, int *w, int *h);
 static int   (*s_GL_SetSwapInterval)(int interval);
 static void  (*s_GL_DeleteContext)(void *context);
+/* Display-mode query for the frame-pacing refresh-rate hint (docs/decisions/
+ * frame-pacing.md). OPTIONAL: a miss just means refresh_rate reports Err. The
+ * out struct is an SDL_DisplayMode (see SDL_DISPLAYMODE_REFRESH_OFF below). */
+static int   (*s_GetDesktopDisplayMode)(int displayIndex, void *mode);
 
 /* SDL Metal-view entry points (resolved best-effort; a miss only forecloses the
  * windowed-Metal path). SDL_Metal_CreateView attaches a Metal-backed view to a
@@ -357,6 +367,7 @@ static int load_sdl(void) {
     s_GL_GetDrawableSize= (void (*)(void *, int *, int *))sym("SDL_GL_GetDrawableSize");
     s_GL_SetSwapInterval= (int (*)(int))sym("SDL_GL_SetSwapInterval");
     s_GL_DeleteContext  = (void (*)(void *))sym("SDL_GL_DeleteContext");
+    s_GetDesktopDisplayMode = (int (*)(int, void *))sym("SDL_GetDesktopDisplayMode");
     s_gl_have_fns = (s_GL_CreateContext && s_GL_MakeCurrent && s_GL_GetProcAddress &&
                      s_GL_SwapWindow) ? 1 : 0;
 
@@ -724,6 +735,27 @@ int64_t ruxen_canvas_window_is_metal(int64_t self) {
  * 0 when no SDL2 is installed anywhere on the candidate paths. */
 int64_t ruxen_canvas_sdl_available(void) {
     return load_sdl() ? 1 : 0;
+}
+
+/* The desktop display's refresh rate in Hz for display 0 (the frame-pacing hint,
+ * docs/decisions/frame-pacing.md). Returns the rate (> 0) on success, or a
+ * NEGATIVE -RXC_ERR_NO_SDL when SDL / the display-mode query is unavailable or
+ * reports an unspecified (0) rate — so the caller maps it to Err and picks a
+ * fallback (typically 60) rather than dividing by a bogus 0. SDL must be inited
+ * for the video subsystem; load_sdl + SDL_Init(VIDEO) ensure that. The harness
+ * (headless, gated) returns the Err channel, which the pin asserts. */
+int64_t ruxen_canvas_refresh_rate(void) {
+    if (!load_sdl() || !s_GetDesktopDisplayMode) return -RXC_ERR_NO_SDL;
+    if (s_Init(SDL_INIT_VIDEO) != 0) return -RXC_ERR_NO_SDL;
+    /* SDL_DisplayMode is 24-32 bytes; over-allocate to be safe against trailing
+     * fields across SDL minor versions. */
+    unsigned char mode[64];
+    memset(mode, 0, sizeof mode);
+    if (s_GetDesktopDisplayMode(0, mode) != 0) return -RXC_ERR_NO_SDL;
+    int32_t hz = 0;
+    memcpy(&hz, mode + SDL_DISPLAYMODE_REFRESH_OFF, 4);
+    if (hz <= 0) return -RXC_ERR_NO_SDL;   /* 0 = unspecified; force a fallback */
+    return (int64_t)hz;
 }
 
 /* True (1) when the on-screen Metal present path COULD run: SDL2 loaded AND its

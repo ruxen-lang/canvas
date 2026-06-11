@@ -183,6 +183,52 @@ class Window
     self.canvas.raw.sleep_ms_raw(ms)
   end
 
+  ## The engine's monotonic clock in NANOSECONDS (docs/decisions/frame-pacing.md).
+  ## Never jumps backward (NTP/DST-immune), so a frame delta is always >= 0; the
+  ## epoch is fixed-but-unspecified for the process, so only DIFFERENCES are
+  ## meaningful — which is all an animation/frame timebase needs. This is the real
+  ## timebase L2's animation ticker drives against, replacing the blind `sleep_ms`.
+  def ticks_ns -> Int
+    self.canvas.raw.ticks_ns_raw
+  end
+
+  ## The engine's monotonic clock in MILLISECONDS — `ticks_ns / 1_000_000`, the
+  ## convenience most loops want. Same monotonic, difference-only timebase.
+  def ticks_ms -> Int
+    self.canvas.raw.ticks_ns_raw / 1000000
+  end
+
+  ## Pace this frame to an ABSOLUTE monotonic target tick (`target_ns`, in the
+  ## `ticks_ns` timebase). Capture `start = ticks_ns` at the top of the frame, do
+  ## the frame's work + `present`, then `wait_frame(start + interval_ns)`. Sleeps
+  ## the remainder when the frame finished early; returns immediately when it
+  ## overran (pacing fills slack, it never ADDS latency to a late frame). The
+  ## absolute target self-corrects: advance `target += interval` each frame and
+  ## early/late frames converge back onto the grid without drift.
+  ##
+  ## On the on-screen Metal/GL backends the present already blocks on vsync, so
+  ## this is a no-op-by-design there (the frame is already paced); it is the
+  ## software clock for the raster / headless path and the one uniform pacing seam
+  ## L2 calls regardless of backend. Does NOT build a timer/callback loop — that
+  ## is L2's animation loop to own; this is just the frame-boundary wait.
+  def wait_frame(target_ns: Int) -> nil
+    self.canvas.raw.wait_until_ns_raw(target_ns)
+  end
+
+  ## The desktop display's refresh rate in Hz (docs/decisions/frame-pacing.md) —
+  ## a HINT for choosing the pacing interval (`1_000_000_000 / hz` ns), not a
+  ## pacing mechanism (that is `wait_frame`). `Ok(hz)` when SDL + a display are
+  ## available; `Err` when headless / no SDL / the rate is unspecified — the
+  ## caller then picks a fallback (typically 60) rather than dividing by a bogus 0.
+  def self.refresh_rate -> Result[Int, String]
+    let hz = RawHost.refresh_rate
+    if hz > 0
+      Ok(hz)
+    else
+      Err("canvas: refresh_rate unavailable (no SDL / no display)")
+    end
+  end
+
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
   ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested, 6 Scroll, 7 TextInput.
