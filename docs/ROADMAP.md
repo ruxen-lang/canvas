@@ -398,6 +398,20 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       The pin ASSERTS the cache HITS on a repeat (`shape_cache_hits` rises) — a
       stable count, NOT a wall-clock perf number. Pinned in
       `tests/canvas_shape_cache.rx`. ADR: `docs/decisions/text-fallback.md`.
+- [x] **bidi (RTL)** — `Canvas#draw_text_bidi` / `#measure_text_bidi` /
+      `#bidi_available?`. ICU `ubidi` IS present in `libicucore` (verified), so the
+      sound run-reorder landed (NOT faked): `ubidi_setPara` →
+      `ubidi_countRuns` → `ubidi_getVisualRun` resolves a mixed-direction line into
+      directional runs in VISUAL left-to-right order; each run is shaped with its
+      resolved direction (covered runs through the shaper with the per-run
+      direction, uncovered runs via fallback) and laid out left-to-right. So a
+      Latin line with embedded Hebrew/Arabic renders in correct visual order. Pins
+      in `tests/canvas_bidi.rx` (a Latin+Hebrew line lays out a positive width +
+      ink across the line; mixed measures wider than the Latin prefix). ADR:
+      `docs/decisions/text-fallback.md`. **Scope (the bounded landing):** single-LINE
+      visual reordering with an LTR (auto) base level; per-line reordering of a
+      WRAPPED bidi paragraph and an explicit RTL base direction are the documented
+      remainder — never visually-wrong RTL (Errs cleanly when bidi is unavailable).
 
 ### Part B — accessibility bridge
 

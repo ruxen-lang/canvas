@@ -70,6 +70,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   count, not a wall-clock number. Pinned in `tests/canvas_shape_cache.rx`. (The
   fallback-typeface cache keyed by Unicode block landed with the font-fallback
   item.) ADR: `docs/decisions/text-fallback.md`.
+- **bidi (RTL) — `Canvas#draw_text_bidi` / `#measure_text_bidi` /
+  `#bidi_available?` (Phase 3 — text i18n).** Mixed-direction text (LTR with
+  embedded Hebrew/Arabic) is laid out in VISUAL order via ICU `ubidi` (present in
+  `libicucore` — no new dependency): `ubidi_setPara` → `ubidi_countRuns` →
+  `ubidi_getVisualRun` resolves the directional runs in visual left-to-right order;
+  each run is shaped with its resolved direction (covered runs through the shaper,
+  uncovered via fallback) and placed left-to-right. The shaped-run measure cache
+  key now folds the LIVE direction so a per-run direction override can't collide
+  with the same bytes in the other direction. Pinned in `tests/canvas_bidi.rx`.
+  ADR: `docs/decisions/text-fallback.md`. **Scope:** single-line visual reordering,
+  LTR (auto) base; wrapped bidi paragraphs + explicit RTL base are the documented
+  remainder — never renders visually-wrong RTL (clean Err when bidi is absent).
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

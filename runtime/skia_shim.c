@@ -477,6 +477,15 @@ const RxICU *rx_icu(void) {
     RX_ICU_REQ(u_strFromUTF8,  "u_strFromUTF8");
 #undef RX_ICU_REQ
 
+    /* bidi — OPTIONAL: a miss only disables the run-reorder path, not all of ICU. */
+    icu.ubidi_open         = (pfn_ubidi_open)        rx_icu_sym(lib, "ubidi_open");
+    icu.ubidi_setPara      = (pfn_ubidi_setPara)     rx_icu_sym(lib, "ubidi_setPara");
+    icu.ubidi_countRuns    = (pfn_ubidi_countRuns)   rx_icu_sym(lib, "ubidi_countRuns");
+    icu.ubidi_getVisualRun = (pfn_ubidi_getVisualRun)rx_icu_sym(lib, "ubidi_getVisualRun");
+    icu.ubidi_close        = (pfn_ubidi_close)       rx_icu_sym(lib, "ubidi_close");
+    icu.bidi_ok = (icu.ubidi_open && icu.ubidi_setPara && icu.ubidi_countRuns &&
+                   icu.ubidi_getVisualRun && icu.ubidi_close) ? 1 : 0;
+
     icu.available = ok;
     return &icu;
 }
@@ -2889,9 +2898,12 @@ static void rx_shaper_drop(RxShaper *s) {
  * surrounding text as context. Empty range = 0. */
 static int rx_shaper_measure(RxShaper *s, const char *text, size_t start, size_t len) {
     if (len == 0 || !s->ok) return 0;
-    /* Cache: key = font/size/dir prefix combined with this run's byte hash. A hit
-     * skips HarfBuzz entirely (the repeated-label case). */
-    uint64_t key = rx_fnv1a(text + start, len, s->font_key);
+    /* Cache: key = font/size prefix + the LIVE direction + this run's byte hash. A
+     * hit skips HarfBuzz entirely (the repeated-label case). Including hbdir live
+     * keeps a per-run direction override (bidi) from colliding with the same bytes
+     * shaped in the other direction. */
+    uint64_t key = rx_fnv1a(&s->hbdir, sizeof(s->hbdir), s->font_key);
+    key = rx_fnv1a(text + start, len, key);
     int cached = rx_shape_cache_get(key);
     if (cached >= 0) return cached;
 
@@ -3337,6 +3349,11 @@ static double rx_fallback_line(const RxSkia *sk, sk_canvas_t *canvas,
         size_t sublen, double x0, double y, int64_t argb, int draw);
 static sk_typeface_t *rx_default_typeface(void);
 static int32_t rxc_utf8_next(const char *text, size_t *i, size_t len);
+/* Stack cap + UTF-8<->UTF-16 offset map; the macro/helper are defined in the
+ * segmentation section below but used here (bidi) and in the ICU paragraph. */
+#define RXC_SEG_MAX 2048
+static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
+                                int *b2u, int u16cap);
 
 /* Shape/measure `text` with per-codepoint coverage routing. Covered runs go
  * through the shaper (HarfBuzz on font_path); uncovered runs go through the
@@ -3427,6 +3444,127 @@ int64_t ruxen_canvas_measure_text_shaped_multi(int64_t self, int64_t text, doubl
         int64_t font_path, int64_t direction) {
     return rx_shape_run_multi((RxHost *)self, (const char *)text, 0.0, 0.0, size,
                               (const char *)font_path, direction, 0, /*draw*/0);
+}
+
+/* ---- bidi: visual-run reordering + per-run shaping (docs/decisions/text-fallback.md) ----
+ *
+ * Mixed-direction text (LTR with embedded RTL, e.g. Latin + Hebrew/Arabic) must be
+ * laid out in VISUAL order, not logical order. ICU's ubidi resolves the line into
+ * directional runs and returns them in visual left-to-right order
+ * (ubidi_setPara -> ubidi_countRuns -> ubidi_getVisualRun). We shape each run with
+ * its resolved direction (covered runs through the shaper, uncovered through the
+ * fallback) and lay them out left-to-right in visual order. ICU works in UTF-16,
+ * so each run's logical UTF-16 range is mapped back to a UTF-8 byte range via the
+ * b2u map. ICU(bidi) + shaping + fallback only — a clean Err otherwise.
+ *
+ * SCOPE (the sound, bounded landing): single-LINE visual reordering of directional
+ * runs with an LTR (auto) base level. Per-line reordering of a WRAPPED bidi
+ * paragraph, and explicit RTL base direction, are the documented remainder. We do
+ * NOT render visually-wrong RTL — when bidi is unavailable this Errs and callers
+ * use the single-direction shaped path. */
+static int64_t rx_text_bidi(RxHost *h, const char *text, double x, double y,
+        double size, const char *font_path, int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->glyph_render_ok || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+    const RxICU *icu = rx_icu();
+    if (!icu->available || !icu->bidi_ok) return -RXC_ERR_NO_SKIA;
+
+    size_t len = strlen(text);
+    if (len == 0 || len > RXC_SEG_MAX) return -RXC_ERR_BAD_ARGS;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(text, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return -RXC_ERR_BAD_ARGS;
+
+    int32_t status = 0;
+    UBiDi *bidi = icu->ubidi_open();
+    if (!bidi) return -RXC_ERR_NO_SKIA;
+    icu->ubidi_setPara(bidi, u16, u16n, RX_UBIDI_DEFAULT_LTR, NULL, &status);
+    if (status > 0) { icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+    int32_t nruns = icu->ubidi_countRuns(bidi, &status);
+    if (status > 0 || nruns <= 0) { icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, font_path, size, 0);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) { rx_shaper_drop(&shaper); icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+    }
+    sk_typeface_t *fb_base = rx_default_typeface();
+
+    double penx = x;
+    int64_t err = 0;
+    /* Walk runs in VISUAL order; each run is a logical UTF-16 range [ls, ls+rl). */
+    for (int32_t r = 0; r < nruns && !err; r++) {
+        int32_t ls = 0, rl = 0;
+        int is_rtl = icu->ubidi_getVisualRun(bidi, r, &ls, &rl);
+        if (rl <= 0 || ls < 0 || ls + rl > u16n) continue;
+        /* Map the logical UTF-16 range to a UTF-8 byte range via b2u. */
+        size_t bstart = (size_t)b2u[ls];
+        size_t bend   = (ls + rl >= u16n) ? len : (size_t)b2u[ls + rl];
+        if (bend <= bstart) continue;
+        size_t rlen = bend - bstart;
+
+        /* Coverage: does the base font cover the run's first codepoint? (A run is
+         * single-script per bidi + we route the whole run together; mixed coverage
+         * within a run is rare and falls back if the first cp is uncovered.) */
+        size_t probe_i = bstart;
+        int32_t first_cp = rxc_utf8_next(text, &probe_i, bend);
+        int covered = (shaper.tf && sk->typeface_unichar_to_glyph(shaper.tf, first_cp) != 0) ? 1 : 0;
+
+        if (covered) {
+            shaper.hbdir = is_rtl ? RX_HB_DIR_RTL : RX_HB_DIR_LTR;
+            int w = rx_shaper_measure(&shaper, text, bstart, rlen);
+            if (draw) rx_shaper_draw(&shaper, canvas, text, bstart, rlen, penx, y, argb);
+            penx += w;
+        } else {
+            double w = rx_fallback_line(sk, draw ? canvas : NULL, fb_base, size,
+                                        text, bstart, rlen, penx, y, argb, draw);
+            if (w < 0.0) err = -RXC_ERR_NO_SKIA; else penx += w;
+        }
+    }
+
+    rx_shaper_drop(&shaper);
+    icu->ubidi_close(bidi);
+    if (err) return err;
+    return (int64_t)(penx - x + 0.5);
+}
+
+/* True (1) when bidi reordering is available (ICU ubidi + shaping + fallback). */
+int64_t ruxen_canvas_bidi_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    const RxICU *icu = rx_icu();
+    return (sk->available && sk->glyph_render_ok && sk->fallback_ok &&
+            icu->available && icu->bidi_ok) ? 1 : 0;
+}
+
+/* Draw a mixed-direction line with ICU bidi visual reordering + per-run shaping +
+ * font fallback. Returns Ok(total advance width) or a NEGATIVE -RXC_ERR_*. */
+int64_t ruxen_canvas_draw_text_bidi(int64_t self, int64_t text, double x, double y,
+        double size, int64_t font_path, int64_t argb) {
+    return rx_text_bidi((RxHost *)self, (const char *)text, x, y, size,
+                        (const char *)font_path, argb, /*draw*/1);
+}
+
+/* Total advance width of a bidi-reordered line, without drawing. NEGATIVE
+ * -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_bidi(int64_t self, int64_t text, double size,
+        int64_t font_path) {
+    return rx_text_bidi((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                        (const char *)font_path, 0, /*draw*/0);
 }
 
 /* ---- shaped paragraphs: word-wrap with SHAPED line widths + glyph render ----
@@ -3817,14 +3955,6 @@ int64_t ruxen_canvas_last_fallback_family(int64_t self) {
  * or the fallback surface is absent (callers use the greedy draw_paragraph_shaped
  * / draw_paragraph fallback). (x, y) = column left edge + first baseline; lines
  * stack one line-height below; align 0 left / 1 center / 2 right. */
-
-/* Stack cap for the grapheme/line-break helpers. Strings longer than this fall
- * back to a clean "unavailable" (0) rather than heap-thrashing — L2 segments
- * visible text, which is short; a giant blob is not a caret/selection case. */
-#define RXC_SEG_MAX 2048
-/* UTF-8 -> UTF-16 + offset map; defined in the segmentation section below. */
-static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
-                                int *b2u, int u16cap);
 
 #define RXC_ICU_BREAKS_MAX 1024
 

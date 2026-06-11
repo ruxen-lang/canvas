@@ -531,6 +531,22 @@ typedef uint16_t rx_uchar;     /* UChar — UTF-16 code unit */
 enum { RX_UBRK_CHARACTER = 0, RX_UBRK_LINE = 2 };
 enum { RX_UBRK_DONE = -1 };
 
+/* ubidi: resolve a line's directional runs and their VISUAL order. ubidi_setPara
+ * takes a paragraph level (UBIDI_DEFAULT_LTR = 0xfe — auto from the first strong
+ * char, LTR base); ubidi_countRuns gives the visual-run count; ubidi_getVisualRun
+ * returns each run's direction (0 = LTR, 1 = RTL) and its LOGICAL start + length
+ * (UTF-16 units), in VISUAL left-to-right order. Lays out mixed-direction text. */
+typedef struct UBiDi UBiDi;
+enum { RX_UBIDI_DEFAULT_LTR = 0xfe, RX_UBIDI_LTR = 0, RX_UBIDI_RTL = 1 };
+
+typedef UBiDi  *(*pfn_ubidi_open)(void);
+typedef void    (*pfn_ubidi_setPara)(UBiDi *, const rx_uchar *text, int32_t len,
+        uint8_t para_level, uint8_t *embedding_levels, int32_t *status);
+typedef int32_t (*pfn_ubidi_countRuns)(UBiDi *, int32_t *status);
+typedef int     (*pfn_ubidi_getVisualRun)(UBiDi *, int32_t run, int32_t *logical_start,
+        int32_t *length);
+typedef void    (*pfn_ubidi_close)(UBiDi *);
+
 typedef UBreakIterator *(*pfn_ubrk_open)(int type, const char *locale,
         const rx_uchar *text, int32_t text_len, int32_t *status);
 typedef void            (*pfn_ubrk_setText)(UBreakIterator *, const rx_uchar *text,
@@ -551,6 +567,13 @@ typedef struct {
     pfn_ubrk_following  ubrk_following;
     pfn_ubrk_close      ubrk_close;
     pfn_u_strFromUTF8   u_strFromUTF8;
+    /* bidi (OPTIONAL within ICU; bidi_ok gates the run-reorder path). */
+    pfn_ubidi_open          ubidi_open;
+    pfn_ubidi_setPara       ubidi_setPara;
+    pfn_ubidi_countRuns     ubidi_countRuns;
+    pfn_ubidi_getVisualRun  ubidi_getVisualRun;
+    pfn_ubidi_close         ubidi_close;
+    int bidi_ok;     /* 1 iff the ubidi symbols resolved (bidi reorder available) */
 } RxICU;
 
 /* Lazily dlopen()s libicucore and resolves the table on first call; process-wide

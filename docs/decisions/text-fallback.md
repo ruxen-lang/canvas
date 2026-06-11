@@ -1,9 +1,10 @@
 # ADR: International text — font fallback, multi-run shaping, ICU segmentation, bidi
 
-Status: **Accepted** — font fallback + color emoji + per-line multi-run + ICU
-segmentation implemented on the pinned binaries with NO new native dependency;
-bidi run-reorder landed for the LTR-base case, deep mixed-direction reordering
-filed as the Phase-3 remainder.
+Status: **Accepted — all of Part A landed.** Font fallback + color emoji +
+per-line multi-run + ICU segmentation (grapheme + line-break wrap) + font/run
+caching + bidi single-line visual reordering, all on the pinned binaries with NO
+new native dependency. The bidi remainder (wrapped bidi paragraphs + explicit RTL
+base) is documented below; we never render visually-wrong RTL.
 Date: 2026-06-11
 Relates to: `docs/SHAPING.md` (the HarfBuzz-direct + Skia-glyph-render pipeline
 this builds on), `docs/ROADMAP.md` (Phase 3 — text i18n completion).

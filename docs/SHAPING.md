@@ -88,10 +88,12 @@ silent wrong render). The font is selected by **file path** this round.
   See `docs/decisions/text-fallback.md`. The SHAPED-paragraph path
   (`draw_paragraph_shaped`) still uses greedy-whitespace wrap — the ICU-wrap path
   is the separate `draw_paragraph_icu` entry; unifying them is a follow-up.
-- **Bidi (ICU ubidi).** Full bidi reordering of mixed-direction text is not yet
-  done (`ubidi_*` is present in libicucore — verified). The shaped paragraph shapes
-  each line with one direction. This is the remaining piece for "full"
-  international text.
+- **Bidi (ICU ubidi) — LANDED single-line (Phase 3).** `Canvas#draw_text_bidi`
+  reorders a mixed-direction line into visual order via `ubidi` (present in
+  libicucore) and shapes each directional run with its resolved direction. See
+  `docs/decisions/text-fallback.md`. **Remainder:** per-line reordering of a WRAPPED
+  bidi paragraph and an explicit RTL base direction (the single-line LTR-base case
+  is done; we never render visually-wrong RTL).
 - **Font fallback (CJK / emoji) — LANDED (Phase 3).** `Canvas#draw_text_fallback`
   itemizes a string into runs by font coverage and renders each uncovered run
   (CJK / emoji) with a system-font-manager-matched typeface

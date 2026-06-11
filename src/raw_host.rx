@@ -68,6 +68,9 @@ class RawHost
     def measure_paragraph_icu_raw as "ruxen_canvas_measure_paragraph_icu"(self, text: &String, max_width: Float, size: Float) -> Int
     def draw_text_shaped_multi_raw as "ruxen_canvas_draw_text_shaped_multi"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, direction: Int, argb: Int) -> Int
     def measure_text_shaped_multi_raw as "ruxen_canvas_measure_text_shaped_multi"(self, text: &String, size: Float, font_path: &String, direction: Int) -> Int
+    def draw_text_bidi_raw as "ruxen_canvas_draw_text_bidi"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, argb: Int) -> Int
+    def measure_text_bidi_raw as "ruxen_canvas_measure_text_bidi"(self, text: &String, size: Float, font_path: &String) -> Int
+    def bidi_available_raw as "ruxen_canvas_bidi_available"(self) -> Bool
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
     def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
