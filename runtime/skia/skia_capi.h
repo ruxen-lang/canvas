@@ -188,6 +188,11 @@ typedef void        (*pfn_image_unref)(sk_image_t *);
 typedef void        (*pfn_canvas_draw_image_rect)(sk_canvas_t *, const sk_image_t *,
         const sk_rect_t *src, const sk_rect_t *dst, const sk_sampling_options_t *,
         const sk_paint_t *, int constraint);
+/* Snapshot a surface's current contents into an immutable sk_image (the
+ * render-to-texture / raster-cache primitive). The returned image is owned by the
+ * caller (release with sk_image_unref). It does NOT alias the surface's pixels —
+ * subsequent draws into the surface do not change the snapshot. */
+typedef sk_image_t *(*pfn_surface_new_image_snapshot)(sk_surface_t *);
 
 /* radii[4] order: upper-left, upper-right, lower-right, lower-left. */
 typedef sk_rrect_t *(*pfn_rrect_new)(void);
@@ -501,6 +506,7 @@ typedef struct {
     pfn_image_get_height        image_get_height;
     pfn_image_unref             image_unref;
     pfn_canvas_draw_image_rect  canvas_draw_image_rect;
+    pfn_surface_new_image_snapshot surface_new_image_snapshot;
 
     pfn_rrect_new               rrect_new;
     pfn_rrect_delete            rrect_delete;

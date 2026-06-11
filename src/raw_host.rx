@@ -8,6 +8,9 @@ class RawHost
     def width as "ruxen_canvas_host_width"(self) -> Int
     def height as "ruxen_canvas_host_height"(self) -> Int
     def is_null as "ruxen_canvas_host_is_null"(self) -> Bool
+    # Identity: this host's machine-word handle as an Int (for bindings that take a
+    # host by value, e.g. RawImage.snapshot_of). Mirrors RawImage#ptr.
+    def handle as "ruxen_canvas_host_ptr"(self) -> Int
     def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
     def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int

@@ -1,0 +1,151 @@
+# Pin tests for render-to-texture / raster cache (docs/ROADMAP.md Phase 2):
+# Canvas#snapshot copies a canvas's current contents into an immutable Image, which
+# is then drawn into another canvas at any offset via the existing draw_image path.
+# This is the primitive L2 uses to cache an expensive subtree (draw once offscreen,
+# snapshot, blit cheaply per frame).
+#
+# Skia-only: snapshot needs a real Skia surface. When Skia is active we pixel-pin
+# the offset blit + prove offscreen drawing never touches the main framebuffer until
+# the explicit draw_image; when absent, snapshot returns Err (the software-raster
+# fallback has no surface to snapshot).
+
+Tester.describe("Canvas#snapshot — render to texture") do |t: &var Tester|
+  t.it("snapshots an offscreen draw and blits it at an offset into the main canvas") do
+    # Offscreen canvas: draw a red rect at (10,10), 8x8.
+    var off = match Canvas.create(40, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("offscreen create failed")
+    end
+    let active = off.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8)
+    let red_argb = red.to_argb as Int
+
+    match off.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("offscreen begin_frame failed")
+    end
+    match off.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("offscreen clear failed")
+    end
+    match off.draw_rect(Rect.new(10.0f32, 10.0f32, 8.0f32, 8.0f32), red)
+      Ok(_)  -> nil
+      Err(_) -> panic!("offscreen draw_rect failed")
+    end
+    match off.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("offscreen end_frame failed")
+    end
+
+    # Main canvas, cleared to blue. Drawing offscreen above must NOT have touched it.
+    var main = match Canvas.create(40, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("main create failed")
+    end
+    let blue = Color.rgb(0u8, 0u8, 255u8)
+    let blue_argb = blue.to_argb as Int
+
+    match off.snapshot
+      Ok(img) ->
+        # The offscreen content is a 40x40 image with a red 8x8 block at (10,10).
+        t.expect(img.width).to_eq(40)
+        t.expect(img.height).to_eq(40)
+        match main.begin_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("main begin_frame failed")
+        end
+        match main.clear(blue)
+          Ok(_)  -> nil
+          Err(_) -> panic!("main clear failed")
+        end
+        # Before drawing the snapshot, the main framebuffer is pure blue — the
+        # offscreen draw never reached it.
+        match main.draw_image(&img, 5.0f32, 5.0f32)   # blit at offset (5,5)
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw_image of snapshot failed")
+        end
+        match main.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("main end_frame failed")
+        end
+        # The red block was at (10..18,10..18) in the snapshot; blitted at offset
+        # (5,5) it lands at (15..23,15..23) in main. Sample its centre.
+        t.expect(main.read_pixel(18, 18)).to_eq(red_argb)
+        # Outside the blitted red block, main is still blue (the snapshot's black
+        # background composited over blue as opaque black — sample where the image's
+        # background landed: (5,5) maps the snapshot's (0,0) black pixel).
+        t.expect(main.read_pixel(5, 5)).to_eq(Color.rgb(0u8, 0u8, 0u8).to_argb as Int)
+        # A pixel the image never covered (image spans 5..45, clipped to 40) stays
+        # blue: (2,2) is left/above the blit origin.
+        t.expect(main.read_pixel(2, 2)).to_eq(blue_argb)
+      Err(_) ->
+        # No Skia backend: snapshot is Err, and skia_active? is false.
+        t.expect(active).to_eq(false)
+    end
+  end
+
+  t.it("the snapshot is a COPY — later draws into the source don't change it") do
+    var off = match Canvas.create(20, 20)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = off.skia_active?
+    let red = Color.rgb(255u8, 0u8, 0u8)
+    let red_argb = red.to_argb as Int
+
+    match off.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match off.clear(red)
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    match off.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    match off.snapshot
+      Ok(img) ->
+        # Now overwrite the source with green. The snapshot taken above must remain
+        # red when blitted into a fresh canvas.
+        match off.begin_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("begin_frame 2 failed")
+        end
+        match off.clear(Color.rgb(0u8, 255u8, 0u8))
+          Ok(_)  -> nil
+          Err(_) -> panic!("clear green failed")
+        end
+        match off.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("end_frame 2 failed")
+        end
+
+        var dest = match Canvas.create(20, 20)
+          Ok(v)  -> v
+          Err(_) -> panic!("dest create failed")
+        end
+        match dest.begin_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("dest begin_frame failed")
+        end
+        match dest.clear(Color.rgb(0u8, 0u8, 0u8))
+          Ok(_)  -> nil
+          Err(_) -> panic!("dest clear failed")
+        end
+        match dest.draw_image(&img, 0.0f32, 0.0f32)
+          Ok(_)  -> nil
+          Err(_) -> panic!("draw_image failed")
+        end
+        match dest.end_frame
+          Ok(_)  -> nil
+          Err(_) -> panic!("dest end_frame failed")
+        end
+        t.expect(dest.read_pixel(10, 10)).to_eq(red_argb)   # still RED, not green
+      Err(_) ->
+        t.expect(active).to_eq(false)
+    end
+  end
+end

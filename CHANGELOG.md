@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Render-to-texture / raster cache — `Canvas#snapshot` (Phase 2).** Copies a
+  canvas's current surface into an immutable `Image` (`sk_surface_new_image_snapshot`),
+  which is then drawn into ANY canvas at any offset through the EXISTING `draw_image`
+  path — the primitive L2 uses to cache an expensive subtree (draw once offscreen,
+  snapshot, blit cheaply per frame) and the basis for future effects. The only new
+  ABI is the snapshot (one shim entry + one loader symbol); `Image` / `draw_image`
+  are reused wholesale. **API shape:** a standalone offscreen `Canvas.create(w,h)` +
+  `snapshot`, not a host current-target switch — an offscreen raster host already
+  owns its buffer and reuses the whole Canvas draw API, the least-new-ABI fit.
+  **Ownership:** the snapshot is a COPY (does not alias the source pixels; later
+  draws into the source, or dropping it, leave the image intact), caller-owned and
+  freed via the SAME `Image` drop path as a loaded image. Skia-only — clean `Err`
+  on the software-raster fallback. Pixel-pinned in `tests/canvas_snapshot.rx`.
 - **KeyDown modifiers — `Window#key_modifiers` + `Window.mod_*` (Phase 2).** A
   `KeyDown` event now carries the held keyboard modifiers (shift / ctrl / alt /
   gui) as a side-channel, the discipline quiver's selection API (Shift+Arrow,

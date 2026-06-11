@@ -44,6 +44,21 @@ declaration as `def self.clipboard_get as "…" -> String`. A failure path retur
 `0` (NULL) and the Ruxen wrapper gates on a separate `*_available` probe rather
 than constructing a String from NULL.
 
+## Returning a sibling handle type across files (the snapshot pattern)
+
+A `lib` block resolves a return type only within its OWN package file. So a shim
+function that returns a `RawImage` must be declared in `raw_image.rx` (where
+`RawImage` is defined), NOT in `raw_host.rx` — declaring it in the wrong file is
+an `undefined type` compile error. When the function logically lives on the host
+(e.g. `ruxen_canvas_host_snapshot(host)` snapshots a host's surface into an
+`sk_image`), declare it on the OWNER of the RETURN type and pass the host BY VALUE
+as an `Int`: `def self.snapshot_of as "ruxen_canvas_host_snapshot"(host: Int) ->
+RawImage` in `raw_image.rx`. To get the host's machine-word handle as an `Int`,
+bind an identity accessor (`ruxen_canvas_host_ptr`, mirroring
+`ruxen_canvas_image_ptr`) as `RawHost#handle -> Int`. The C function is the same
+either way (all pointers cross as machine words); only the Ruxen-side declaration
+file matters. Used by `Canvas#snapshot`.
+
 ## C/C++ boundary
 
 Skia's public surface is C++. `skia_shim.c` (and/or `.cpp`) is the single

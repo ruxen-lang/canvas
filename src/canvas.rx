@@ -357,6 +357,23 @@ class Canvas
     self.status_to_result(code, "draw_round_rect_shadow")
   end
 
+  ## Snapshot this canvas's current contents into an immutable `Image` — the
+  ## render-to-texture / raster-cache primitive. Draw an expensive subtree once into
+  ## an offscreen `Canvas` (`Canvas.create(w, h)`), `snapshot` it, then blit the
+  ## snapshot cheaply with `draw_image` every frame (or use it for L2 effects). The
+  ## snapshot is a COPY of the pixels at call time: later draws into this canvas —
+  ## or dropping it — leave the image intact, and the offscreen draw never touches
+  ## any other canvas's framebuffer until you `draw_image` it. Returns `Err` when the
+  ## Skia backend is unavailable (the software-raster fallback has no surface to
+  ## snapshot) or the snapshot could not be taken. Skia backend only.
+  def var snapshot -> Result[Image, String]
+    let raw = RawImage.snapshot_of(self.raw.handle)
+    if raw.is_null
+      return Err("canvas: snapshot requires the Skia backend (run runtime/fetch_skia.sh)")
+    end
+    Ok(Image.new(raw))
+  end
+
   ## Draw `image` at (x, y) at its natural pixel size. Skia backend only.
   def var draw_image(image: &Image, x: Float32, y: Float32) -> Result[nil, String]
     let code = self.raw.draw_image_raw(image.handle, x as Float, y as Float)

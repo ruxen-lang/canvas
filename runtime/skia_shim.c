@@ -199,6 +199,7 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(image_get_height,          "sk_image_get_height");
     RX_SK_OPTIONAL(image_unref,               "sk_image_unref");
     RX_SK_OPTIONAL(canvas_draw_image_rect,    "sk_canvas_draw_image_rect");
+    RX_SK_OPTIONAL(surface_new_image_snapshot, "sk_surface_new_image_snapshot");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
     RX_SK_OPTIONAL(typeface_create_from_name, "sk_typeface_create_from_name");
     RX_SK_OPTIONAL(typeface_unref,            "sk_typeface_unref");
@@ -839,6 +840,12 @@ int64_t ruxen_canvas_host_new(int64_t width, int64_t height) {
 int64_t ruxen_canvas_host_is_null(int64_t self) {
     return self == 0 ? 1 : 0;
 }
+
+/* Identity accessor: a RawHost's handle IS its pointer. Lets the Ruxen side pass
+ * a host as a plain Int to a binding that takes the host by value (e.g.
+ * RawImage.snapshot_of, whose RawImage return type only resolves in its own file).
+ * Mirrors ruxen_canvas_image_ptr. */
+int64_t ruxen_canvas_host_ptr(int64_t self) { return self; }
 
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
  * no GC. */
@@ -2207,6 +2214,41 @@ int64_t ruxen_canvas_image_height(int64_t self) {
 void ruxen_canvas_image_drop(int64_t self) {
     const RxSkia *sk = rx_skia();
     if (self && sk->image_unref) sk->image_unref((sk_image_t *)self);
+}
+
+/* ---- render-to-texture / raster cache (Skia-only) ----
+ *
+ * Snapshot THIS host's current rendering surface into an immutable sk_image,
+ * returned as an image handle the Ruxen side wraps in an `Image` (so it reuses
+ * the whole existing draw_image path — no new draw ABI). The decisive primitive
+ * for caching an expensive subtree: draw it once into an offscreen Canvas, snapshot
+ * it, then blit the snapshot cheaply every frame.
+ *
+ * The snapshot is a COPY of the surface contents at call time — it does not alias
+ * the surface's pixels, so further draws into the surface (or freeing the offscreen
+ * host) leave the image intact. The returned image is caller-owned: the Ruxen
+ * `Image` frees it via ruxen_canvas_image_drop (sk_image_unref), the SAME ownership
+ * as a loaded image, so there is exactly one free path and no double-free.
+ *
+ * Returns the sk_image pointer as an int64 handle, or 0 on failure (no Skia / no
+ * surface / snapshot symbol absent). Drawing offscreen never touches another
+ * canvas's framebuffer: each host owns its own pixels buffer; only an explicit
+ * draw_image of the snapshot moves content between them. */
+int64_t ruxen_canvas_host_snapshot(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->surface_new_image_snapshot) return 0;
+    /* Force the surface into existence (raster-direct, or the GPU surface for a
+     * GPU host) so we snapshot whatever the canvas draws into. rx_host_canvas
+     * leaves the surface handle in h->sk_surface (raster) or h->gpu_surface (GPU). */
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas) return 0;
+    sk_surface_t *surf = h->gpu_surface ? (sk_surface_t *)h->gpu_surface
+                                        : (sk_surface_t *)h->sk_surface;
+    if (!surf) return 0;
+    sk_image_t *img = sk->surface_new_image_snapshot(surf);
+    return (int64_t)img;   /* caller-owned; freed by ruxen_canvas_image_drop */
 }
 
 /* Shared blit: draw `image`'s `src` region into `dst` (linear sampling). */

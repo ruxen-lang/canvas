@@ -206,7 +206,26 @@ headless (capability + fallback) and pixel-verify via a standalone
       leaks across events. `Window.mod_shift` / `mod_ctrl` / `mod_alt` / `mod_gui`
       name the bits. Pinned via the extended `window_pump_test_keydown` seam (now
       takes a folded-mask arg) in `tests/key_modifiers.rx`.
-- [ ] **Render-to-texture / raster cache.**
+- [x] **Render-to-texture / raster cache.** **DONE.** `Canvas#snapshot ->
+      Result[Image, String]` copies a canvas's current surface into an immutable
+      `Image` via `sk_surface_new_image_snapshot`; the snapshot is then drawn into
+      ANY canvas at any offset through the EXISTING `draw_image` path — so the only
+      new ABI is the snapshot itself (one shim entry + one loader symbol), reusing
+      `Image` / `draw_image` wholesale per the host/raw architecture. **API shape
+      chosen:** a standalone offscreen `Canvas.create(w,h)` + `snapshot`, NOT a
+      host-level current-target switch — an offscreen raster host already owns its
+      own buffer and reuses the entire Canvas draw API for free, so this is the
+      least-new-ABI fit. **Ownership:** the snapshot is a COPY (does not alias the
+      source pixels — later draws into the source, or dropping it, leave the image
+      intact), caller-owned and freed via the SAME `Image` drop path as a loaded
+      image (one free path, no double-free). Symbols verified present on the pinned
+      `libSkiaSharp.dylib` (`nm -gU`): `sk_surface_new_image_snapshot`,
+      `sk_image_unref`, `sk_canvas_draw_image` (all exported). Skia-only — clean
+      `Err` on the software-raster fallback. Pixel-pinned in
+      `tests/canvas_snapshot.rx` (offscreen red rect at 10,10 → snapshot → blit at
+      offset 5,5 → `read_pixel` proves red landed at the offset and the main
+      framebuffer stayed pure blue where the image didn't cover; the snapshot stays
+      RED after the source is overwritten green).
 - [x] **Drag-and-drop (files).** **DONE.** `SDL_DROPFILE` → `Event.FileDrop` (no
       coords — SDL2's file-drop carries no cursor position, and we do not invent
       one). The dropped PATH is a side-channel read via `Window#dropped_file_path`
