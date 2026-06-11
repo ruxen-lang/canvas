@@ -201,6 +201,9 @@ typedef void        (*pfn_paint_set_style)(sk_paint_t *, int /*sk_paint_style_t*
 typedef void        (*pfn_paint_set_stroke_width)(sk_paint_t *, float);
 typedef void        (*pfn_paint_set_shader)(sk_paint_t *, sk_shader_t *);
 typedef void        (*pfn_paint_set_maskfilter)(sk_paint_t *, sk_maskfilter_t *);
+/* SkBlendMode int (Clear=0, Src=1, SrcOver=3, Screen=14, Multiply=24 — pinned
+ * empirically against this build). The canvas-side RX_BLEND_* enum maps to these. */
+typedef void        (*pfn_paint_set_blendmode)(sk_paint_t *, int /*sk_blendmode_t*/);
 
 /* colors[count] packed 0xAARRGGBB; pos[count] in [0,1] or NULL for even spacing;
  * matrix NULL = identity. */
@@ -489,6 +492,7 @@ typedef struct {
     pfn_paint_set_stroke_width paint_set_stroke_width;
     pfn_paint_set_shader       paint_set_shader;
     pfn_paint_set_maskfilter   paint_set_maskfilter;
+    pfn_paint_set_blendmode    paint_set_blendmode;
 
     pfn_shader_new_linear_gradient shader_new_linear_gradient;
     pfn_shader_new_radial_gradient shader_new_radial_gradient;

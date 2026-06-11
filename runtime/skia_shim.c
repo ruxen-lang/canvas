@@ -165,6 +165,7 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(rrect_set_rect_radii,      "sk_rrect_set_rect_radii");
     RX_SK_OPTIONAL(paint_set_shader,          "sk_paint_set_shader");
     RX_SK_OPTIONAL(paint_set_maskfilter,      "sk_paint_set_maskfilter");
+    RX_SK_OPTIONAL(paint_set_blendmode,       "sk_paint_set_blendmode");
     RX_SK_OPTIONAL(shader_new_linear_gradient,"sk_shader_new_linear_gradient");
     RX_SK_OPTIONAL(shader_new_radial_gradient,"sk_shader_new_radial_gradient");
     RX_SK_OPTIONAL(shader_unref,              "sk_shader_unref");
@@ -1136,6 +1137,9 @@ int64_t ruxen_canvas_begin_frame(int64_t self) {
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->in_frame) return RXC_ERR_IN_FRAME;
     h->in_frame = 1;
+    /* Reset paint state that must not leak across frames: blend mode back to the
+     * default SrcOver (the transform/clip reset is below, on the Skia canvas). */
+    h->blend_mode = RX_BLEND_SRC_OVER;
     /* On-screen Metal: acquire this frame's drawable + build the per-frame GPU
      * surface BEFORE any drawing. If no drawable (headless/no display), the
      * frame has no GPU canvas and draws are skipped — a clean no-op, never wrong
@@ -1462,6 +1466,43 @@ static int rxc_check_color(int64_t r, int64_t g, int64_t b, int64_t a) {
            b >= 0 && b <= 255 && a >= 0 && a <= 255;
 }
 
+/* Map the canvas-side RX_BLEND_* enum to this build's SkBlendMode int (pinned
+ * empirically: SrcOver=3, Clear=0, Src=1, Screen=14, Multiply=24). Unknown ->
+ * SrcOver, so a bad value degrades to the safe default rather than a wrong mode. */
+static int rxc_skblend(int32_t mode) {
+    switch (mode) {
+    case RX_BLEND_CLEAR:    return 0;   /* SkBlendMode::kClear */
+    case RX_BLEND_SRC:      return 1;   /* kSrc */
+    case RX_BLEND_SCREEN:   return 14;  /* kScreen */
+    case RX_BLEND_MULTIPLY: return 24;  /* kMultiply */
+    case RX_BLEND_SRC_OVER:
+    default:                return 3;   /* kSrcOver (default) */
+    }
+}
+
+/* Apply the host's current blend mode to a freshly-built paint. A no-op for the
+ * default SrcOver (Skia paints already default to SrcOver, so we skip the call)
+ * and when the symbol is absent (older lib) — the draw then uses SrcOver, which
+ * is the documented fallback. Every draw wrapper that builds a Skia paint calls
+ * this just before issuing the draw. */
+static void rx_apply_blend(const RxSkia *sk, sk_paint_t *paint, const RxHost *h) {
+    if (!h || h->blend_mode == RX_BLEND_SRC_OVER) return;
+    if (sk->paint_set_blendmode) sk->paint_set_blendmode(paint, rxc_skblend(h->blend_mode));
+}
+
+/* Set the current blend mode for subsequent draws (docs/ROADMAP.md Phase-1 E1).
+ * The mode is a small RX_BLEND_* int; out-of-range is rejected so a caller can't
+ * silently set a meaningless mode. State persists until changed or until the next
+ * begin_frame resets it to SrcOver. Does NOT require the Skia backend to STORE the
+ * mode (it just sets host state); a draw applies it only when Skia is active. */
+int64_t ruxen_canvas_set_blend_mode(int64_t self, int64_t mode) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (mode < 0 || mode > RX_BLEND_MAX) return RXC_ERR_BAD_ARGS;
+    h->blend_mode = (int32_t)mode;
+    return RXC_OK;
+}
+
 static uint32_t rxc_pack(int64_t r, int64_t g, int64_t b, int64_t a) {
     return ((uint32_t)a << 24) | ((uint32_t)r << 16) |
            ((uint32_t)g << 8)  |  (uint32_t)b;
@@ -1533,6 +1574,7 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
         sk->paint_set_antialias(paint, 0);   /* crisp integer-aligned edges */
         sk->paint_set_style(paint, RX_SK_PAINT_FILL);
         sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        rx_apply_blend(sk, paint, h);
         sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
         sk->canvas_draw_rect(canvas, &rect, paint);   /* Skia clips to surface */
         sk->paint_delete(paint);
@@ -1569,7 +1611,7 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
 
 /* Build a paint for the given packed color and stroke width, or NULL on
  * allocation failure. Caller owns it (paint_delete). */
-static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w) {
+static sk_paint_t *rx_make_paint(const RxSkia *sk, const RxHost *h, int64_t argb, double stroke_w) {
     sk_paint_t *p = sk->paint_new();
     if (!p) return NULL;
     sk->paint_set_antialias(p, 1);
@@ -1580,6 +1622,7 @@ static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w
         sk->paint_set_style(p, RX_SK_PAINT_FILL);
     }
     sk->paint_set_color(p, (sk_color_t)(uint32_t)argb);
+    rx_apply_blend(sk, p, h);   /* honor the host's current blend mode */
     return p;
 }
 
@@ -1610,7 +1653,7 @@ int64_t ruxen_canvas_draw_circle(int64_t self, double cx, double cy, double radi
         !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
         return RXC_ERR_BAD_ARGS;
     }
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rect_t bounds = { (float)(cx - radius), (float)(cy - radius),
                          (float)(cx + radius), (float)(cy + radius) };
@@ -1636,7 +1679,7 @@ int64_t ruxen_canvas_draw_round_rect(int64_t self, double x, double y, double w,
         return RXC_ERR_BAD_ARGS;
     }
     double rad = radius > 0.0 ? radius : 0.0;
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
     sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
@@ -1673,7 +1716,7 @@ int64_t ruxen_canvas_draw_rrect_radii(int64_t self, double x, double y, double w
     if (br < 0.0) br = 0.0;
     if (bl < 0.0) bl = 0.0;
 
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rrect_t *rr = sk->rrect_new();
     if (!rr) { sk->paint_delete(paint); return RXC_ERR_BAD_ARGS; }
@@ -1705,7 +1748,7 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
         return RXC_ERR_BAD_ARGS;
     }
     double width = stroke_w > 0.0 ? stroke_w : 1.0;
-    sk_paint_t *paint = rx_make_paint(sk, argb, width);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, width);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
     sk->paint_delete(paint);
@@ -1841,7 +1884,7 @@ int64_t ruxen_canvas_draw_path(int64_t self, int64_t path, double stroke_w, int6
     if (!canvas) return err;
     if (!p) return RXC_ERR_BAD_ARGS;
     if (!rxc_finite_pixels(stroke_w)) return RXC_ERR_BAD_ARGS;
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_path(canvas, p, paint);
     sk->paint_delete(paint);

@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Blend modes — `Canvas#set_blend_mode(mode)`.** A small stable int enum
+  (`0` src-over / `1` clear / `2` src / `3` multiply / `4` screen — `Canvas.blend_*`
+  constants name them) mapped to `SkBlendMode` in the shim via
+  `sk_paint_set_blendmode`. It is host PAINT STATE, not a per-draw argument (Skia
+  paints carry the blend mode, and threading a blend arg through ~20 draw
+  signatures would be needless ABI churn): the mode persists until changed and is
+  RESET to source-over at the start of each frame (`begin_frame`), so it never
+  leaks across frames — the same discipline as the transform/clip reset. Applied
+  to the shape-fill / line / path draws (all funnel through the one `rx_make_paint`
+  helper) on the active Skia backend; under the software fallback the mode is
+  stored but draws stay source-over (no wrong pixels). An out-of-range mode is
+  `Err`. Pixel-pinned in `tests/canvas_blend.rx` (multiply darkens red*green to
+  black; screen lightens to yellow; the per-frame reset; out-of-range rejection).
 - **Transforms — `Canvas#skew` + `Canvas#concat` (full 2D affine).** Completes the
   transform set (`translate`/`scale`/`rotate` already shipped). `skew(sx, sy)`
   (`sk_canvas_skew`) shears the coordinate system; `concat(a, b, c, d, e, f)`

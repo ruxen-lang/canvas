@@ -170,6 +170,45 @@ class Canvas
     self.status_to_result(code, "clear")
   end
 
+  ## Set the blend mode for SUBSEQUENT draws (a small stable int enum, like the
+  ## `align`/`direction` params — NOT a wrapped Skia enum). Skia paints carry the
+  ## blend mode, so this is paint state, not a per-draw argument; it persists
+  ## until changed and is RESET to source-over at the start of each frame
+  ## (`begin_frame`), so it never leaks across frames. Modes:
+  ##   0 = source-over (default — normal alpha compositing)
+  ##   1 = clear       (erase the destination where the source draws)
+  ##   2 = src         (replace the destination with the source, no blend)
+  ##   3 = multiply    (darken: product of source and destination)
+  ##   4 = screen      (lighten: inverse-product)
+  ## Applied on the Skia backend (shape fills + lines + paths); under the software
+  ## fallback the mode is stored but draws stay source-over (no wrong pixels). An
+  ## out-of-range mode is `Err`. Use `Canvas.blend_*` constants for readability.
+  def var set_blend_mode(mode: Int) -> Result[nil, String]
+    self.status_to_result(self.raw.set_blend_mode_raw(mode), "set_blend_mode")
+  end
+
+  ## Blend-mode constants for `set_blend_mode` (see its doc). Named so call sites
+  ## read `c.set_blend_mode(Canvas.blend_multiply)` rather than a bare `3`.
+  def self.blend_src_over -> Int
+    0
+  end
+
+  def self.blend_clear -> Int
+    1
+  end
+
+  def self.blend_src -> Int
+    2
+  end
+
+  def self.blend_multiply -> Int
+    3
+  end
+
+  def self.blend_screen -> Int
+    4
+  end
+
   ## Fill a rectangle with source-over blending, clipped to the surface.
   def var draw_rect(rect: Rect, color: Color) -> Result[nil, String]
     let code = self.raw.draw_rect_raw(

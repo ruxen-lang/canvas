@@ -97,8 +97,14 @@ headless (capability + fallback) and pixel-verify via a standalone
       round-trip (a 3x3 silently no-ops). Pixel-pinned in `tests/canvas_transforms.rx`
       (skew shears a rect into a parallelogram at predicted pixels; concat applies a
       2x-scale + (6,6)-translate matrix and the rect lands in the mapped box).
-- [ ] **Blend modes** — a `Canvas#set_blend_mode(mode)` state (small int enum),
-      reset per frame; covers src-over / clear / src / multiply / screen.
+- [x] **Blend modes** — `Canvas#set_blend_mode(mode)`, a small stable int enum
+      (0 src-over / 1 clear / 2 src / 3 multiply / 4 screen) mapped to SkBlendMode
+      in the shim (`sk_paint_set_blendmode`). It is host PAINT STATE (Skia paints
+      carry the mode), applied to subsequent shape-fill / line / path draws and
+      RESET to source-over each `begin_frame` so it never leaks across frames.
+      `Canvas.blend_*` constants name the ints. Out-of-range is `Err`. Pixel-pinned
+      in `tests/canvas_blend.rx` (multiply red*green→black; screen→yellow;
+      per-frame reset; validation).
 - [ ] **Blur image filter + drop-shadow generalization** (`sk_imagefilter_new_blur`).
 - [ ] **Dash path effect** — **BLOCKED on the fetched binary** (see Phase-1.5).
 

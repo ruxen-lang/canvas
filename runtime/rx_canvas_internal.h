@@ -125,7 +125,25 @@ typedef struct RxHost {
      * (a backing-sized framebuffer with a smaller design size). */
     int32_t   design_w;
     int32_t   design_h;
+
+    /* Current blend mode for subsequent draws (docs/ROADMAP.md Phase-1 E1). A
+     * small canvas-side enum (RX_BLEND_*), mapped to SkBlendMode when a draw
+     * builds its paint — Skia paints carry the blend mode, so this is paint
+     * state, not a per-draw arg. 0 (= RX_BLEND_SRC_OVER) is the default;
+     * begin_frame resets it so it never leaks across frames (like the
+     * transform/clip reset). */
+    int32_t   blend_mode;
 } RxHost;
+
+/* Canvas-side blend-mode enum (stable small ints, like the align/direction
+ * params), mapped to SkBlendMode in skia_shim.c. Keep in sync with the
+ * Canvas#set_blend_mode doc in src/canvas.rx. */
+#define RX_BLEND_SRC_OVER 0   /* default — source-over (normal alpha compositing) */
+#define RX_BLEND_CLEAR    1   /* clear destination where source draws */
+#define RX_BLEND_SRC      2   /* replace destination with source (no blend) */
+#define RX_BLEND_MULTIPLY 3
+#define RX_BLEND_SCREEN   4
+#define RX_BLEND_MAX      4
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */
 int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b);

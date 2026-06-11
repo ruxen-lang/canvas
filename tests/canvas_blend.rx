@@ -1,0 +1,141 @@
+# Pin tests for Canvas#set_blend_mode (docs/ROADMAP.md Phase-1 E1). Blend mode is
+# host paint state applied to subsequent draws, reset to source-over each frame.
+# Pixel-pinned on the active Skia backend; under the software fallback the mode is
+# stored but draws stay source-over (asserted via the active? branch).
+
+Tester.describe("Canvas.set_blend_mode multiply") do |t: &var Tester|
+  t.it("multiply darkens: red base * green source = black") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let active = c.skia_active?
+    # Opaque red base over the whole surface (source-over).
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("base draw_rect failed")
+    end
+    # Switch to multiply, draw opaque green: (255,0,0) * (0,255,0) = (0,0,0).
+    match c.set_blend_mode(Canvas.blend_multiply)
+      Ok(_)  -> nil
+      Err(_) -> panic!("set_blend_mode failed")
+    end
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(0u8, 255u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("multiply draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let green = Color.rgb(0u8, 255u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(4, 4)).to_eq(black)   # red*green multiplied to black
+    else
+      # software fallback: no blend mode, the green source-over wins (opaque)
+      t.expect(c.read_pixel(4, 4)).to_eq(green)
+    end
+  end
+end
+
+Tester.describe("Canvas.set_blend_mode screen") do |t: &var Tester|
+  t.it("screen lightens: red base screened with green = yellow") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let active = c.skia_active?
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(255u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("base draw_rect failed")
+    end
+    match c.set_blend_mode(Canvas.blend_screen)
+      Ok(_)  -> nil
+      Err(_) -> panic!("set_blend_mode failed")
+    end
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(0u8, 255u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("screen draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let yellow = Color.rgb(255u8, 255u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(4, 4)).to_eq(yellow)  # red + green screened = yellow
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.set_blend_mode reset per frame") do |t: &var Tester|
+  t.it("begin_frame resets a leaked blend mode back to source-over") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    # frame 1: set multiply WITHOUT resetting before end_frame (a leak).
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.set_blend_mode(Canvas.blend_multiply)
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    # frame 2: the leaked multiply must be gone — a green over red is source-over,
+    # so the opaque green wins (NOT multiplied to black).
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame 2 failed")
+    end
+    let active = c.skia_active?
+    let _ = c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(255u8, 0u8, 0u8))
+    let _ = c.draw_rect(Rect.new(0.0f32, 0.0f32, 8.0f32, 8.0f32), Color.rgb(0u8, 255u8, 0u8))
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame 2 failed")
+    end
+    let green = Color.rgb(0u8, 255u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(4, 4)).to_eq(green)   # source-over: green wins, not black
+    else
+      t.expect(c.read_pixel(4, 4)).to_eq(green)
+    end
+  end
+end
+
+Tester.describe("Canvas.set_blend_mode validation") do |t: &var Tester|
+  t.it("rejects an out-of-range mode") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var bad = false
+    match c.set_blend_mode(99)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("the named constants are the documented small ints") do
+    t.expect(Canvas.blend_src_over).to_eq(0)
+    t.expect(Canvas.blend_clear).to_eq(1)
+    t.expect(Canvas.blend_src).to_eq(2)
+    t.expect(Canvas.blend_multiply).to_eq(3)
+    t.expect(Canvas.blend_screen).to_eq(4)
+  end
+end
