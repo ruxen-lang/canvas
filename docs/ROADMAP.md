@@ -190,7 +190,26 @@ headless (capability + fallback) and pixel-verify via a standalone
       verify against the C-API header's actual naming before declaring a binary
       blocked.
 - [ ] **Render-to-texture / raster cache.**
-- [ ] **Drag-and-drop.**
+- [x] **Drag-and-drop (files).** **DONE.** `SDL_DROPFILE` → `Event.FileDrop` (no
+      coords — SDL2's file-drop carries no cursor position, and we do not invent
+      one). The dropped PATH is a side-channel read via `Window#dropped_file_path`
+      right after polling. **Memory contract:** SDL owns the `event.drop.file`
+      string (SDL-malloc'd); the pump copies it into the ring at pump time, then
+      `SDL_free`s SDL's copy IMMEDIATELY — no SDL pointer ever dangles, the same
+      discipline as IME marked text. **But a path is routinely longer than the
+      32-byte inline `text` buffer** (which IME uses), so FileDrop gets its OWN
+      owned heap copy per ring slot (`RxEvent.drop_path`): push `strdup`s it, poll
+      MOVES it into `pending` (freeing the prior one), a non-drop push or host_drop
+      frees it — exactly one owner at all times, no truncation, no leak, no
+      double-free (verified by the long-path + multi-file pins). The
+      `SDL_DropEvent` windowID is at offset 16 (NOT the usual 8) and the path
+      pointer at offset 8 — demuxed per window. A multi-file drop arrives as several
+      `SDL_DROPFILE` events (one per file); each is handled independently.
+      `SDL_EventState(SDL_DROPFILE, SDL_ENABLE)` is called at every window create.
+      The `Event` variant is appended LAST (tag 9) so prior tags stay stable. Pins:
+      `tests/file_drop.rx` (path round-trip; a >32-byte path intact proving no
+      truncation; multi-file FIFO; the FileDrop/TextEditing side-channels stay
+      separate; the `window_pump_test_dropfile` seam matches the live handler).
 - [ ] **File dialogs.**
 - [x] **Fullscreen / minimize-maximize / DPI-change events.** **DONE.** Per-window
       setters, each resolving its `RxWin` slot by the owning host (multi-window

@@ -73,6 +73,8 @@ class RawHost
     # IME composition (TextEditing): carries the marked text + (start, length).
     def push_event_text_raw as "ruxen_canvas_push_event_text"(self, kind: Int, start: Int, length: Int, text: &String) -> Int
     def event_text as "ruxen_canvas_event_text"(self) -> String
+    # FileDrop: the dropped path (owned heap copy in the ring, Ruxen String out).
+    def event_drop_path as "ruxen_canvas_event_drop_path"(self) -> String
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
@@ -148,5 +150,9 @@ class RawHost
     # DISPLAY_CHANGED). Returns the resulting minimized flag (0/1); pushes a Resize
     # for the non-minimize transitions, which the test polls back.
     def window_pump_test_window_event as "ruxen_canvas_window_pump_test_window_event"(self, subtype: Int, design_w: Int, design_h: Int) -> Int
+    # File-drop seam (Phase-1.5): run the pump's SDL_DROPFILE handling on a
+    # synthetic path — emits Event.FileDrop carrying the path through the ring's
+    # owned-path side-channel (no 32-byte truncation). Returns RXC_OK / push error.
+    def window_pump_test_dropfile as "ruxen_canvas_window_pump_test_dropfile"(self, path: &String) -> Int
   end
 end

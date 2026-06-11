@@ -409,10 +409,25 @@ class Window
       # IME composition: start = event_ai, length = event_bi. The marked text
       # string is read separately via `composition_text` (the side-channel).
       Event.TextEditing(ki, self.canvas.raw.event_bi)
+    elsif kind == 9
+      # File drop: no coords (SDL gives none). The dropped PATH is read separately
+      # via `dropped_file_path` (the owned-path side-channel).
+      Event.FileDrop
     else
       Event.CloseRequested
     end
     ev
+  end
+
+  ## The PATH of the file just dropped — read this immediately after polling an
+  ## `Event.FileDrop`. The string is a side-channel the C ring carries (an OWNED
+  ## heap copy made at pump time, so SDL's own string was freed immediately and
+  ## never dangles, and a long path is NOT truncated). Returns the empty string for
+  ## any non-FileDrop event. A multi-file drop produces several `Event.FileDrop`
+  ## events — poll each and read its path in turn (the path is replaced on the next
+  ## poll, so read it before polling again).
+  def var dropped_file_path -> String
+    self.canvas.raw.event_drop_path
   end
 
   ## The IME marked (composition) text of the event JUST returned by `poll_event`
@@ -442,6 +457,10 @@ class Window
       # Tests that need real marked text use `push_composition` (below), which
       # carries the string through the dedicated text seam.
       Event.TextEditing(s, l) -> self.canvas.raw.push_event_text_raw(8, s, l, &"")
+      # FileDrop carries no payload in the Event value; the path is a side-channel,
+      # so injecting one pushes an EMPTY path. Tests that need a real path use
+      # `push_file_drop` (below), which carries it through the dedicated seam.
+      Event.FileDrop -> self.canvas.raw.push_event_text_raw(9, 0, 0, &"")
     end
     if Rxc.is_ok(code)
       Ok(nil)
@@ -466,6 +485,22 @@ class Window
       Err("canvas: push_composition failed: event queue is full")
     else
       Err("canvas: push_composition failed: invalid arguments")
+    end
+  end
+
+  ## Inject a FILE-DROP (`Event.FileDrop`) event carrying the dropped `path`. This
+  ## is the hook the SDL pump uses for `SDL_DROPFILE` and the one tests use to feed
+  ## a path (the plain `push_event` can't carry the string). The path is copied
+  ## into the ring (an owned heap copy, no truncation), so no caller buffer needs to
+  ## outlive the call. Poll it back as `Event.FileDrop` + `dropped_file_path`.
+  def var push_file_drop(path: String) -> Result[nil, String]
+    let code = self.canvas.raw.push_event_text_raw(9, 0, 0, &path)
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err("canvas: push_file_drop failed: event queue is full")
+    else
+      Err("canvas: push_file_drop failed: invalid arguments")
     end
   end
 end

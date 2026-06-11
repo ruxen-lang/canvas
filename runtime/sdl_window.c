@@ -77,6 +77,7 @@ extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t 
 #define RX_EV_SCROLL       6
 #define RX_EV_TEXT_INPUT   7
 #define RX_EV_TEXT_EDITING 8   /* IME composition (marked text + cursor) */
+#define RX_EV_FILE_DROP    9   /* a file was dropped onto the window (path in text) */
 
 /* ---- SDL2 constants (from the stable public ABI) ---- */
 #define SDL_INIT_VIDEO            0x00000020u
@@ -94,6 +95,26 @@ extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t 
 #define SDL_MOUSEBUTTONDOWN_EV    0x401u
 #define SDL_MOUSEBUTTONUP_EV      0x402u
 #define SDL_MOUSEWHEEL_EV         0x403u
+/* Drag-and-drop (Phase-1.5). SDL_DROPFILE delivers ONE dropped file path per
+ * event (a multi-file drop arrives as several DROPFILE events). SDL_DropEvent ABI
+ * differs from the other window events: { Uint32 type@0; Uint32 timestamp@4;
+ * char *file@8; Uint32 windowID@16; }. So the dropped-path pointer is at offset 8
+ * and the windowID is at offset 16 (NOT the usual offset 8). The `file` pointer
+ * is SDL-malloc'd and the receiver MUST SDL_free it (SDL's documented contract) —
+ * we copy it into the ring slot at pump time, then free SDL's copy immediately, so
+ * no SDL pointer ever dangles (the same side-channel discipline as IME marked
+ * text). DROPBEGIN/DROPCOMPLETE bracket a multi-file drag; we don't surface them
+ * (each file's DROPFILE is self-contained). */
+#define SDL_DROPFILE_EV           0x1000u
+#define SDL_DROPTEXT_EV           0x1001u
+#define SDL_DROPBEGIN_EV          0x1002u
+#define SDL_DROPCOMPLETE_EV       0x1003u
+#define SDL_DROPEVENT_FILE_OFF    8    /* char *file */
+#define SDL_DROPEVENT_WINDOWID_OFF 16  /* Uint32 windowID (drop events ONLY) */
+/* SDL_EventState enable constant (SDL_ENABLE = 1); SDL_EventState(SDL_DROPFILE,
+ * SDL_ENABLE) ensures drop events are delivered (they are enabled by default once
+ * a window exists, but we ask explicitly for robustness). */
+#define SDL_ENABLE                1
 /* SDL_KeyboardEvent ABI: state@12, repeat@13 (Uint8), keysym.sym@20 (verified
  * against SDL_events.h on this host — the repeat flag is at 13, NOT 10). */
 #define SDL_KEY_REPEAT_OFF        13
@@ -207,6 +228,10 @@ static int   (*s_RenderClear)(void *);
 static int   (*s_RenderCopy)(void *, void *, const void *, const void *);
 static void  (*s_RenderPresent)(void *);
 static int   (*s_PollEvent)(void *);
+/* Enable/disable an SDL event type (drag-and-drop: ensure DROPFILE is on).
+ * OPTIONAL — a miss just means we rely on SDL's default (drop on once a window
+ * exists). Returns the prior state; we ignore it. */
+static uint8_t (*s_EventState)(uint32_t type, int state);
 static void  (*s_DestroyTexture)(void *);
 static void  (*s_DestroyRenderer)(void *);
 static void  (*s_DestroyWindow)(void *);
@@ -377,6 +402,13 @@ static void rx_start_text_input(void) {
     if (s_StartTextInput) s_StartTextInput();
 }
 
+/* Ensure SDL delivers file-drop events (drag-and-drop). SDL enables DROPFILE by
+ * default once a window exists, but we ask explicitly for robustness across SDL
+ * builds. A no-op when SDL_EventState is unavailable. Called once per window create. */
+static void rx_enable_file_drop(void) {
+    if (s_EventState) s_EventState(SDL_DROPFILE_EV, SDL_ENABLE);
+}
+
 static int load_sdl(void) {
     if (s_lib) return 1;
     /* Host-aware: try a candidate list, first that dlopen()s wins. macOS does
@@ -409,6 +441,7 @@ static int load_sdl(void) {
     s_RenderCopy     = (int (*)(void *, void *, const void *, const void *))sym("SDL_RenderCopy");
     s_RenderPresent  = (void (*)(void *))sym("SDL_RenderPresent");
     s_PollEvent      = (int (*)(void *))sym("SDL_PollEvent");
+    s_EventState     = (uint8_t (*)(uint32_t, int))sym("SDL_EventState");  /* OPTIONAL */
     s_DestroyTexture = (void (*)(void *))sym("SDL_DestroyTexture");
     s_DestroyRenderer= (void (*)(void *))sym("SDL_DestroyRenderer");
     s_DestroyWindow  = (void (*)(void *))sym("SDL_DestroyWindow");
@@ -568,6 +601,7 @@ int64_t ruxen_canvas_window_show(int64_t self, int64_t title, int64_t scale) {
     }
     if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);  /* for the pump's demux */
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
+    rx_enable_file_drop();   /* drag-and-drop -> SDL_DROPFILE */
     return RXC_OK;
 }
 
@@ -746,6 +780,7 @@ int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale) {
     w->tex_h = h->height;
     if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
+    rx_enable_file_drop();   /* drag-and-drop -> SDL_DROPFILE */
     return RXC_OK;
 }
 
@@ -873,6 +908,7 @@ int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t q
     w->tex_h = dph;
     if (s_GetWindowID) w->win_id = s_GetWindowID(w->win);
     rx_start_text_input();   /* printable typing -> SDL_TEXTINPUT */
+    rx_enable_file_drop();   /* drag-and-drop -> SDL_DROPFILE */
     return RXC_OK;
 }
 
@@ -1313,6 +1349,28 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
             }
             break;
         }
+        case SDL_DROPFILE_EV: {
+            /* A file was dropped onto a window. SDL_DropEvent's windowID is at
+             * offset 16 (NOT the usual 8) and the path pointer at offset 8 — and
+             * SDL OWNS that path string (SDL-malloc'd); we MUST SDL_free it. Copy
+             * it into the ring slot (the side-channel) at pump time, then free
+             * SDL's copy immediately, so no SDL pointer dangles. SDL_DROPFILE
+             * carries NO drop position, so the FileDrop event has no coords (0,0);
+             * the path is read back via Window#dropped_file_path. A multi-file drop
+             * is several DROPFILE events — each handled here independently. */
+            char *path = NULL;
+            memcpy(&path, ev + SDL_DROPEVENT_FILE_OFF, sizeof(char *));
+            uint32_t dwid = 0;
+            memcpy(&dwid, ev + SDL_DROPEVENT_WINDOWID_OFF, 4);
+            RxWin *dw = rx_win_by_id(dwid);
+            if (dw) {
+                ruxen_canvas_push_event_text((int64_t)dw->owner, RX_EV_FILE_DROP,
+                                             0, 0, (int64_t)(path ? path : ""));
+                if ((int64_t)dw->owner == self) forwarded++;
+            }
+            if (path && s_SDL_free) s_SDL_free(path);   /* SDL owns it — free now */
+            break;
+        }
         case SDL_QUIT_EV:
             /* App-wide quit: no windowID. Deliver a CloseRequested to EVERY live
              * window so each can tear down. Count it once for `self`. */
@@ -1418,6 +1476,18 @@ int64_t ruxen_canvas_window_pump_test_window_event(int64_t self, int64_t subtype
     /* free the transient slot (owner = NULL) so it never leaks into another op. */
     memset(w, 0, sizeof(RxWin));
     return result;
+}
+
+/* Test seam: run the pump's SDL_DROPFILE handling on a synthetic dropped path,
+ * headless. The live pump can't run in the forked harness (no real SDL window),
+ * so this exercises the SAME push path the live DROPFILE handler uses — emit
+ * Event.FileDrop carrying the path through the ring's owned-path side-channel
+ * (push_event_text with the FileDrop kind, which strdup's the full path, no 32-
+ * byte truncation). Poll it back as Event.FileDrop + Window#dropped_file_path.
+ * Returns RXC_OK (or the push error code). */
+int64_t ruxen_canvas_window_pump_test_dropfile(int64_t self, int64_t path_ptr) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    return ruxen_canvas_push_event_text(self, RX_EV_FILE_DROP, 0, 0, path_ptr);
 }
 
 /* Tear ONE window slot down (idempotent on a free slot). The dlopen handle

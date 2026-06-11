@@ -863,6 +863,13 @@ void ruxen_canvas_host_drop(int64_t self) {
         h->sk_surface = NULL;
         h->sk_canvas  = NULL;
     }
+    /* Free any owned dropped-file paths still held: the most-recently-polled one
+     * in `pending`, plus every UNPOLLED ring slot (a host dropped with file-drop
+     * events still queued). Without this a never-polled drop would leak its path. */
+    if (h->pending.drop_path) { free(h->pending.drop_path); h->pending.drop_path = NULL; }
+    for (int32_t i = 0; i < RXC_EVENT_CAP; i++) {
+        if (h->events[i].drop_path) { free(h->events[i].drop_path); h->events[i].drop_path = NULL; }
+    }
     free(h->pixels);
     free(h);
 }
@@ -3181,11 +3188,19 @@ int64_t ruxen_canvas_measure_paragraph_shaped(int64_t self, int64_t text, double
  * `pending` slot and returns its kind (-1 when the queue is empty); the
  * payload accessors then read from `pending`. */
 
+/* FileDrop event-kind tag — must match RX_EV_FILE_DROP in sdl_window.c and the
+ * FileDrop variant's tag in src/event.rx (the highest tag, RXC_EVENT_KIND_MAX). */
+#define RX_EV_FILE_DROP 9
+
 int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) {
     RxHost *h = (RxHost *)self;
     if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
     if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
     int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    /* a previously-polled slot may still alias a drop_path it no longer owns
+     * (poll moves ownership to `pending` and NULLs the slot, so this is normally
+     * already NULL — but free defensively to never leak on an unexpected path). */
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
     h->events[tail].kind = (int32_t)kind;
     h->events[tail].a = a;
     h->events[tail].b = b;
@@ -3207,10 +3222,21 @@ int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
     if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
     if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
     int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    /* free any stale drop_path this slot still aliases (see push_event). */
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
     h->events[tail].kind = (int32_t)kind;
     h->events[tail].a = (double)start;
     h->events[tail].b = (double)length;
-    if (t) {
+    if (kind == RX_EV_FILE_DROP) {
+        /* A FILE PATH — routinely longer than the inline cap, so it gets its own
+         * owned heap copy (drop_path). The inline `text` stays empty so the IME
+         * accessor never returns a path. strdup may fail (OOM) → store NULL, the
+         * accessor then returns "" (a dropped-but-pathless event, never a crash). */
+        h->events[tail].text[0] = '\0';
+        h->events[tail].drop_path = (t && t[0]) ? strdup(t) : NULL;
+    } else if (t) {
+        /* IME marked text: copied inline, capped at 32 bytes (SDL's composition
+         * cap), exactly as before. */
         size_t n = strlen(t);
         if (n >= RXC_EVENT_TEXT_CAP) n = RXC_EVENT_TEXT_CAP - 1;
         memcpy(h->events[tail].text, t, n);
@@ -3234,10 +3260,28 @@ int64_t ruxen_canvas_event_text(int64_t self) {
 int64_t ruxen_canvas_poll_event(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h || h->ev_count == 0) return -1;
-    h->pending = h->events[h->ev_head];
+    /* MOVE the dropped-path ownership from the ring slot into `pending`: free the
+     * path the PREVIOUS poll left in `pending`, struct-copy the slot (which aliases
+     * its drop_path into pending), then NULL the slot so only `pending` owns it.
+     * Result: exactly one owner at all times, freed on the next poll or host_drop. */
+    if (h->pending.drop_path) { free(h->pending.drop_path); h->pending.drop_path = NULL; }
+    int32_t head = h->ev_head;
+    h->pending = h->events[head];
+    h->events[head].drop_path = NULL;   /* ownership moved to pending */
     h->ev_head = (h->ev_head + 1) % RXC_EVENT_CAP;
     h->ev_count--;
     return h->pending.kind;
+}
+
+/* The dropped FILE PATH of the most-recently-polled event (a Ruxen-owned String
+ * via ruxen_string_from). Empty string for any non-FileDrop event (or a drop with
+ * no path). The path was MOVED into `pending` at poll time (owned heap copy), so
+ * this never dereferences a foreign/stale SDL pointer. Read it immediately after
+ * polling an Event.FileDrop, before the next poll frees it. */
+int64_t ruxen_canvas_event_drop_path(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    const char *p = (h && h->pending.drop_path) ? h->pending.drop_path : "";
+    return (int64_t)ruxen_string_from(p);
 }
 
 double ruxen_canvas_event_a(int64_t self) {

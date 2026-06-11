@@ -7,6 +7,24 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Drag-and-drop (files) — `Event.FileDrop` + `Window#dropped_file_path`
+  (Phase-1.5).** `SDL_DROPFILE` is surfaced as `Event.FileDrop` (NO coordinates —
+  SDL2's file-drop gives no cursor position, and we don't invent one); the dropped
+  PATH is a side-channel read via `Window#dropped_file_path` right after polling.
+  **Memory contract:** SDL owns the dropped-path string (SDL-malloc'd); the pump
+  copies it into the ring at pump time, then `SDL_free`s SDL's copy immediately —
+  no SDL pointer ever dangles. Because a path is routinely longer than the 32-byte
+  inline IME buffer, FileDrop gets its OWN owned heap copy per ring slot
+  (`RxEvent.drop_path`): push `strdup`s it, poll MOVES it into `pending` (freeing
+  the prior one), and a non-drop push / host_drop frees it — exactly one owner
+  always, no truncation, no leak, no double-free. The `SDL_DropEvent` windowID is
+  at offset 16 (not the usual 8); the path at offset 8. A multi-file drop arrives
+  as several `SDL_DROPFILE` events (one per file). The `Event` variant is appended
+  LAST (tag 9) so prior tags stay stable; `RXC_EVENT_KIND_MAX` is 9. `Window#
+  push_file_drop` injects one (the live SDL pump and a `window_pump_test_dropfile`
+  headless seam share the same path). Pinned in `tests/file_drop.rx` (round-trip; a
+  >32-byte path intact; multi-file FIFO; FileDrop/TextEditing side-channels stay
+  separate; seam matches live handler).
 - **Desktop window management — `Window#set_fullscreen` / `#maximize` /
   `#minimize` / `#restore` / `#set_min_size` / `#set_max_size` (Phase-1.5).**
   Per-window setters, each resolving its `RxWin` slot by the owning host

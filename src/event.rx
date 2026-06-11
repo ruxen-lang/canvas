@@ -44,4 +44,13 @@ enum Event
   ## matching `TextInput` commits. Appended LAST so the prior tag values stay
   ## stable (the C shim dispatches events by integer tag).
   TextEditing(Int, Int)
+  ## A FILE was dragged-and-dropped onto the window (`SDL_DROPFILE`). The variant
+  ## carries NO coordinates — SDL2's file-drop gives no cursor position, and we do
+  ## not invent one. The dropped PATH is a side-channel read via
+  ## `Window#dropped_file_path` right after polling this event (the ring carries an
+  ## OWNED heap copy of the path, copied at pump time, so SDL's own string is freed
+  ## immediately and never dangles). A multi-file drop arrives as SEVERAL FileDrop
+  ## events (one per file) — poll each and read its path. Appended LAST (after
+  ## TextEditing) so prior tag values stay stable.
+  FileDrop
 end

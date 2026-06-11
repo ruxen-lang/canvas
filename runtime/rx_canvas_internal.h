@@ -31,7 +31,7 @@
 /* ---- events ---- */
 
 #define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 8  /* TextEditing — keep in sync with Event in src/event.rx */
+#define RXC_EVENT_KIND_MAX 9  /* FileDrop — keep in sync with Event in src/event.rx */
 /* SDL_TextEditingEvent caps its marked-text chunk at 32 bytes (incl. NUL); each
  * TextEditing event self-carries its composition string in the ring slot so the
  * (start, length) cursor and the marked text stay associated (no ambiguity when
@@ -42,8 +42,18 @@ typedef struct {
     int32_t kind;   /* event-kind tag; see the Rxc module in src/event.rx */
     double  a;      /* x / keycode / composition-start (event-kind dependent) */
     double  b;      /* y / unused  / composition-length (event-kind dependent) */
-    /* IME composition marked text (TextEditing only; "" otherwise). NUL-terminated. */
+    /* IME composition marked text (TextEditing only; "" otherwise). NUL-terminated.
+     * Capped at 32 bytes — SDL caps composition chunks there, so it always fits. */
     char    text[RXC_EVENT_TEXT_CAP];
+    /* OWNED heap copy of a dropped FILE PATH (FileDrop only; NULL otherwise). A
+     * path is routinely longer than RXC_EVENT_TEXT_CAP, so it can't ride the inline
+     * `text` buffer — it gets its own malloc'd string. OWNERSHIP: exactly one slot
+     * owns it. push strdup's it into the ring slot; poll MOVES it into `pending`
+     * (NULLing the ring slot) and frees the prior `pending.drop_path` first; a slot
+     * is NULL'd whenever a non-drop event is pushed into it; host_drop frees any
+     * still held in `pending` or unpolled ring slots. So no double-free, no leak,
+     * no dangling SDL pointer (SDL's own copy is freed at pump time). */
+    char   *drop_path;
 } RxEvent;
 
 /* ---- the host object ----
