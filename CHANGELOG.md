@@ -7,6 +7,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-window / multi-monitor refresh rate — `Window#refresh_rate` (Phase 2).**
+  An INSTANCE `Window#refresh_rate -> Result[Int, String]` (distinct from the
+  existing static `Window.refresh_rate`, which stays display-0) reports the Hz of
+  the display THIS window is on: `SDL_GetWindowDisplayIndex(win)` picks the window's
+  monitor, then `SDL_GetDesktopDisplayMode(thatIndex)` reads its rate — so a window
+  on a 144 Hz second monitor reports 144, not the primary's 60. Same Err contract
+  as the static one (`> 0` → `Ok`; negative `-RXC_ERR_*` → `Err` for no window /
+  no SDL / unspecified rate, never a bogus `Ok(0)`). `SDL_GetWindowDisplayIndex` is
+  OPTIONAL — a miss falls back to display 0. Pinned in `tests/frame_pacing.rx`.
 - **Render-to-texture / raster cache — `Canvas#snapshot` (Phase 2).** Copies a
   canvas's current surface into an immutable `Image` (`sk_surface_new_image_snapshot`),
   which is then drawn into ANY canvas at any offset through the EXISTING `draw_image`

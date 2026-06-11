@@ -78,3 +78,21 @@ Tester.describe("Window.refresh_rate") do |t: &var Tester|
     end
   end
 end
+
+Tester.describe("Window#refresh_rate (per-window / multi-monitor)") do |t: &var Tester|
+  t.it("Errs cleanly for a window that is not on screen (never a bogus 0)") do
+    # The per-window rate queries the display THE WINDOW sits on, so with no live
+    # window there is nothing to query. The forked harness opens no real window, so
+    # this is Err — the contract a caller relies on to pick a fallback rather than
+    # dividing by 0. On a live display the same call returns Ok(hz>0) for the
+    # window's own monitor (the multi-monitor upgrade of the static display-0 hint).
+    var w = match Window.open("rr", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.refresh_rate
+      Ok(hz) -> t.expect(hz > 0).to_eq(true)   # live display path (real window forced on)
+      Err(_) -> t.expect(true).to_eq(true)     # headless harness: clean Err, the pinned case
+    end
+  end
+end

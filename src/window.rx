@@ -297,6 +297,25 @@ class Window
     end
   end
 
+  ## The refresh rate in Hz of the display THIS window is currently on — the
+  ## multi-monitor upgrade of the static `Window.refresh_rate` (which always reads
+  ## display 0). When the window is dragged to a second monitor with a different
+  ## rate (e.g. a 144 Hz panel), this reports THAT display's rate, so an app paces
+  ## to the monitor the window actually lives on. `Ok(hz)` when the window is on
+  ## screen and SDL can read its display mode; `Err` when the window is not shown
+  ## (nothing to query — use the static `Window.refresh_rate` for a display-0 hint
+  ## before showing) or SDL / the rate is unavailable. The forked test harness opens
+  ## no real window, so it Errs there (the pin asserts that contract); the live
+  ## per-monitor behavior is proven on a real multi-display desktop.
+  def refresh_rate -> Result[Int, String]
+    let hz = self.canvas.raw.window_refresh_rate
+    if hz > 0
+      Ok(hz)
+    else
+      Err("canvas: refresh_rate unavailable (window not shown / no SDL / no display)")
+    end
+  end
+
   ## The system clipboard's text (E2 desktop services), via SDL's clipboard —
   ## works without an on-screen window. `Ok(text)` (the text may be the empty
   ## string when the clipboard holds no text — still a valid `Ok`), or `Err` when

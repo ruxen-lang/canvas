@@ -304,6 +304,11 @@ static void  (*s_GL_DeleteContext)(void *context);
  * frame-pacing.md). OPTIONAL: a miss just means refresh_rate reports Err. The
  * out struct is an SDL_DisplayMode (see SDL_DISPLAYMODE_REFRESH_OFF below). */
 static int   (*s_GetDesktopDisplayMode)(int displayIndex, void *mode);
+/* The display index a given window is currently on (multi-monitor): returns >= 0
+ * for the display, or < 0 on error. Lets Window#refresh_rate report the rate of
+ * the monitor THIS window sits on, not just display 0. OPTIONAL — a miss makes the
+ * per-window refresh_rate fall back to the display-0 query. */
+static int   (*s_GetWindowDisplayIndex)(void *window);
 
 /* SDL Metal-view entry points (resolved best-effort; a miss only forecloses the
  * windowed-Metal path). SDL_Metal_CreateView attaches a Metal-backed view to a
@@ -507,6 +512,7 @@ static int load_sdl(void) {
     s_GL_SetSwapInterval= (int (*)(int))sym("SDL_GL_SetSwapInterval");
     s_GL_DeleteContext  = (void (*)(void *))sym("SDL_GL_DeleteContext");
     s_GetDesktopDisplayMode = (int (*)(int, void *))sym("SDL_GetDesktopDisplayMode");
+    s_GetWindowDisplayIndex = (int (*)(void *))sym("SDL_GetWindowDisplayIndex");  /* OPTIONAL */
     s_gl_have_fns = (s_GL_CreateContext && s_GL_MakeCurrent && s_GL_GetProcAddress &&
                      s_GL_SwapWindow) ? 1 : 0;
 
@@ -1094,6 +1100,38 @@ int64_t ruxen_canvas_refresh_rate(void) {
     int32_t hz = 0;
     memcpy(&hz, mode + SDL_DISPLAYMODE_REFRESH_OFF, 4);
     if (hz <= 0) return -RXC_ERR_NO_SDL;   /* 0 = unspecified; force a fallback */
+    return (int64_t)hz;
+}
+
+/* The refresh rate (Hz) of the display THIS window (`self`) is currently on —
+ * the multi-monitor upgrade of the display-0-only ruxen_canvas_refresh_rate. The
+ * desktop-mode hint of the OWNING display: SDL_GetWindowDisplayIndex(win) picks
+ * the monitor the window sits on, then SDL_GetDesktopDisplayMode(thatIndex) reads
+ * its rate — so a window dragged to a 144 Hz second monitor reports 144, not the
+ * primary's 60. Returns the rate (> 0) on success, or a NEGATIVE -RXC_ERR_* when:
+ *   - this host has no live window (nothing to query the display of) -> -PRESENT
+ *   - SDL / the display-mode query is unavailable / the rate is unspecified (0)
+ *     -> -NO_SDL
+ * so the Ruxen side maps any negative to Err and picks a fallback (typically 60).
+ * The forked harness opens no real window, so headless this Errs -PRESENT (the pin
+ * asserts that contract). If SDL_GetWindowDisplayIndex is unresolved we fall back
+ * to display 0 — still a valid rate, just not multi-monitor-aware. */
+int64_t ruxen_canvas_window_refresh_rate(int64_t self) {
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return -RXC_ERR_PRESENT;     /* no window: nothing to query */
+    if (!load_sdl() || !s_GetDesktopDisplayMode) return -RXC_ERR_NO_SDL;
+    int display = 0;
+    if (s_GetWindowDisplayIndex) {
+        int di = s_GetWindowDisplayIndex(w->win);
+        if (di >= 0) display = di;                  /* the window's own monitor */
+        /* di < 0 (SDL error): fall back to display 0 below. */
+    }
+    unsigned char mode[64];
+    memset(mode, 0, sizeof mode);
+    if (s_GetDesktopDisplayMode(display, mode) != 0) return -RXC_ERR_NO_SDL;
+    int32_t hz = 0;
+    memcpy(&hz, mode + SDL_DISPLAYMODE_REFRESH_OFF, 4);
+    if (hz <= 0) return -RXC_ERR_NO_SDL;            /* 0 = unspecified; force fallback */
     return (int64_t)hz;
 }
 

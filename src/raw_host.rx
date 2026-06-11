@@ -125,6 +125,11 @@ class RawHost
     # Display refresh rate (Hz) for the frame-pacing hint (docs/decisions/
     # frame-pacing.md): > 0 on success, negative -RXC_ERR_NO_SDL when unavailable.
     def self.refresh_rate as "ruxen_canvas_refresh_rate" -> Int
+    # Per-window / multi-monitor refresh rate (Phase 2): the Hz of the display THIS
+    # window sits on (SDL_GetWindowDisplayIndex -> SDL_GetDesktopDisplayMode). > 0 on
+    # success; negative -RXC_ERR_* when there is no live window (-PRESENT) or no SDL
+    # / unspecified rate (-NO_SDL).
+    def window_refresh_rate as "ruxen_canvas_window_refresh_rate"(self) -> Int
     # Clipboard (E2 desktop services). get returns a Ruxen-owned String (the C
     # side builds it via ruxen_string_from); available gates the Err contract.
     def self.clipboard_get as "ruxen_canvas_clipboard_get" -> String

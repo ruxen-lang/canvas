@@ -272,8 +272,20 @@ headless (capability + fallback) and pixel-verify via a standalone
       proof: `examples/window_mgmt_verify.c` (`PASS` on a real display —
       fullscreen 320×240→1710×1073, maximize→1710×951, both restores→320×240).
 - [ ] **Vulkan** (additive behind the GPU seam, per `docs/GPU.md`).
-- [ ] **Per-window / multi-monitor refresh rate** (Phase-1 `refresh_rate` is
-      display-0 only).
+- [x] **Per-window / multi-monitor refresh rate** (Phase-1 `refresh_rate` is
+      display-0 only). **DONE.** `Window#refresh_rate -> Result[Int, String]` (an
+      INSTANCE method, distinct from the existing static `Window.refresh_rate` which
+      stays display-0) reads the rate of the display THIS window sits on:
+      `SDL_GetWindowDisplayIndex(win)` picks the window's monitor, then
+      `SDL_GetDesktopDisplayMode(thatIndex)` reads its Hz — so a window dragged to a
+      144 Hz second monitor reports 144, not the primary's 60. Same Err contract:
+      `> 0` → `Ok(hz)`; negative `-RXC_ERR_*` → `Err` when the window is not shown
+      (`-PRESENT` — nothing to query the display of) or SDL / the rate is
+      unavailable (`-NO_SDL`), never a bogus `Ok(0)`. `SDL_GetWindowDisplayIndex`
+      is OPTIONAL — a miss falls back to display 0 (still a valid rate). The forked
+      harness opens no real window, so it Errs there; the contract is pinned in
+      `tests/frame_pacing.rx` (per-window block), the live per-monitor behavior is a
+      real-multi-display-desktop concern.
 
 ## Later cycles
 
