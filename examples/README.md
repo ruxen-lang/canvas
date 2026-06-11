@@ -88,7 +88,7 @@ into anything automated (the harness pins the headless contract instead).
 cc -O2 -o metal_window_verify  examples/metal_window_verify.c   && ./metal_window_verify
 cc -O2 -o window_mgmt_verify    examples/window_mgmt_verify.c   && ./window_mgmt_verify
 cc -O2 -o file_dialog_verify    examples/file_dialog_verify.c   && ./file_dialog_verify
-cc -O2 -framework AppKit -o a11y_verify examples/a11y_verify.c  && ./a11y_verify
+cc -O2 -framework CoreGraphics -o a11y_verify examples/a11y_verify.c && ./a11y_verify
 ```
 
 `file_dialog_verify.c` drives a real macOS **NSOpenPanel** then **NSSavePanel**
@@ -97,8 +97,32 @@ through the objc runtime (the Phase-2 `Window.open_file_dialog` /
 paths. A modal needs a human click, so it is manual by nature; the automated bar is
 the headless `Err` contract in `tests/file_dialog.rx` plus this file compiling.
 
-`a11y_verify.c` sets the app's **NSAccessibility** label via objc (the Phase-3
-`Window.set_a11y_title` path) and reads it back — run with VoiceOver on to hear it.
-The engine-side a11y tree intake is pinned headless in `tests/accessibility.rx`;
-exposing the stored nodes as NSAccessibility CHILD elements (the ADR §4 remainder)
-is the VoiceOver-verified follow-up this file will grow.
+`a11y_verify.c` (Phase-3 / Prod-hardening) brings up a live Metal window, builds the
+engine's stored a11y nodes as **NSAccessibility CHILD elements**
+(`Window.sync_a11y_children`), and ASSERTS each one round-trips its role + label.
+It then attempts the external Accessibility-client round-trip
+(`AXUIElementCreateApplication(getpid())`); if TCC consent / a live GUI session is
+missing it prints a precise MANUAL-STEP and asserts the element-level proof — it
+never fakes the OS-walk. Run with VoiceOver (Cmd-F5) to hear the children.
+
+## Prod-hardening harnesses (link the real shim)
+
+Unlike the `*_verify.c` above (self-contained dlopen mirrors), these link the
+ACTUAL shim (`runtime/skia_shim.c` + `runtime/sdl_window.c`) so they exercise the
+real C code paths. `scripts/check.sh` runs the soak (gated, short) + bench
+(report-only) for you; run them directly with:
+
+```bash
+cc -O2 -o soak_verify         examples/soak_verify.c          runtime/skia_shim.c runtime/sdl_window.c -ldl && ./soak_verify
+cc -O2 -o error_inject_verify examples/error_inject_verify.c  runtime/skia_shim.c runtime/sdl_window.c -ldl && ./error_inject_verify
+cc -O2 -o bench_frame         examples/bench_frame.c          runtime/skia_shim.c runtime/sdl_window.c -ldl && ./bench_frame
+```
+
+- `soak_verify.c` — sustained ≥10k-frame leak soak (RSS via mach `task_info`),
+  asserts post-warmup growth < 5%. `SOAK_ITERS=N` tunes length.
+- `error_inject_verify.c` — forces the missing-Skia path (via `RUXEN_CANVAS_SKIA`)
+  and absurd-input rejection, asserting honest degradation (clean Err / no
+  overflow-OOM), never a silent no-op.
+- `bench_frame.c` — perf baseline (median/p95 frame walltime + shape-cache
+  hit-rate) on raster + offscreen Metal; numbers recorded in `docs/PERF.md`
+  (report-only, never gated). `BENCH_FRAMES=N` tunes length.
