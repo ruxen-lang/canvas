@@ -7,6 +7,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Leak soak harness — `examples/soak_verify.c` (Prod-hardening).** A sustained
+  ≥10k-frame headless loop that links the ACTUAL C shim and drives its leak-prone
+  surface (text incl. fallback/CJK/shaped with varying strings, offscreen
+  snapshot→blit→free, blurred layers, the event ring's TextEditing + FileDrop owned
+  side-channels, multi-host open/close), sampling RSS via mach `task_info` and
+  asserting post-warmup growth < 5%. Catches the slow per-frame leak the forked
+  per-binding pins can't. Result on this host (Skia active): +0.00% over 10k iters
+  (RSS flat at 28752 KB) — no leak found. `SOAK_ITERS=N` tunes length.
 - **Accessibility CHILD-element exposure + focus — `Window#sync_a11y_children` /
   `Window#set_a11y_focus` (Prod-hardening; docs/decisions/accessibility.md §6).**
   Finishes the staged ADR §4 remainder: the engine-side a11y node store is now

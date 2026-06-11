@@ -465,6 +465,17 @@ zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reaso
       frame. **Filed remainder:** pure-raster (non-Metal) NSWindow access (the
       `SysWMinfo` path) and the OS-level VoiceOver walk (needs a live GUI session +
       consent — the human step). docs/decisions/accessibility.md §6.
+- [x] **Leak soak — `examples/soak_verify.c`.** A sustained ≥10k-frame headless
+      loop driving the REAL shim (compiled in, not re-implemented) through the
+      leak-prone C surface: text (draw/measure, fallback+CJK, shaped) with VARYING
+      strings to churn the caches, offscreen `host_snapshot` → `draw_image` → free,
+      `save_layer_blur`/restore (image-filter create/unref), the event ring with
+      BOTH side-channels (TextEditing marked text + FileDrop owned heap paths), and
+      multi-host open/close every 500 iters. Samples RSS via mach `task_info` and
+      asserts post-warmup growth < 5% (with a 2 MiB absolute floor against allocator
+      noise). **Result on this host (Skia active): +0.00% over 10k iters, RSS flat
+      at 28752 KB — no leak found.** `SOAK_ITERS=N` tunes the length. This catches
+      the slow per-frame leak class the forked per-binding pins structurally can't.
 
 ## Later cycles
 
