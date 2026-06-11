@@ -476,6 +476,31 @@ zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reaso
       noise). **Result on this host (Skia active): +0.00% over 10k iters, RSS flat
       at 28752 KB — no leak found.** `SOAK_ITERS=N` tunes the length. This catches
       the slow per-frame leak class the forked per-binding pins structurally can't.
+- [x] **Error-injection pins — honest degradation proven.**
+      - **(a) Missing Skia dylib:** the production loader override `RUXEN_CANVAS_SKIA`
+        (already present) doubles as the fault injector — point it at a nonexistent
+        path and the lazy `rx_skia()` resolves to absent. `examples/error_inject_verify.c`
+        sets it (+ blanks the cache/HOME fallbacks) BEFORE the first shim call and
+        asserts: `skia_available == 0`; `clear`/`draw_rect` STILL produce byte-exact
+        opaque fills via software raster; a Skia-only op (`save_layer_blur`) returns
+        the clean error (`-RXC_ERR_NO_SKIA == -8`, the layer family's negative-code
+        convention) — never a silent no-op. **No new seam needed** (the override is
+        documented + default-off).
+      - **(b) GPU ladder forced failure:** already comprehensively pinned in
+        `tests/gpu_backend.rx` — the forked harness IS the forced-failure environment
+        (GPU rungs can't engage), and the pins assert total/safe probes, clean
+        fallback with byte-exact readback, `gpu_active? ⇒ gpu_available?`, and the
+        `show_gpu`/Metal ladders fall back to raster (kind 0) with correct pixels.
+        Not thin — no extension required.
+      - **(c) Absurd-input / integer-overflow audit:** audited every
+        dimension-multiplying allocation (`host_new`'s `width*height*4`, GPU surface
+        dims, glyph arrays). The per-axis cap (16384) is enforced BEFORE the multiply
+        so `16384²×4 = 1 GiB` fits `size_t` — NO wrap is reachable; the defense
+        already exists (no clamp added — the guard is correct). Pinned the rejection
+        through `Canvas.create` (zero/negative/over-cap/gigantic/overflow-bait → Err)
+        + a cap-boundary success in `tests/canvas_surface.rx`, and at the raw
+        `host_new` ABI in `error_inject_verify.c`. **Audit finding: no overflow bug —
+        the existing cap closes the class; pins lock it.**
 
 ## Later cycles
 

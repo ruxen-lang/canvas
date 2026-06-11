@@ -7,6 +7,17 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Error-injection proof — `examples/error_inject_verify.c` + overflow pins
+  (Prod-hardening).** Forces two failure classes against the real shim and asserts
+  honest degradation: (a) missing Skia dylib (via the existing `RUXEN_CANVAS_SKIA`
+  override pointed at a nonexistent path) → `skia_available == 0`, software raster
+  still byte-exact, Skia-only `save_layer_blur` returns clean `-NO_SKIA`; (c) absurd
+  input — zero/negative/over-cap/gigantic/overflow-bait `host_new` dimensions
+  rejected (the 16384 per-axis cap is enforced before the `w*h*4` multiply, so no
+  32-bit wrap is reachable). Audit finding: **no overflow bug — the cap closes the
+  class**; the rejection is now pinned through `Canvas.create` in
+  `tests/canvas_surface.rx` (+ a cap-boundary success). GPU-ladder forced-failure
+  stays covered by `tests/gpu_backend.rx`.
 - **Leak soak harness — `examples/soak_verify.c` (Prod-hardening).** A sustained
   ≥10k-frame headless loop that links the ACTUAL C shim and drives its leak-prone
   surface (text incl. fallback/CJK/shaped with varying strings, offscreen
