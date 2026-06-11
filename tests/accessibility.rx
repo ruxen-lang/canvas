@@ -69,4 +69,28 @@ Tester.describe("a11y live macOS contract under the forked harness") do |t: &var
     # set_a11y_title Errs — the contract: set succeeds iff available.
     t.expect(ok).to_eq(avail)
   end
+
+  t.it("sync_a11y_children + set_a11y_focus Err cleanly with no live window") do
+    # The child-element exposure is live-window-only (Metal NSView path). Under the
+    # forked harness there is no live window, so both Err — never a crash, never a
+    # silent no-op. The live VoiceOver-verified path is examples/a11y_verify.c.
+    var w = match Window.open("a11y", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+
+    var sync_failed = false
+    match w.sync_a11y_children
+      Ok(_)  -> nil
+      Err(_) -> sync_failed = true
+    end
+    t.expect(sync_failed).to_eq(true)
+
+    var focus_failed = false
+    match w.set_a11y_focus(1)
+      Ok(_)  -> nil
+      Err(_) -> focus_failed = true
+    end
+    t.expect(focus_failed).to_eq(true)
+  end
 end

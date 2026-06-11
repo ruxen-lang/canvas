@@ -443,6 +443,29 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       `examples/a11y_verify.c`-grown remainder, not automated. The automated bar
       this cycle is the headless intake pin + the probe contract.
 
+## Prod-hardening — production-readiness closure (single-host macOS)
+
+The pass that closes every prod-readiness gap closable on one macOS host. Same
+zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reason.
+
+- [x] **Accessibility — CHILD-element exposure + focus (finishes ADR §4).**
+      `Window#sync_a11y_children` exposes the engine-side a11y store as macOS
+      `NSAccessibilityElement` children on the live window's content view (reached
+      via `[mtl_view window].contentView` — the ABI-safe NSView, NOT `SysWMinfo`);
+      `Window#set_a11y_focus(id)` points VoiceOver focus at a node. Role enum →
+      NSAccessibility role constant; frames window-point→screen (y-flip +
+      `convertRectToScreen:`). Live-only/fork-gated (clean `Err` headless, pinned in
+      `tests/accessibility.rx`). Live proof: the grown `examples/a11y_verify.c`
+      builds a Metal window + the 3 children and ASSERTS each role+label round-trips
+      via `accessibilityRole`/`accessibilityLabel`, then attempts the external AX
+      client round-trip (`AXUIElementCreateApplication(getpid())`), printing a
+      precise MANUAL-STEP under missing TCC consent — never a faked OS-walk
+      assertion. **What a screen reader sees now:** the window is an a11y container
+      (AXGroup) whose children are the pushed controls, each with role/label/screen-
+      frame. **Filed remainder:** pure-raster (non-Metal) NSWindow access (the
+      `SysWMinfo` path) and the OS-level VoiceOver walk (needs a live GUI session +
+      consent — the human step). docs/decisions/accessibility.md §6.
+
 ## Later cycles
 
 - Full canvas surface: `draw_path`, `draw_image`, transforms, clips, layers.

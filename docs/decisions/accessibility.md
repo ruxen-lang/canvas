@@ -1,10 +1,12 @@
 # ADR: Accessibility bridge — L2 a11y tree → L1 → macOS NSAccessibility
 
-Status: **Accepted — design + minimal sound subset.** The engine-side intake API
-(flat-array a11y tree, headless-testable) + a `Window#a11y_available?` probe +
-`Window#set_a11y_title` (the smallest real NSAccessibility touch) land now; the
-NSAccessibility exposure of CHILD elements (the element-array dance) is staged with
-a precise reason below.
+Status: **Accepted — design + minimal sound subset + CHILD-element exposure
+landed (prod-hardening, 2026-06-11).** The engine-side intake API (flat-array a11y
+tree, headless-testable) + a `Window#a11y_available?` probe + `Window#set_a11y_title`
+landed first; the staged §4 remainder — exposing the stored nodes as NSAccessibility
+CHILD elements + focus — is now ALSO landed (`Window#sync_a11y_children` /
+`Window#set_a11y_focus`). See §6 below for the as-built notes (the NSView vehicle,
+the honest scope, and what the grown `examples/a11y_verify.c` proves).
 Date: 2026-06-11
 Relates to: `docs/decisions/frame-pacing.md` (the objc-runtime-via-dlopen pattern),
 the file-dialog path in `runtime/sdl_window.c` (the established NSPanel/objc
@@ -115,6 +117,49 @@ behavior.
 This mirrors the file-dialog landing exactly: the testable subset (intake +
 probes) lands and is pinned; the human-verified live subset (child elements via
 VoiceOver) is filed with a named verify example.
+
+### 6. As-built: the CHILD-element exposure (landed 2026-06-11)
+
+The §4 remainder is now implemented, choosing option (b) — `NSAccessibilityElement`
+instances, NOT `objc_allocateClassPair` custom classes. The framework class already
+answers `accessibilityRole`/`accessibilityLabel`/`accessibilityFrame` from the
+attributes we set, so it is both simpler and less unsafe than a runtime-registered
+class with C IMP trampolines.
+
+- **`Window#sync_a11y_children`** (`ruxen_canvas_window_sync_a11y_children`,
+  sdl_window.c): builds one `NSAccessibilityElement` per stored node via
+  `+[NSAccessibilityElement accessibilityElementWithRole:frame:label:parent:]`,
+  sets them as the content view's `accessibilityChildren` (wholesale replace —
+  Tier-1), and marks the content view an `AXGroup`. Role enum → NSAccessibility
+  role constant (`AXButton`/`AXStaticText`/`AXImage`/`AXHeading`/`AXLink`/`AXGroup`).
+- **`Window#set_a11y_focus(id)`** (`ruxen_canvas_window_set_a11y_focus`): points
+  the matching child's `setAccessibilityFocused:` at the node with L2 id `id`.
+- **NSView vehicle (the ABI-safe call):** the content view is reached as
+  `[mtl_view window].contentView` — `mtl_view` is the NSView SDL hands back from
+  `SDL_Metal_CreateView`, which we already own. This avoids `SDL_GetWindowWMInfo`'s
+  version-fragile `SysWMinfo` struct entirely (the risk the §3 note flagged). Metal
+  is the real macOS backend, so this IS the production path.
+- **Coordinates:** stored nodes are window-points/top-left (the §1 contract); the
+  shim flips y within the content view's bounds (AppKit is bottom-left origin) then
+  `[window convertRectToScreen:]` — `NSAccessibilityFrame` wants screen coords.
+- **Fork gate:** live-only via `rx_window_allowed` (the file-dialog discipline);
+  headless/forked → clean `Err`, pinned in `tests/accessibility.rx`.
+
+**Honest scope / filed remainder:**
+1. **Non-Metal (pure-raster) NSWindow access** is still the `SysWMinfo` struct path,
+   deliberately not taken — `sync_a11y_children` Errs `RXC_ERR_PRESENT` for a
+   raster-only window. On macOS the GPU ladder lands on Metal, so the production
+   window has `mtl_view`; this gap matters only for a forced raster window.
+2. **The OS-level walk** (VoiceOver actually enumerating the children) needs a real
+   logged-in GUI session + TCC consent and is the human step.
+
+`examples/a11y_verify.c` (grown) proves what is machine-checkable on a desktop:
+it brings up a live Metal window, builds the 3 child elements exactly as the shim
+does, and **asserts all three round-trip their role+label** through
+`accessibilityRole`/`accessibilityLabel`. It then attempts the external AX client
+round-trip (`AXUIElementCreateApplication(getpid())` → `AXWindows`); when TCC
+consent or a live WindowServer session is missing it prints a precise MANUAL-STEP
+and asserts the element-level proof — it NEVER fakes the OS-walk assertion.
 
 ### 5. Focus
 

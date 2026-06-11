@@ -4296,6 +4296,47 @@ int64_t ruxen_canvas_a11y_node_label(int64_t n) {
     return (int64_t)ruxen_string_from(rxc_a11y_nodes[n].label);
 }
 
+/* ---- internal a11y store accessors (for sdl_window.c's macOS exposure) ----
+ *
+ * The store above is a static table private to this translation unit. The live
+ * NSAccessibility exposure (building NSAccessibilityElement children) lives in
+ * sdl_window.c (it is the only file allowed to touch Cocoa), so it needs a
+ * read-only window into this store WITHOUT widening the table to a shared header.
+ * These flat-primitive accessors are it: count + per-index field reads returning
+ * BORROWED data (the label is a pointer INTO the store, valid until the next
+ * clear/re-push — the caller copies it into an NSString immediately, no aliasing
+ * past the call). They are deliberately NOT `ruxen_canvas_*` ABI (no Ruxen binding);
+ * they are an internal C contract between the two shim files, prefixed rx_. */
+int rx_a11y_internal_count(void) { return rxc_a11y_count; }
+
+/* Borrowed read of node n. Writes role/frame through out-params and returns the
+ * label pointer (into the store, never NULL — "" when out of range). The caller
+ * (sdl_window.c) copies the label into an NSString synchronously. */
+const char *rx_a11y_internal_node(int n, int *role, double *x, double *y,
+                                  double *w, double *h, int64_t *id) {
+    if (n < 0 || n >= rxc_a11y_count) {
+        if (role) *role = -1;
+        if (x) *x = 0; if (y) *y = 0; if (w) *w = 0; if (h) *h = 0;
+        if (id) *id = -1;
+        return "";
+    }
+    const RxA11yNode *nd = &rxc_a11y_nodes[n];
+    if (role) *role = nd->role;
+    if (x) *x = (double)nd->x; if (y) *y = (double)nd->y;
+    if (w) *w = (double)nd->w; if (h) *h = (double)nd->h;
+    if (id) *id = nd->id;
+    return nd->label;
+}
+
+/* The store index of the node whose L2 id == `id`, or -1 if none. Used by the
+ * focus setter to map an L2 node id to a built NSAccessibilityElement. */
+int rx_a11y_internal_index_of(int64_t id) {
+    for (int i = 0; i < rxc_a11y_count; i++) {
+        if (rxc_a11y_nodes[i].used && rxc_a11y_nodes[i].id == id) return i;
+    }
+    return -1;
+}
+
 /* ---- event queue ---- */
 /* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the

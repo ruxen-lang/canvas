@@ -7,6 +7,26 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Accessibility CHILD-element exposure + focus — `Window#sync_a11y_children` /
+  `Window#set_a11y_focus` (Prod-hardening; docs/decisions/accessibility.md §6).**
+  Finishes the staged ADR §4 remainder: the engine-side a11y node store is now
+  exposed to macOS as `NSAccessibilityElement` CHILD elements on the live window's
+  content view, so a screen reader (VoiceOver) enumerates the app's controls with
+  the role/label/frame L2 pushed. Built via the framework factory
+  `+[NSAccessibilityElement accessibilityElementWithRole:frame:label:parent:]` (no
+  `objc_allocateClassPair` custom-class dance). The content view is reached as
+  `[mtl_view window].contentView` (the NSView from `SDL_Metal_CreateView` we already
+  own) — the ABI-safe path that sidesteps `SDL_GetWindowWMInfo`'s fragile
+  `SysWMinfo` struct. Frames map window-points/top-left → screen via a y-flip +
+  `[window convertRectToScreen:]`. `set_a11y_focus(id)` marks the matching child
+  `accessibilityFocused`. Live-window-only (fork-gated, clean `Err` headless),
+  pinned in `tests/accessibility.rx`; the live proof is the grown
+  `examples/a11y_verify.c`, which brings up a Metal window, builds the children, and
+  ASSERTS all three round-trip their role+label (then attempts the external AX
+  client query, printing a precise MANUAL-STEP under missing TCC consent — never a
+  faked OS-walk assertion). **HONEST-SCOPE filed:** pure-raster (non-Metal) NSWindow
+  access stays the `SysWMinfo` remainder; on macOS the GPU ladder lands on Metal so
+  the production window has `mtl_view`.
 - **Per-character font fallback (CJK / emoji) — `Canvas#draw_text_fallback` /
   `#measure_text_fallback` / `#fallback_available?` / `#last_fallback_family`
   (Phase 3 — text i18n).** Any codepoint the base font lacks (all CJK / emoji under

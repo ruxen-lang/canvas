@@ -443,6 +443,35 @@ class Window
     end
   end
 
+  ## Expose the engine-side a11y tree (the nodes pushed via `push_a11y_node`) to
+  ## macOS as NSAccessibility CHILD elements on THIS window's content view, so
+  ## VoiceOver enumerates the app's controls. Call after staging the tree and
+  ## showing the window; it replaces the child array wholesale (Tier-1 re-push).
+  ## `Ok(nil)` on success; `Err` headless / forked / no reachable live window.
+  ## The exposure is the Metal-window path (the real macOS backend); a pure-raster
+  ## window's NSWindow access is the documented remainder, so this Errs there.
+  def var sync_a11y_children -> Result[nil, String]
+    let code = self.canvas.raw.window_sync_a11y_children
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: sync_a11y_children unavailable (headless / no live window)")
+    end
+  end
+
+  ## Point VoiceOver's focus at the stored a11y node with L2 id `id` (its built
+  ## child element becomes the window's focused UI element). Call after
+  ## `sync_a11y_children` built the elements. `Ok(nil)` on success; `Err` when no
+  ## node has that id, there is no live window, or headless.
+  def var set_a11y_focus(id: Int) -> Result[nil, String]
+    let code = self.canvas.raw.window_set_a11y_focus(id)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_a11y_focus unavailable (no such node / headless / no window)")
+    end
+  end
+
   ## Push (append or replace by `id`) one accessibility node into the engine's
   ## a11y tree: `role` is a stable int (0 group / 1 button / 2 static-text /
   ## 3 image / 4 heading / 5 link — `Window.a11y_role_*`), `label` the spoken

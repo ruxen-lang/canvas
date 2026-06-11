@@ -45,6 +45,16 @@
  * the SDL copy. */
 extern char *ruxen_string_from(const char *s);
 
+/* Internal a11y store accessors (defined in skia_shim.c — both files always
+ * compile together). The store is a static table private to skia_shim.c; these
+ * give the macOS NSAccessibility exposure below a read-only window into it without
+ * a shared header. The returned label is BORROWED (valid until the next clear/
+ * re-push); it is copied into an NSString synchronously, never retained. */
+extern int         rx_a11y_internal_count(void);
+extern const char *rx_a11y_internal_node(int n, int *role, double *x, double *y,
+                                         double *w, double *h, int64_t *id);
+extern int         rx_a11y_internal_index_of(int64_t id);
+
 /* ---- status codes (keep in sync with skia_shim.c) ---- */
 #define RXC_OK             0
 #define RXC_ERR_BAD_ARGS   1
@@ -763,6 +773,174 @@ int64_t ruxen_canvas_window_set_a11y_title(int64_t title) {
     if (!ns) return RXC_ERR_NO_SDL;
     /* [NSApp setAccessibilityLabel:ns] — a real NSAccessibility protocol setter. */
     ak_msg_p(app, "setAccessibilityLabel:", ns);
+    return RXC_OK;
+}
+
+/* ---- accessibility: CHILD-element exposure (the ADR §4 remainder, landed) ----
+ *
+ * Exposes the engine-side a11y node store (skia_shim.c) to macOS as a flat array
+ * of NSAccessibilityElement CHILD elements on the live window's content view, each
+ * answering role / label / frame so VoiceOver can enumerate the app's controls.
+ *
+ * VEHICLE: `NSAccessibilityElement` instances built via the class factory
+ * `+[NSAccessibilityElement accessibilityElementWithRole:frame:label:parent:]` —
+ * the Apple-blessed path. NO `objc_allocateClassPair` / custom IMP trampolines
+ * (which the ADR floated as option (a)): the framework class already answers the
+ * protocol selectors from the role/frame/label we set, so option (b) is both
+ * simpler and less unsafe. The elements are retained by the content view's
+ * accessibilityChildren array, so we do not own a separate reference.
+ *
+ * REACHING THE NSVIEW: for a live Metal window we already own `mtl_view` (the
+ * NSView from SDL_Metal_CreateView); `[mtl_view window].contentView` is the
+ * accessibility container — NO SysWMinfo struct (the version-fragile path the
+ * window-title note flagged). Metal is the real macOS backend, so this is the
+ * production path. A pure-raster SDL window (no mtl_view) would need SDL_GetWindow-
+ * WMInfo's struct to reach its NSWindow — that is the documented remainder below.
+ *
+ * COORDINATES: nodes are stored in WINDOW POINTS, top-left origin (the ADR §1
+ * contract — the design→window-point mapping is L2's, already applied before push).
+ * NSAccessibilityFrame wants SCREEN coordinates, bottom-left origin. So per node:
+ * flip y within the content view (AppKit content views are bottom-left origin),
+ * build a view-local NSRect, then [window convertRectToScreen:] it. The element
+ * factory's `frame:` is documented as SCREEN coordinates, so we pass the converted
+ * rect directly.
+ *
+ * FORK GATE: live-only (rx_window_allowed) exactly like every Cocoa touch. Headless
+ * / forked -> RXC_ERR_NO_SDL, callers degrade cleanly (the intake store still
+ * round-trips for the headless pin).
+ */
+
+/* The NSAccessibility role CONSTANT string for our small role enum (mirrors the
+ * intake's 0 group / 1 button / 2 static-text / 3 image / 4 heading / 5 link).
+ * These are the documented NSAccessibilityRole values; an unknown role maps to the
+ * generic group role so a future enum value degrades to "a thing" not a crash. */
+static const char *rx_a11y_ns_role(int role) {
+    switch (role) {
+        case 1:  return "AXButton";
+        case 2:  return "AXStaticText";
+        case 3:  return "AXImage";
+        case 4:  return "AXHeading";
+        case 5:  return "AXLink";
+        case 0:
+        default: return "AXGroup";
+    }
+}
+
+/* [NSWindow convertRectToScreen:(NSRect)] -> NSRect. NSRect is 4 doubles by value
+ * (origin.x, origin.y, size.w, size.h) — on arm64 they ride the float regs both in
+ * and out (objc_msgSend, not _stret, for an NSRect this size on arm64). We declare
+ * the exact 4-double-in / 4-double-out signature so the ABI is honored. */
+typedef struct { double x, y, w, h; } RxNSRect;
+static RxNSRect ak_convert_rect_to_screen(void *win, RxNSRect r) {
+    RxNSRect (*m)(void *, void *, RxNSRect) =
+        (RxNSRect (*)(void *, void *, RxNSRect))s_objc_msgSend;
+    return m(win, s_sel("convertRectToScreen:"), r);
+}
+
+/* +[NSAccessibilityElement accessibilityElementWithRole:frame:label:parent:] — the
+ * factory. role/label are NSString*, frame is an NSRect by value, parent is the
+ * containing element (the content view). Returns an autoreleased element. */
+static void *ak_make_a11y_element(void *role, RxNSRect frame, void *label, void *parent) {
+    void *(*m)(void *, void *, void *, RxNSRect, void *, void *) =
+        (void *(*)(void *, void *, void *, RxNSRect, void *, void *))s_objc_msgSend;
+    return m(ak_cls("NSAccessibilityElement"),
+             s_sel("accessibilityElementWithRole:frame:label:parent:"),
+             role, frame, label, parent);
+}
+
+/* [view bounds] -> NSRect, to get the content view height for the y-flip. */
+static RxNSRect ak_view_bounds(void *view) {
+    RxNSRect (*m)(void *, void *) = (RxNSRect (*)(void *, void *))s_objc_msgSend;
+    return m(view, s_sel("bounds"));
+}
+
+/* Resolve the live content view + its window for the owner's window, or NULL.
+ * Metal-window path only (mtl_view); raster-only windows fall to the remainder. */
+static void *rx_a11y_content_view(RxWin *w, void **out_window) {
+    if (out_window) *out_window = NULL;
+    if (!w || !w->mtl_view) return NULL;   /* remainder: non-Metal NSWindow access */
+    /* mtl_view is the NSView SDL handed back from SDL_Metal_CreateView. */
+    void *win = ak_msg(w->mtl_view, "window");
+    if (!win) return NULL;
+    void *cv = ak_msg(win, "contentView");
+    if (!cv) return NULL;
+    if (out_window) *out_window = win;
+    return cv;
+}
+
+/* Push the engine-side a11y node store onto the live window's content view as
+ * NSAccessibilityElement children (VoiceOver enumerates them). RXC_OK on success;
+ * RXC_ERR_NO_SDL headless/forked/objc-unavailable; RXC_ERR_PRESENT when there is
+ * no reachable live (Metal) window for this host. Call after push_a11y_node(...)
+ * has staged the tree and the window is up. Idempotent: replaces the child array
+ * wholesale (Tier-1 re-push), matching the intake's wholesale-replace model. */
+int64_t ruxen_canvas_window_sync_a11y_children(int64_t self) {
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;
+    if (!rx_appkit_init())    return RXC_ERR_NO_SDL;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w) return RXC_ERR_PRESENT;
+    void *win = NULL;
+    void *cv = rx_a11y_content_view(w, &win);
+    if (!cv || !win) return RXC_ERR_PRESENT;   /* no reachable NSWindow (remainder) */
+
+    RxNSRect vb = ak_view_bounds(cv);          /* content view height for the y-flip */
+    void *strCls = ak_cls("NSString");
+    if (!strCls) return RXC_ERR_NO_SDL;
+    void *(*mkstr)(void *, void *, const char *) =
+        (void *(*)(void *, void *, const char *))s_objc_msgSend;
+
+    /* Build a mutable array of elements: [NSMutableArray array]. */
+    void *arrCls = ak_cls("NSMutableArray");
+    if (!arrCls) return RXC_ERR_NO_SDL;
+    void *arr = ak_msg(arrCls, "array");
+    if (!arr) return RXC_ERR_NO_SDL;
+
+    int n = rx_a11y_internal_count();
+    for (int i = 0; i < n; i++) {
+        int role = 0; double x = 0, y = 0, ww = 0, hh = 0; int64_t id = 0;
+        const char *lbl = rx_a11y_internal_node(i, &role, &x, &y, &ww, &hh, &id);
+        /* window-point top-left -> content-view bottom-left (flip y). */
+        RxNSRect local = { x, vb.h - (y + hh), ww, hh };
+        RxNSRect screen = ak_convert_rect_to_screen(win, local);
+        void *nsRole  = mkstr(strCls, s_sel("stringWithUTF8String:"), rx_a11y_ns_role(role));
+        void *nsLabel = mkstr(strCls, s_sel("stringWithUTF8String:"), lbl ? lbl : "");
+        void *el = ak_make_a11y_element(nsRole, screen, nsLabel, cv);
+        if (el) ak_msg_p(arr, "addObject:", el);
+    }
+    /* [contentView setAccessibilityChildren:arr] — the OS now enumerates them. */
+    ak_msg_p(cv, "setAccessibilityChildren:", arr);
+    /* The content view itself should be an a11y GROUP so the children hang under a
+     * named container, not bare under the window. Best-effort. */
+    ak_msg_p(cv, "setAccessibilityRole:",
+             mkstr(strCls, s_sel("stringWithUTF8String:"), "AXGroup"));
+    return RXC_OK;
+}
+
+/* Point the window's accessibility focus at the stored node with L2 id `id` (its
+ * built child element becomes accessibilityFocusedUIElement). RXC_OK on success;
+ * RXC_ERR_BAD_ARGS if no node has that id; RXC_ERR_PRESENT with no reachable
+ * window; RXC_ERR_NO_SDL headless. Must be called AFTER sync_a11y_children built
+ * the elements (focus points at a child the OS already knows). */
+int64_t ruxen_canvas_window_set_a11y_focus(int64_t self, int64_t id) {
+    if (!rx_window_allowed()) return RXC_ERR_NO_SDL;
+    if (!rx_appkit_init())    return RXC_ERR_NO_SDL;
+    int idx = rx_a11y_internal_index_of(id);
+    if (idx < 0) return RXC_ERR_BAD_ARGS;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w) return RXC_ERR_PRESENT;
+    void *win = NULL;
+    void *cv = rx_a11y_content_view(w, &win);
+    if (!cv || !win) return RXC_ERR_PRESENT;
+    /* Fetch the idx-th child from the content view's accessibilityChildren and mark
+     * it focused: [[cv accessibilityChildren] objectAtIndex:idx], then
+     * [el setAccessibilityFocused:YES]. objectAtIndex: takes an NSUInteger. */
+    void *children = ak_msg(cv, "accessibilityChildren");
+    if (!children) return RXC_ERR_PRESENT;
+    void *(*objAt)(void *, void *, unsigned long) =
+        (void *(*)(void *, void *, unsigned long))s_objc_msgSend;
+    void *el = objAt(children, s_sel("objectAtIndex:"), (unsigned long)idx);
+    if (!el) return RXC_ERR_BAD_ARGS;
+    ak_msg_b(el, "setAccessibilityFocused:", 1);
     return RXC_OK;
 }
 
