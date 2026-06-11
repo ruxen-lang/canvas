@@ -111,9 +111,12 @@ silent wrong render). The font is selected by **file path** this round.
 - **Family → file resolution.** Today a shaped run takes a font **file path**;
   resolving a family name to a file (via the system font manager) is a small
   follow-up.
-- **Font/run caching.** The current path builds the HarfBuzz face/font and Skia
-  typeface per call; a per-(path,size) cache (like the family-font cache) is a
-  performance follow-up, not a correctness one.
+- **Font/run caching — LANDED (Phase 3).** A bounded, process-wide shaped-run
+  MEASURE cache (keyed by font+size+direction × run-bytes hash) skips HarfBuzz when
+  a label is re-measured across frames; `Canvas#shape_cache_hits` proves the hit.
+  A fallback-typeface cache keyed by Unicode block landed with font fallback. See
+  `docs/decisions/text-fallback.md`. (Caching the per-call HarfBuzz face/font + Skia
+  typeface objects themselves — vs the measured widths — is a further follow-up.)
 
 ## Updating the pinned HarfBuzz version
 

@@ -1,0 +1,38 @@
+# Pin test for the shaped-run measure CACHE: Canvas#shape_cache_hits.
+#
+# Repeatedly measuring the same label (the L2 case — a static caption shaped every
+# frame for centering) should HIT a process-wide cache and skip HarfBuzz. We assert
+# the HIT COUNT increases on a repeat — a stable test, not a wall-clock perf number.
+#
+# docs/decisions/text-fallback.md (caching decision). The cache lives in the
+# shaper's measure path (draw_text_shaped_multi / *_paragraph_shaped), so we drive
+# it through measure_text_shaped_multi.
+
+Tester.describe("Canvas.shape_cache_hits") do |t: &var Tester|
+  t.it("re-measuring the same shaped run hits the cache") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available? && c.fallback_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      # First measure populates the cache (a miss); the second identical measure
+      # must register at least one more hit than the first.
+      let before = c.shape_cache_hits
+      let w1 = c.measure_text_shaped_multi("CacheMe", 24.0f32, arial.clone, 0)
+      let mid = c.shape_cache_hits
+      let w2 = c.measure_text_shaped_multi("CacheMe", 24.0f32, arial.clone, 0)
+      let after = c.shape_cache_hits
+
+      t.expect(w1 > 0).to_eq(true)
+      t.expect(w2).to_eq(w1)                 # same input, same width
+      t.expect(after > mid).to_eq(true)      # the repeat HIT the cache
+      t.expect(after > before).to_eq(true)
+    else
+      # No shaping/fallback: the probe is still total and returns a count >= 0.
+      let h = c.shape_cache_hits
+      t.expect(h >= 0).to_eq(true)
+    end
+  end
+end

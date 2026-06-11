@@ -2791,7 +2791,54 @@ typedef struct {
     int           hbdir;     /* RX_HB_DIR_* or INVALID for auto */
     int           line_height;
     int           ok;        /* 1 iff every handle was created */
+    uint64_t      font_key;  /* FNV-1a of (font_path, size_q, dir) — the measure
+                              * cache key prefix, so two shapers over the same font
+                              * + size + direction share cached run widths */
 } RxShaper;
+
+/* FNV-1a 64-bit over a byte range. Used for the shaped-run measure cache key. */
+static uint64_t rx_fnv1a(const void *data, size_t n, uint64_t seed) {
+    const unsigned char *p = (const unsigned char *)data;
+    uint64_t h = seed;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+/* ---- shaped-run measure cache (docs/decisions/text-fallback.md) ----
+ *
+ * Repeatedly measuring the SAME label across frames (the common L2 case — a static
+ * button caption shaped every frame for centering) re-runs HarfBuzz each time.
+ * This bounded, process-wide cache memoizes the measured width keyed by
+ * (font+size+dir hash) combined with the run's byte hash. A hit returns the cached
+ * width without touching HarfBuzz. The cache is a fixed open-addressed table with
+ * simple replace-on-collision (good enough — a repeated label always re-hashes to
+ * the same slot and hits). A global hit counter is exposed via
+ * ruxen_canvas_shape_cache_hits so a pin can ASSERT the cache hits (not a wall-clock
+ * number, which is not a stable test). */
+#define RXC_SHAPE_CACHE_CAP 128
+
+typedef struct {
+    uint64_t key;    /* 0 = empty */
+    int      width;
+} RxShapeCacheEntry;
+
+static RxShapeCacheEntry rxc_shape_cache[RXC_SHAPE_CACHE_CAP];
+static uint64_t          rxc_shape_cache_hits = 0;
+
+/* Look up (or -1 miss) the cached width for `key`. */
+static int rx_shape_cache_get(uint64_t key) {
+    if (key == 0) return -1;
+    RxShapeCacheEntry *e = &rxc_shape_cache[key % RXC_SHAPE_CACHE_CAP];
+    if (e->key == key) { rxc_shape_cache_hits++; return e->width; }
+    return -1;
+}
+
+/* Store `width` for `key` (replace on collision). */
+static void rx_shape_cache_put(uint64_t key, int width) {
+    if (key == 0) return;
+    RxShapeCacheEntry *e = &rxc_shape_cache[key % RXC_SHAPE_CACHE_CAP];
+    e->key = key; e->width = width;
+}
 
 /* Build the paragraph shaper for `font_path` at `size` px and `dir`. Returns ok=0
  * (and releases anything partial) when shaping is unavailable or the font file
@@ -2811,6 +2858,13 @@ static void rx_shaper_init(RxShaper *s, const char *font_path, double size, int6
     if (!s->hfont) return;
     s->hb->font_set_scale(s->hfont, scale, scale);
     s->hbdir = rxc_hb_direction(dir);
+
+    /* The measure-cache key prefix: font path + quantized scale + direction, so
+     * two shapers over the same font/size/dir share cached run widths. */
+    uint64_t k = rx_fnv1a(font_path, strlen(font_path), 1469598103934665603ULL);
+    k = rx_fnv1a(&scale, sizeof(scale), k);
+    k = rx_fnv1a(&s->hbdir, sizeof(s->hbdir), k);
+    s->font_key = k ? k : 1;   /* never 0 (0 = empty cache slot) */
 
     s->tf = s->sk->typeface_create_from_file(font_path, 0);
     s->skf = s->sk->font_new_with_values(s->tf, (float)size, 1.0f, 0.0f);
@@ -2835,6 +2889,12 @@ static void rx_shaper_drop(RxShaper *s) {
  * surrounding text as context. Empty range = 0. */
 static int rx_shaper_measure(RxShaper *s, const char *text, size_t start, size_t len) {
     if (len == 0 || !s->ok) return 0;
+    /* Cache: key = font/size/dir prefix combined with this run's byte hash. A hit
+     * skips HarfBuzz entirely (the repeated-label case). */
+    uint64_t key = rx_fnv1a(text + start, len, s->font_key);
+    int cached = rx_shape_cache_get(key);
+    if (cached >= 0) return cached;
+
     hb_buffer_t *buf = s->hb->buffer_create();
     if (!buf) return 0;
     s->hb->buffer_add_utf8(buf, text, -1, (unsigned int)start, (int)len);
@@ -2846,7 +2906,9 @@ static int rx_shaper_measure(RxShaper *s, const char *text, size_t start, size_t
     double adv = 0.0;
     for (unsigned int i = 0; i < n; i++) adv += gp[i].x_advance / 64.0;
     s->hb->buffer_destroy(buf);
-    return (int)(adv + 0.5);
+    int width = (int)(adv + 0.5);
+    rx_shape_cache_put(key, width);
+    return width;
 }
 
 /* Draw the shaped byte sub-range [start, start+len) at baseline (x, y) with
@@ -3227,6 +3289,15 @@ int64_t ruxen_canvas_shaping_available(int64_t self) {
     (void)self;
     const RxSkia *sk = rx_skia();
     return (sk->available && sk->glyph_render_ok && rx_hb()->available) ? 1 : 0;
+}
+
+/* The cumulative number of shaped-run measure-cache HITS this process (a hit =
+ * re-measuring a run already shaped, skipping HarfBuzz). Lets a pin assert the
+ * cache actually hits on a repeated label — a stable test (the count), not a
+ * wall-clock perf number. docs/decisions/text-fallback.md. */
+int64_t ruxen_canvas_shape_cache_hits(int64_t self) {
+    (void)self;
+    return (int64_t)rxc_shape_cache_hits;
 }
 
 /* Draw one HarfBuzz-shaped run of `text` in the font FILE `font_path` at `size`

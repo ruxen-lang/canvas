@@ -390,6 +390,14 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       (`tests/canvas_shaping.rx`) stay green. ADR: `docs/decisions/text-fallback.md`.
       **Scope:** itemization is by font coverage; per-run SCRIPT/direction
       boundary splitting beyond coverage (and bidi reorder) is Part A item 6.
+- [x] **Font / run caching** — `Canvas#shape_cache_hits` probe. Two caches:
+      (a) the fallback-typeface cache keyed by Unicode block (landed with item 1),
+      and (b) a NEW bounded, process-wide shaped-RUN measure cache keyed by
+      (font+size+direction FNV hash) × (run-bytes FNV hash) — so re-measuring the
+      same label across frames (the L2 centering case) skips HarfBuzz entirely.
+      The pin ASSERTS the cache HITS on a repeat (`shape_cache_hits` rises) — a
+      stable count, NOT a wall-clock perf number. Pinned in
+      `tests/canvas_shape_cache.rx`. ADR: `docs/decisions/text-fallback.md`.
 
 ### Part B — accessibility bridge
 

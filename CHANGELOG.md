@@ -62,6 +62,14 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   alone. Pinned in `tests/canvas_shaped_multi.rx` (mixed wider than both parts; AV
   kerning still applies to a covered Latin run; ink in both regions). The existing
   single-run shaped pins stay green. ADR: `docs/decisions/text-fallback.md`.
+- **Shaped-run measure cache — `Canvas#shape_cache_hits` (Phase 3 — text i18n).**
+  A bounded, process-wide cache memoizes a shaped run's measured width keyed by
+  (font+size+direction FNV hash) × (run-bytes FNV hash), so re-measuring the same
+  label across frames (the L2 centering case) skips HarfBuzz entirely. The
+  `shape_cache_hits` probe lets a pin ASSERT the cache hits on a repeat — a stable
+  count, not a wall-clock number. Pinned in `tests/canvas_shape_cache.rx`. (The
+  fallback-typeface cache keyed by Unicode block landed with the font-fallback
+  item.) ADR: `docs/decisions/text-fallback.md`.
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

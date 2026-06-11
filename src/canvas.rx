@@ -603,6 +603,14 @@ class Canvas
     self.raw.last_fallback_family_raw
   end
 
+  ## The cumulative number of shaped-run measure-cache HITS this process (a hit =
+  ## re-measuring a run already shaped, skipping HarfBuzz). Process-global. Lets a
+  ## test/L2 confirm the cache is working on a repeated label
+  ## (`docs/decisions/text-fallback.md`).
+  def shape_cache_hits -> Int
+    self.raw.shape_cache_hits_raw
+  end
+
   ## Draw a single line with **per-run shaping + font fallback**: each run the base
   ## font (`font_path`) covers is HarfBuzz-shaped (kerning / ligatures), and each
   ## run it lacks (CJK / emoji) is rendered with a system-matched fallback font. So
