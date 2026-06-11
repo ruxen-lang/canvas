@@ -27,6 +27,7 @@ typedef struct sk_paint_t      sk_paint_t;
 typedef struct sk_rrect_t      sk_rrect_t;
 typedef struct sk_shader_t     sk_shader_t;
 typedef struct sk_maskfilter_t sk_maskfilter_t;
+typedef struct sk_imagefilter_t sk_imagefilter_t;
 typedef struct sk_image_t      sk_image_t;
 typedef struct sk_data_t       sk_data_t;
 typedef struct sk_font_t       sk_font_t;
@@ -204,6 +205,13 @@ typedef void        (*pfn_paint_set_maskfilter)(sk_paint_t *, sk_maskfilter_t *)
 /* SkBlendMode int (Clear=0, Src=1, SrcOver=3, Screen=14, Multiply=24 — pinned
  * empirically against this build). The canvas-side RX_BLEND_* enum maps to these. */
 typedef void        (*pfn_paint_set_blendmode)(sk_paint_t *, int /*sk_blendmode_t*/);
+/* Gaussian blur image filter: sigmaX/sigmaY in device px, tile_mode (1 = clamp),
+ * input filter (NULL = source), crop rect (NULL = none). Owned -> imagefilter_unref.
+ * Set on a layer paint so everything drawn into the layer is blurred on restore. */
+typedef sk_imagefilter_t *(*pfn_imagefilter_new_blur)(float sigma_x, float sigma_y,
+        int tile_mode, sk_imagefilter_t *input, const sk_rect_t *crop_rect);
+typedef void              (*pfn_imagefilter_unref)(sk_imagefilter_t *);
+typedef void              (*pfn_paint_set_imagefilter)(sk_paint_t *, sk_imagefilter_t *);
 
 /* colors[count] packed 0xAARRGGBB; pos[count] in [0,1] or NULL for even spacing;
  * matrix NULL = identity. */
@@ -493,6 +501,9 @@ typedef struct {
     pfn_paint_set_shader       paint_set_shader;
     pfn_paint_set_maskfilter   paint_set_maskfilter;
     pfn_paint_set_blendmode    paint_set_blendmode;
+    pfn_imagefilter_new_blur   imagefilter_new_blur;
+    pfn_imagefilter_unref      imagefilter_unref;
+    pfn_paint_set_imagefilter  paint_set_imagefilter;
 
     pfn_shader_new_linear_gradient shader_new_linear_gradient;
     pfn_shader_new_radial_gradient shader_new_radial_gradient;

@@ -105,7 +105,15 @@ headless (capability + fallback) and pixel-verify via a standalone
       `Canvas.blend_*` constants name the ints. Out-of-range is `Err`. Pixel-pinned
       in `tests/canvas_blend.rx` (multiply red*green→black; screen→yellow;
       per-frame reset; validation).
-- [ ] **Blur image filter + drop-shadow generalization** (`sk_imagefilter_new_blur`).
+- [x] **Blur image filter + drop-shadow generalization** — `Canvas#save_layer_blur(sigma)`
+      pushes an offscreen layer whose paint carries a Gaussian blur image filter
+      (`sk_imagefilter_new_blur` + `sk_paint_set_imagefilter`), so EVERYTHING drawn
+      into the layer is blurred when `restore` composites it down. The general blur
+      primitive — it blurs arbitrary content (shapes, text, paths), generalizing
+      the rrect-only `draw_round_rect_shadow` (frosted panels, blurred backdrops,
+      soft shadows of any shape). `sigma <= 0` is `Err`; Skia-only. Pixel-pinned in
+      `tests/canvas_blur.rx` (ink spreads past a hard edge under blur; a control
+      without the layer keeps the same pixel hard; sigma validation).
 - [ ] **Dash path effect** — **BLOCKED on the fetched binary** (see Phase-1.5).
 
 ### E2 — desktop services core

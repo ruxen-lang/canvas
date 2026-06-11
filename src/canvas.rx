@@ -93,6 +93,20 @@ class Canvas
     self.layer_result(self.raw.save_layer_alpha_raw(alpha), "save_layer_alpha")
   end
 
+  ## Push an offscreen layer whose contents are BLURRED (Gaussian, `sigma` px) when
+  ## the matching `restore` composites them down. The general blur primitive: draw
+  ## any content — shapes, text, paths — into the layer and it comes out blurred,
+  ## generalizing the rrect-only `draw_round_rect_shadow`. Use it for frosted-glass
+  ## panels, blurred backdrops, and soft shadows of arbitrary shapes: push the blur
+  ## layer, draw the shape in the shadow color, `restore`, then draw the crisp
+  ## widget on top. `sigma` is the blur radius (larger = softer); `sigma <= 0` is
+  ## `Err` (use plain `save_layer`). Returns the layer's save count on `Ok` (pair
+  ## with `restore` / `restore_to`). Skia-only — `Err` when the backend is absent
+  ## (a blurred layer can't be faked in software without wrong pixels).
+  def var save_layer_blur(sigma: Float32) -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_blur_raw(sigma as Float), "save_layer_blur")
+  end
+
   ## Pop the last `save` / `save_layer`, restoring the previous state and
   ## compositing any pushed layer down.
   def var restore -> Result[nil, String]

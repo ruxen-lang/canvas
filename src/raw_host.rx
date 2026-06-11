@@ -14,6 +14,7 @@ class RawHost
     def save_raw as "ruxen_canvas_save"(self) -> Int
     def restore_raw as "ruxen_canvas_restore"(self) -> Int
     def save_layer_raw as "ruxen_canvas_save_layer"(self) -> Int
+    def save_layer_blur_raw as "ruxen_canvas_save_layer_blur"(self, sigma: Float) -> Int
     def save_layer_alpha_raw as "ruxen_canvas_save_layer_alpha"(self, alpha: Int) -> Int
     def restore_to_count_raw as "ruxen_canvas_restore_to_count"(self, count: Int) -> Int
     def save_count_raw as "ruxen_canvas_save_count"(self) -> Int

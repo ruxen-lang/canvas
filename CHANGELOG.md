@@ -7,6 +7,19 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Blur image filter — `Canvas#save_layer_blur(sigma)`.** Pushes an offscreen
+  layer whose paint carries a Gaussian blur image filter (`sk_imagefilter_new_blur`
+  + `sk_paint_set_imagefilter`), so everything drawn into the layer is blurred when
+  the matching `restore` composites it down. The general blur primitive — it blurs
+  arbitrary content (shapes, text, paths), generalizing the rrect-only
+  `draw_round_rect_shadow`: frosted-glass panels, blurred backdrops, and soft
+  shadows of any shape (push the blur layer, draw the shadow-colored shape,
+  `restore`, then draw the crisp widget on top). Returns the layer's save count;
+  `sigma <= 0` is `Err`; the blur filter is unref'd after `save_layer` takes its
+  own ref. Skia-only (clean `Err` when absent — a blurred layer can't be faked in
+  software). Pixel-pinned in `tests/canvas_blur.rx` (ink spreads past a hard edge
+  under blur; a control without the layer keeps the same pixel hard; sigma
+  validation).
 - **Blend modes — `Canvas#set_blend_mode(mode)`.** A small stable int enum
   (`0` src-over / `1` clear / `2` src / `3` multiply / `4` screen — `Canvas.blend_*`
   constants name them) mapped to `SkBlendMode` in the shim via

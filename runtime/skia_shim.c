@@ -171,6 +171,9 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(shader_unref,              "sk_shader_unref");
     RX_SK_OPTIONAL(maskfilter_new_blur,       "sk_maskfilter_new_blur");
     RX_SK_OPTIONAL(maskfilter_unref,          "sk_maskfilter_unref");
+    RX_SK_OPTIONAL(imagefilter_new_blur,      "sk_imagefilter_new_blur");
+    RX_SK_OPTIONAL(imagefilter_unref,         "sk_imagefilter_unref");
+    RX_SK_OPTIONAL(paint_set_imagefilter,     "sk_paint_set_imagefilter");
     RX_SK_OPTIONAL(canvas_save,               "sk_canvas_save");
     RX_SK_OPTIONAL(canvas_restore,            "sk_canvas_restore");
     RX_SK_OPTIONAL(canvas_save_layer,         "sk_canvas_save_layer");
@@ -1274,6 +1277,41 @@ int64_t ruxen_canvas_save_layer(int64_t self) {
     const RxSkia *sk = rx_skia();
     if (!canvas || !sk->canvas_save_layer) return -RXC_ERR_NO_SKIA;
     return (int64_t)sk->canvas_save_layer(canvas, NULL, NULL);
+}
+
+/* Push a whole-canvas offscreen layer whose paint carries a Gaussian BLUR image
+ * filter (sigma px): everything drawn into the layer is blurred when the matching
+ * restore composites it down. The general blur primitive — it blurs arbitrary
+ * content (shapes, text, paths), generalizing the rrect-only drop shadow. Returns
+ * the layer's save count (>= 1) to pair with restore / restore_to, or a NEGATIVE
+ * -RXC_ERR_* on failure. sigma <= 0 is rejected (a non-blurring blur layer is a
+ * caller bug; use plain save_layer). The filter is unref'd after save_layer takes
+ * its own ref (the layer owns it for its lifetime). Skia-only. */
+int64_t ruxen_canvas_save_layer_blur(int64_t self, double sigma) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (rxc_is_nan(sigma) || !(sigma > 0.0) || !rxc_finite_pixels(sigma)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer || !sk->imagefilter_new_blur ||
+        !sk->paint_set_imagefilter || !sk->imagefilter_unref ||
+        !sk->paint_new || !sk->paint_delete) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    sk_paint_t *lp = sk->paint_new();
+    if (!lp) return -RXC_ERR_BAD_ARGS;
+    /* tile_mode 1 = clamp (decal edges to the source). NULL input = blur the
+     * layer's own content; NULL crop = no crop. */
+    sk_imagefilter_t *filt = sk->imagefilter_new_blur((float)sigma, (float)sigma, 1, NULL, NULL);
+    if (!filt) { sk->paint_delete(lp); return -RXC_ERR_NO_SKIA; }
+    sk->paint_set_imagefilter(lp, filt);
+    int count = sk->canvas_save_layer(canvas, NULL, lp);
+    sk->imagefilter_unref(filt);   /* the layer holds its own ref now */
+    sk->paint_delete(lp);
+    return (int64_t)count;
 }
 
 /* Push a whole-canvas offscreen layer composited with a uniform group opacity
