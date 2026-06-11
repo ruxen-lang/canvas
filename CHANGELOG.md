@@ -7,6 +7,16 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Mouse cursors — `Window.set_cursor(kind)` (E2).** Stock system cursors via
+  `SDL_CreateSystemCursor`, a small int enum (0 arrow / 1 ibeam / 2 hand /
+  3 crosshair / 4 resize-h / 5 resize-v — `Window.cursor_*` constants name them),
+  cached per process so hover-driven changes are cheap. `Ok(nil)` on success;
+  `Err` for an out-of-range kind or when SDL / a real cursor backend is
+  unavailable (the dummy driver on a fully headless host reports "not currently
+  supported" → clean Err, never a crash). `Window.cursors_available?` probes the
+  capability. Cursor state is process-global, so these are class methods. Pinned
+  in `tests/cursors.rx` (validation; every valid kind agrees with the availability
+  probe; idempotent re-set; constants).
 - **IME composition events — `Event.TextEditing(start, length)` (E2).** The
   in-progress (uncommitted) "marked" text from `SDL_TEXTEDITING` — what CJK /
   diacritic input produces while composing, before the committed `TextInput`. The

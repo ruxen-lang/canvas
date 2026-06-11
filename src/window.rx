@@ -254,6 +254,58 @@ class Window
     end
   end
 
+  ## Set the mouse cursor to a stock system cursor (E2 desktop services), via
+  ## `SDL_CreateSystemCursor`. `kind` is a small int enum (use the `Window.cursor_*`
+  ## constants): 0 arrow, 1 ibeam (text), 2 hand (link), 3 crosshair, 4 resize-h
+  ## (↔), 5 resize-v (↕). Stock cursors are cached per process, so changing the
+  ## cursor every hover is cheap. `Ok(nil)` on success; `Err` for an out-of-range
+  ## kind or when SDL / a real cursor backend is unavailable (e.g. a headless host
+  ## — the cursor is then simply not changed, never a crash). Cursor state is
+  ## process-global, so this is a class method.
+  def self.set_cursor(kind: Int) -> Result[nil, String]
+    let code = RawHost.set_cursor(kind)
+    if code == 0
+      Ok(nil)
+    elsif Rxc.is_bad_args(code)
+      Err("canvas: set_cursor failed: unknown cursor kind #{kind}")
+    else
+      Err("canvas: set_cursor failed (no SDL / no cursor backend)")
+    end
+  end
+
+  ## True when stock system cursors are usable here (SDL loaded + a real video
+  ## backend). False on a headless host (the dummy driver has no cursor backend).
+  ## A capability probe so callers can skip cursor changes when unavailable.
+  def self.cursors_available? -> Bool
+    RawHost.cursor_available == 1
+  end
+
+  ## Stock cursor-kind constants for `set_cursor` (see its doc), so call sites read
+  ## `Window.set_cursor(Window.cursor_ibeam)` rather than a bare `1`.
+  def self.cursor_arrow -> Int
+    0
+  end
+
+  def self.cursor_ibeam -> Int
+    1
+  end
+
+  def self.cursor_hand -> Int
+    2
+  end
+
+  def self.cursor_crosshair -> Int
+    3
+  end
+
+  def self.cursor_resize_h -> Int
+    4
+  end
+
+  def self.cursor_resize_v -> Int
+    5
+  end
+
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
   ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested, 6 Scroll, 7 TextInput.

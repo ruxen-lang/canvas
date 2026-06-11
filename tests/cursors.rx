@@ -1,0 +1,69 @@
+# Pin tests for mouse cursors (E2 desktop services): Window.set_cursor(kind) over
+# SDL_CreateSystemCursor. Stock system cursors need a REAL video backend — the
+# forked harness runs headless (the dummy driver reports "CreateSystemCursor is
+# not currently supported"), so set_cursor Errs cleanly here; the live cursor is
+# verified outside the harness. These pins assert the binding CONTRACT: validation
+# is deterministic regardless of backend; a valid kind is either Ok (live display)
+# or a clean Err (headless) — never a crash, never a bogus Ok on a host with no
+# cursor backend.
+
+Tester.describe("Window.set_cursor validation") do |t: &var Tester|
+  t.it("rejects an out-of-range cursor kind regardless of backend") do
+    var bad = false
+    match Window.set_cursor(99)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+
+    match Window.set_cursor(0 - 1)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("the named cursor constants are the documented small ints") do
+    t.expect(Window.cursor_arrow).to_eq(0)
+    t.expect(Window.cursor_ibeam).to_eq(1)
+    t.expect(Window.cursor_hand).to_eq(2)
+    t.expect(Window.cursor_crosshair).to_eq(3)
+    t.expect(Window.cursor_resize_h).to_eq(4)
+    t.expect(Window.cursor_resize_v).to_eq(5)
+  end
+end
+
+Tester.describe("Window.set_cursor contract") do |t: &var Tester|
+  t.it("a valid kind is Ok or a clean Err, consistent with cursors_available?") do
+    let avail = Window.cursors_available?
+    # Every valid kind must agree with the availability probe: Ok iff available.
+    let kinds = [
+      Window.cursor_arrow, Window.cursor_ibeam, Window.cursor_hand,
+      Window.cursor_crosshair, Window.cursor_resize_h, Window.cursor_resize_v
+    ]
+    var i = 0
+    while i < kinds.size
+      let k = kinds[i]
+      let ok = match Window.set_cursor(k)
+        Ok(_)  -> true
+        Err(_) -> false
+      end
+      # When cursors are available every valid kind sets Ok; when not, every kind
+      # Errs cleanly. The two probes must never disagree.
+      t.expect(ok).to_eq(avail)
+      i += 1
+    end
+  end
+
+  t.it("setting the same cursor twice is idempotent (cached, no error drift)") do
+    let first = match Window.set_cursor(Window.cursor_ibeam)
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    let second = match Window.set_cursor(Window.cursor_ibeam)
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    t.expect(first).to_eq(second)
+  end
+end

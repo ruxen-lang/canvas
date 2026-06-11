@@ -202,6 +202,11 @@ static void  (*s_StartTextInput)(void);
 static char *(*s_GetClipboardText)(void);
 static int   (*s_SetClipboardText)(const char *);
 static void  (*s_SDL_free)(void *);
+/* System mouse cursors (E2 desktop services): create a stock cursor by
+ * SDL_SystemCursor id, set it. OPTIONAL — a miss (or no real video backend, e.g.
+ * the dummy driver) reports Err. Created cursors are cached per process. */
+static void *(*s_CreateSystemCursor)(int /*SDL_SystemCursor*/);
+static void  (*s_SetCursor)(void *);
 
 /* GL-context entry points (resolved best-effort; a miss only disables the GPU
  * path — the raster path above never depends on them). These are the SDL side
@@ -378,6 +383,8 @@ static int load_sdl(void) {
     s_GetClipboardText = (char *(*)(void))sym("SDL_GetClipboardText");  /* OPTIONAL */
     s_SetClipboardText = (int (*)(const char *))sym("SDL_SetClipboardText");
     s_SDL_free         = (void (*)(void *))sym("SDL_free");
+    s_CreateSystemCursor = (void *(*)(int))sym("SDL_CreateSystemCursor");  /* OPTIONAL */
+    s_SetCursor        = (void (*)(void *))sym("SDL_SetCursor");
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
         !s_UpdateTexture || !s_RenderClear || !s_RenderCopy || !s_RenderPresent ||
         !s_PollEvent) {
@@ -817,6 +824,79 @@ int64_t ruxen_canvas_clipboard_get(void) {
  * without round-tripping a string. */
 int64_t ruxen_canvas_clipboard_available(void) {
     return rx_clipboard_init() ? 1 : 0;
+}
+
+/* ---- mouse cursors (E2 desktop services) ----
+ *
+ * A canvas-side small int enum (RX_CURSOR_*) maps to SDL_SystemCursor ids. Stock
+ * cursors are created lazily and CACHED per process (SDL system cursors are
+ * process-global; one of each is all we ever need, and they live for the process
+ * — same never-freed-singleton model as the Metal device / default font). */
+#define RX_CURSOR_ARROW     0
+#define RX_CURSOR_IBEAM     1
+#define RX_CURSOR_HAND      2
+#define RX_CURSOR_CROSSHAIR 3
+#define RX_CURSOR_RESIZE_H  4
+#define RX_CURSOR_RESIZE_V  5
+#define RX_CURSOR_MAX       5
+
+/* SDL_SystemCursor ids (SDL_mouse.h, stable ABI). */
+#define SDL_SYSTEM_CURSOR_ARROW     0
+#define SDL_SYSTEM_CURSOR_IBEAM     1
+#define SDL_SYSTEM_CURSOR_CROSSHAIR 3
+#define SDL_SYSTEM_CURSOR_SIZEWE    7   /* horizontal resize */
+#define SDL_SYSTEM_CURSOR_SIZENS    8   /* vertical resize */
+#define SDL_SYSTEM_CURSOR_HAND      11
+
+static void *s_cursor_cache[RX_CURSOR_MAX + 1];   /* lazily created, process-global */
+
+static int rx_cursor_sdl_id(int kind) {
+    switch (kind) {
+    case RX_CURSOR_IBEAM:     return SDL_SYSTEM_CURSOR_IBEAM;
+    case RX_CURSOR_HAND:      return SDL_SYSTEM_CURSOR_HAND;
+    case RX_CURSOR_CROSSHAIR: return SDL_SYSTEM_CURSOR_CROSSHAIR;
+    case RX_CURSOR_RESIZE_H:  return SDL_SYSTEM_CURSOR_SIZEWE;
+    case RX_CURSOR_RESIZE_V:  return SDL_SYSTEM_CURSOR_SIZENS;
+    case RX_CURSOR_ARROW:
+    default:                  return SDL_SYSTEM_CURSOR_ARROW;
+    }
+}
+
+/* Set the mouse cursor to a stock system cursor (RX_CURSOR_* kind). The created
+ * cursor is cached per process so repeated sets don't leak. Returns RXC_OK, or
+ * RXC_ERR_NO_SDL when SDL / the cursor backend is unavailable (e.g. the dummy
+ * video driver under the test harness — SDL_CreateSystemCursor is "not currently
+ * supported" there, so this Errs headless, which the pin asserts; the real cursor
+ * is verified outside the harness). An out-of-range kind is RXC_ERR_BAD_ARGS. */
+int64_t ruxen_canvas_set_cursor(int64_t kind) {
+    /* cursor is process-global, not per-window — no host handle needed */
+    if (kind < 0 || kind > RX_CURSOR_MAX) return RXC_ERR_BAD_ARGS;
+    if (!load_sdl() || !s_CreateSystemCursor || !s_SetCursor) return RXC_ERR_NO_SDL;
+    if (s_Init(SDL_INIT_VIDEO) != 0) return RXC_ERR_NO_SDL;
+    void *cur = s_cursor_cache[kind];
+    if (!cur) {
+        cur = s_CreateSystemCursor(rx_cursor_sdl_id((int)kind));
+        if (!cur) return RXC_ERR_NO_SDL;   /* no real cursor backend (e.g. dummy) */
+        s_cursor_cache[kind] = cur;
+    }
+    s_SetCursor(cur);
+    return RXC_OK;
+}
+
+/* True (1) when stock system cursors are usable here (SDL loaded + a real video
+ * backend that supports SDL_CreateSystemCursor). The Ruxen wrapper uses this to
+ * report the capability without setting a cursor. */
+int64_t ruxen_canvas_cursor_available(void) {
+    if (!load_sdl() || !s_CreateSystemCursor || !s_SetCursor) return 0;
+    if (s_Init(SDL_INIT_VIDEO) != 0) return 0;
+    /* Probe by actually creating the arrow (cached): the dummy driver resolves the
+     * symbol but returns NULL, so symbol presence alone is not enough. */
+    if (!s_cursor_cache[RX_CURSOR_ARROW]) {
+        void *cur = s_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW);
+        if (!cur) return 0;
+        s_cursor_cache[RX_CURSOR_ARROW] = cur;
+    }
+    return 1;
 }
 
 /* The desktop display's refresh rate in Hz for display 0 (the frame-pacing hint,

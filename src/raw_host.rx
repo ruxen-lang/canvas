@@ -121,6 +121,10 @@ class RawHost
     def self.clipboard_get as "ruxen_canvas_clipboard_get" -> String
     def self.clipboard_set as "ruxen_canvas_clipboard_set"(text: &String) -> Int
     def self.clipboard_available as "ruxen_canvas_clipboard_available" -> Int
+    # Mouse cursors (E2). Cursor state is process-global, so set_cursor is a
+    # static (no self); cursor_available gates the Err contract.
+    def self.set_cursor as "ruxen_canvas_set_cursor"(kind: Int) -> Int
+    def self.cursor_available as "ruxen_canvas_cursor_available" -> Int
     # Test seams: run the pump's exact handling on synthetic events headlessly.
     # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
     # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:

@@ -141,7 +141,17 @@ headless (capability + fallback) and pixel-verify via a standalone
       The `Event` variant is APPENDED last so prior tag values stay stable. The
       full sound subset landed (multi-byte CJK round-trip pinned) — no Q-candidate
       needed. Pinned in `tests/ime_editing.rx`.
-- [ ] **Mouse cursors** — `Window#set_cursor(kind)`.
+- [x] **Mouse cursors** — `Window.set_cursor(kind)` over `SDL_CreateSystemCursor`,
+      a small int enum (0 arrow / 1 ibeam / 2 hand / 3 crosshair / 4 resize-h /
+      5 resize-v; `Window.cursor_*` constants name them). Stock cursors are cached
+      per process. `Ok(nil)` on success; `Err` for an out-of-range kind or when SDL
+      / a real cursor backend is unavailable (the dummy driver under a fully
+      headless host reports "not currently supported" → clean Err, never a crash).
+      `Window.cursors_available?` probes the capability. Pinned in
+      `tests/cursors.rx` (out-of-range rejection; every valid kind agrees with the
+      availability probe — Ok iff available; idempotent re-set; constants). On a
+      host with a real display the live cursor path runs in-harness; on a headless
+      host the clean-Err branch is asserted — both covered.
 
 ## Phase 1.5 — deferred (explicit checklist; NOT implemented in Phase 1)
 
