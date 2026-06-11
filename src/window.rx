@@ -178,6 +178,74 @@ class Window
     end
   end
 
+  ## ---- desktop window management (Phase-1.5) ----
+  ##
+  ## Each setter controls THIS window (resolved per-window in the C shim by the
+  ## owning host). `Ok(nil)` on success; `Err` when the window is not on screen
+  ## (nothing to control) or when SDL / the entry point is unavailable. On a
+  ## fullscreen / maximize / minimize / restore transition SDL fires a window
+  ## event that the pump turns into `Event.Resize` (re-creating the GPU surface at
+  ## the new backing size), so callers handle the size change through the normal
+  ## event stream — the setters do not return the new size.
+
+  ## Toggle borderless desktop fullscreen on/off (`SDL_WINDOW_FULLSCREEN_DESKTOP`
+  ## — the window fills the desktop with no display-mode switch, the modern
+  ## default; instant alt-tab, no resolution flicker). A following `Event.Resize`
+  ## delivers the new drawable size.
+  def var set_fullscreen(on: Bool) -> Result[nil, String]
+    let flag = if on
+      1
+    else
+      0
+    end
+    self.window_mgmt_result(self.canvas.raw.window_set_fullscreen(flag), "set_fullscreen")
+  end
+
+  ## Maximize this window (fill the work area, keeping the title bar). A following
+  ## `Event.Resize` delivers the new size.
+  def var maximize -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_maximize, "maximize")
+  end
+
+  ## Minimize this window to the taskbar/dock. While minimized, `present` is a
+  ## no-op (the drawable is occluded), so the render loop costs nothing; `restore`
+  ## brings it back. No `Event.Resize` fires on minimize (the design size is
+  ## unchanged — only visibility changed).
+  def var minimize -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_minimize, "minimize")
+  end
+
+  ## Restore this window from minimized/maximized back to its normal size. A
+  ## following `Event.Resize` re-establishes the drawable size + content scale.
+  def var restore -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_restore, "restore")
+  end
+
+  ## Set the minimum size (logical points, both >= 0) the user may resize this
+  ## window to. `Err` for a negative dimension, no window, or no SDL.
+  def var set_min_size(w: Int, h: Int) -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_set_min_size(w, h), "set_min_size")
+  end
+
+  ## Set the maximum size (logical points, both >= 0) the user may resize this
+  ## window to. `Err` for a negative dimension, no window, or no SDL.
+  def var set_max_size(w: Int, h: Int) -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_set_max_size(w, h), "set_max_size")
+  end
+
+  ## Map a window-management status code to a Result. Distinguishes the bad-args
+  ## case (negative size / invalid) from the no-window / no-SDL case so the error
+  ## message is actionable.
+  def window_mgmt_result(code: Int, op: String) -> Result[nil, String]
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_bad_args(code)
+      Err("canvas: #{op} failed: invalid argument")
+    else
+      Err("canvas: #{op} failed (window not shown / no SDL)")
+    end
+  end
+
   ## Sleep for `ms` milliseconds — render-loop frame pacing.
   def sleep_ms(ms: Int) -> nil
     self.canvas.raw.sleep_ms_raw(ms)

@@ -126,6 +126,15 @@ class RawHost
     # static (no self); cursor_available gates the Err contract.
     def self.set_cursor as "ruxen_canvas_set_cursor"(kind: Int) -> Int
     def self.cursor_available as "ruxen_canvas_cursor_available" -> Int
+    # Window management (Phase-1.5). Per-window setters resolve their slot by self;
+    # each Errs RXC_ERR_PRESENT with no live window, RXC_ERR_NO_SDL if the SDL
+    # entry point is absent. set_fullscreen uses FULLSCREEN_DESKTOP (borderless).
+    def window_set_fullscreen as "ruxen_canvas_window_set_fullscreen"(self, on: Int) -> Int
+    def window_maximize as "ruxen_canvas_window_maximize"(self) -> Int
+    def window_minimize as "ruxen_canvas_window_minimize"(self) -> Int
+    def window_restore as "ruxen_canvas_window_restore"(self) -> Int
+    def window_set_min_size as "ruxen_canvas_window_set_min_size"(self, min_w: Int, min_h: Int) -> Int
+    def window_set_max_size as "ruxen_canvas_window_set_max_size"(self, max_w: Int, max_h: Int) -> Int
     # Test seams: run the pump's exact handling on synthetic events headlessly.
     # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
     # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:
@@ -134,5 +143,10 @@ class RawHost
     def window_pump_test_text as "ruxen_canvas_window_pump_test_text"(self, utf8: &String) -> Int
     def window_pump_test_textediting as "ruxen_canvas_window_pump_test_textediting"(self, utf8: &String, start: Int, length: Int) -> Int
     def window_pump_test_keydown as "ruxen_canvas_window_pump_test_keydown"(self, sym: Int, repeat: Int) -> Int
+    # Window-event seam (Phase-1.5): run the pump's WINDOWEVENT subtype handling on
+    # a synthetic transition (6 MINIMIZED / 7 MAXIMIZED / 8 RESTORED / 18
+    # DISPLAY_CHANGED). Returns the resulting minimized flag (0/1); pushes a Resize
+    # for the non-minimize transitions, which the test polls back.
+    def window_pump_test_window_event as "ruxen_canvas_window_pump_test_window_event"(self, subtype: Int, design_w: Int, design_h: Int) -> Int
   end
 end

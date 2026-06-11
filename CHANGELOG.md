@@ -7,6 +7,25 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Desktop window management — `Window#set_fullscreen` / `#maximize` /
+  `#minimize` / `#restore` / `#set_min_size` / `#set_max_size` (Phase-1.5).**
+  Per-window setters, each resolving its `RxWin` slot by the owning host
+  (multi-window correct). `set_fullscreen(on:)` uses `SDL_WINDOW_FULLSCREEN_DESKTOP`
+  (borderless desktop fullscreen — no display-mode switch, instant alt-tab, the
+  modern default; the exclusive mode is deliberately not used). Each `Ok(nil)` on
+  success; `Err` when the window is not shown or the SDL entry point is absent;
+  negative min/max size is a bad-args `Err`. **Pump window-event handling:**
+  `SDL_WINDOWEVENT_MINIMIZED` sets a per-slot `minimized` flag — while set,
+  present / gl_present / metal_present are no-ops (the **minimized-present
+  contract**: an occluded drawable is not presented, so the render loop costs
+  nothing while minimized); `MAXIMIZED` / `RESTORED` / `DISPLAY_CHANGED` clear it,
+  re-derive the backing surface via the existing resize machinery, and emit
+  `Event.Resize` in the window's design size. **No new `Event` variant for
+  DPI/display change** — `Event.Resize` already carries the design size and
+  triggers the surface re-creation a content-scale change needs (the enum tag set
+  is unchanged). Pins: `tests/window_mgmt.rx` (Err-without-window + bad-args; the
+  minimized flag + each subtype's Resize via the `window_pump_test_window_event`
+  seam). Live proof: `examples/window_mgmt_verify.c` (`PASS` on a real display).
 - **Dash path effect — `Canvas#draw_dashed_line` (Phase-1.5).** A stroked line
   with an `[on_len, off_len]` dash pattern and a `phase` offset, via
   `sk_path_effect_create_dash`. **Re-verdict on Phase-1's "binary blocked":** that

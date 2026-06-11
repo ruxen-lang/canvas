@@ -131,9 +131,29 @@ extern int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t 
 #define SDLK_END         1073741901
 /* SDL_WindowEventID subtype (SDL_WindowEvent.event @ byte 12, Uint8). */
 #define SDL_WINDOWEVENT_RESIZED   5
+/* MINIMIZED/MAXIMIZED/RESTORED: window-state transitions (SDL_WindowEventID).
+ * MINIMIZED hides the window — its drawable is occluded/zero-area, so present is
+ * a no-op until RESTORED (the minimized-present contract; see RxWin.minimized).
+ * MAXIMIZED/RESTORED change the backing size, so we re-derive + emit Resize. */
+#define SDL_WINDOWEVENT_MINIMIZED 6
+#define SDL_WINDOWEVENT_MAXIMIZED 7
+#define SDL_WINDOWEVENT_RESTORED  8
+/* DISPLAY_CHANGED (SDL 2.0.18+): the window moved to a display with a different
+ * backing scale / refresh — the backing drawable size may change, so we re-derive
+ * the surface + emit Event.Resize. DESIGN DECISION: no dedicated DisplayChanged
+ * Event variant — Resize already carries the new design size and triggers exactly
+ * the surface re-creation a DPI change needs, so a one-impl variant would add no
+ * payload (greenlit; see docs/ROADMAP.md Phase-1.5). */
+#define SDL_WINDOWEVENT_DISPLAY_CHANGED 18
 /* SDL_WINDOW_RESIZABLE — let the user resize the window; we re-create the GPU
  * surface/drawable at the new backing size and emit Event.Resize. */
 #define SDL_WINDOW_RESIZABLE      0x00000020u
+/* SDL_SetWindowFullscreen flag: FULLSCREEN_DESKTOP is the modern borderless
+ * "fake fullscreen" (the window grows to the desktop resolution with no display
+ * mode switch) — instant alt-tab, no resolution flicker, the default every
+ * desktop toolkit uses now. The exclusive SDL_WINDOW_FULLSCREEN (0x1, a real mode
+ * switch) is deliberately NOT used. 0 = windowed (restore from fullscreen). */
+#define SDL_WINDOW_FULLSCREEN_DESKTOP 0x00001001u
 
 /* SDL_GLattr (from SDL_video.h — stable ABI) used to request a GL context the
  * Ganesh GL backend can render into. We ask for a core-profile context with a
@@ -207,6 +227,16 @@ static void  (*s_SDL_free)(void *);
  * the dummy driver) reports Err. Created cursors are cached per process. */
 static void *(*s_CreateSystemCursor)(int /*SDL_SystemCursor*/);
 static void  (*s_SetCursor)(void *);
+/* Window-management entry points (Phase-1.5 desktop window control). OPTIONAL —
+ * a miss makes the corresponding setter Err (RXC_ERR_NO_SDL), never a crash.
+ * SetWindowFullscreen returns 0 on success; the rest are void. Min/Max size take
+ * (window, w, h) in logical points. */
+static int   (*s_SetWindowFullscreen)(void *window, uint32_t flags);
+static void  (*s_MaximizeWindow)(void *window);
+static void  (*s_MinimizeWindow)(void *window);
+static void  (*s_RestoreWindow)(void *window);
+static void  (*s_SetWindowMinimumSize)(void *window, int min_w, int min_h);
+static void  (*s_SetWindowMaximumSize)(void *window, int max_w, int max_h);
 
 /* GL-context entry points (resolved best-effort; a miss only disables the GPU
  * path — the raster path above never depends on them). These are the SDL side
@@ -275,6 +305,11 @@ typedef struct {
     int     scale;     /* design->window-point factor (the show factor) */
     int     out_w;     /* renderer output (backing) pixel size — Retina-true */
     int     out_h;
+    /* Minimized-present contract (Phase-1.5): set on SDL_WINDOWEVENT_MINIMIZED,
+     * cleared on RESTORED/MAXIMIZED. While set, present/gl_present/metal_present
+     * are no-ops (RXC_OK) — a minimized window's drawable is occluded/zero-area, so
+     * presenting wastes a frame and some drivers error on a zero-size swap. */
+    int     minimized;
     /* GL-window state: glctx != NULL means this window is SDL_WINDOW_OPENGL with
      * a current GL context — present is a buffer swap, not a texture blit. */
     void   *glctx;     /* SDL_GLContext, or NULL */
@@ -385,6 +420,13 @@ static int load_sdl(void) {
     s_SDL_free         = (void (*)(void *))sym("SDL_free");
     s_CreateSystemCursor = (void *(*)(int))sym("SDL_CreateSystemCursor");  /* OPTIONAL */
     s_SetCursor        = (void (*)(void *))sym("SDL_SetCursor");
+    /* Window management (Phase-1.5). OPTIONAL — a miss makes the setter Err. */
+    s_SetWindowFullscreen  = (int (*)(void *, uint32_t))sym("SDL_SetWindowFullscreen");
+    s_MaximizeWindow       = (void (*)(void *))sym("SDL_MaximizeWindow");
+    s_MinimizeWindow       = (void (*)(void *))sym("SDL_MinimizeWindow");
+    s_RestoreWindow        = (void (*)(void *))sym("SDL_RestoreWindow");
+    s_SetWindowMinimumSize = (void (*)(void *, int, int))sym("SDL_SetWindowMinimumSize");
+    s_SetWindowMaximumSize = (void (*)(void *, int, int))sym("SDL_SetWindowMaximumSize");
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
         !s_UpdateTexture || !s_RenderClear || !s_RenderCopy || !s_RenderPresent ||
         !s_PollEvent) {
@@ -542,10 +584,82 @@ int64_t ruxen_canvas_window_present(int64_t self) {
     if (!h || !h->pixels) return RXC_ERR_BAD_ARGS;
     RxWin *w = rx_win_for((void *)h);
     if (!w || !w->tex || h->width != w->tex_w || h->height != w->tex_h) return RXC_ERR_PRESENT;
+    if (w->minimized) return RXC_OK;   /* minimized: skip present (occluded drawable) */
     if (s_UpdateTexture(w->tex, NULL, h->pixels, h->width * 4) != 0) return RXC_ERR_PRESENT;
     if (s_RenderClear(w->ren) != 0) return RXC_ERR_PRESENT;
     if (s_RenderCopy(w->ren, w->tex, NULL, NULL) != 0) return RXC_ERR_PRESENT;
     s_RenderPresent(w->ren);
+    return RXC_OK;
+}
+
+/* ---- desktop window management (Phase-1.5) ----
+ *
+ * Per-window setters: each resolves ITS slot by `self` (the owning RxHost), so a
+ * multi-window app controls each window independently. All return:
+ *   RXC_OK          on success
+ *   RXC_ERR_PRESENT when `self` has no live window (nothing to control)
+ *   RXC_ERR_NO_SDL  when the SDL entry point isn't resolved on this host
+ * The forked test harness opens no real window, so headless these Err with
+ * RXC_ERR_PRESENT — the pin asserts that contract; the live behaviour is proven
+ * by examples/window_mgmt_verify.c on a real display.
+ *
+ * On fullscreen/maximize/minimize/restore SDL fires SDL_WINDOWEVENT_* (RESIZED /
+ * MINIMIZED / MAXIMIZED / RESTORED); the pump handles those — re-deriving the
+ * backing surface and emitting Event.Resize — so these setters do NOT synthesize
+ * a Resize themselves (the live event is the single source of truth). */
+
+/* Toggle borderless desktop fullscreen (FULLSCREEN_DESKTOP) on/off for `self`'s
+ * window. The pump's RESIZED handler re-creates the surface at the new drawable
+ * size and emits Event.Resize. */
+int64_t ruxen_canvas_window_set_fullscreen(int64_t self, int64_t on) {
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_SetWindowFullscreen) return RXC_ERR_NO_SDL;
+    uint32_t flags = on ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0u;
+    return s_SetWindowFullscreen(w->win, flags) == 0 ? RXC_OK : RXC_ERR_PRESENT;
+}
+
+int64_t ruxen_canvas_window_maximize(int64_t self) {
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_MaximizeWindow) return RXC_ERR_NO_SDL;
+    s_MaximizeWindow(w->win);
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_window_minimize(int64_t self) {
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_MinimizeWindow) return RXC_ERR_NO_SDL;
+    s_MinimizeWindow(w->win);
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_window_restore(int64_t self) {
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_RestoreWindow) return RXC_ERR_NO_SDL;
+    s_RestoreWindow(w->win);
+    return RXC_OK;
+}
+
+/* Set the window's minimum size in logical points (>= 0). The caller (Window#
+ * set_min_size) validates non-negativity; we pass through. */
+int64_t ruxen_canvas_window_set_min_size(int64_t self, int64_t min_w, int64_t min_h) {
+    if (min_w < 0 || min_h < 0) return RXC_ERR_BAD_ARGS;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_SetWindowMinimumSize) return RXC_ERR_NO_SDL;
+    s_SetWindowMinimumSize(w->win, (int)min_w, (int)min_h);
+    return RXC_OK;
+}
+
+int64_t ruxen_canvas_window_set_max_size(int64_t self, int64_t max_w, int64_t max_h) {
+    if (max_w < 0 || max_h < 0) return RXC_ERR_BAD_ARGS;
+    RxWin *w = rx_win_for((void *)self);
+    if (!w || !w->win) return RXC_ERR_PRESENT;
+    if (!s_SetWindowMaximumSize) return RXC_ERR_NO_SDL;
+    s_SetWindowMaximumSize(w->win, (int)max_w, (int)max_h);
     return RXC_OK;
 }
 
@@ -676,6 +790,7 @@ int64_t ruxen_canvas_window_gl_drawable_size(int64_t self) {
 int64_t ruxen_canvas_window_gl_present(int64_t self) {
     RxWin *w = rx_win_for((void *)self);
     if (!w || !w->glctx || !s_GL_SwapWindow) return RXC_ERR_PRESENT;
+    if (w->minimized) return RXC_OK;   /* minimized: skip the buffer swap */
     s_GL_SwapWindow(w->win);
     return RXC_OK;
 }
@@ -965,6 +1080,7 @@ int64_t ruxen_canvas_window_metal_drawable_size(int64_t self) {
 int64_t ruxen_canvas_window_metal_present(int64_t self) {
     RxWin *w = rx_win_for((void *)self);
     if (!w || !w->mtl_layer) return RXC_ERR_PRESENT;
+    if (w->minimized) { w->mtl_drawable = NULL; return RXC_OK; }  /* drop drawable, skip */
     if (!w->mtl_drawable || !w->mtl_queue) return RXC_ERR_PRESENT;
     /* id cmdbuf = [queue commandBuffer]; [cmdbuf presentDrawable:drawable];
      * [cmdbuf commit]; */
@@ -1161,7 +1277,11 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
             /* SDL_WindowEvent: Uint8 event @ 12, Sint32 data1 @ 16, data2 @ 20.
              * On RESIZED, data1/data2 are the new window size in POINTS; we emit
              * Resize in DESIGN coords (/ scale) and re-size the backing surface of
-             * the originating window. */
+             * the originating window. MINIMIZED/MAXIMIZED/RESTORED/DISPLAY_CHANGED
+             * carry no size in data1/data2 we can trust, so they re-derive the
+             * backing surface and emit Resize in the window's DESIGN size (taken
+             * from the owning host) — which is exactly what a DPI change needs L2
+             * to re-process (the content scale changes, the design size doesn't). */
             if (!tw) break;
             unsigned char subtype = ev[12];
             if (subtype == SDL_WINDOWEVENT_RESIZED) {
@@ -1171,6 +1291,25 @@ int64_t ruxen_canvas_window_pump(int64_t self) {
                 ruxen_canvas_push_event(towner, RX_EV_RESIZE,
                                         rx_map_point_scale(w1, tscale), rx_map_point_scale(h1, tscale));
                 if (is_self) forwarded++;
+            } else if (subtype == SDL_WINDOWEVENT_MINIMIZED) {
+                /* Minimized: skip presenting until restored (occluded drawable). No
+                 * Resize — the design size is unchanged; only visibility changed. */
+                tw->minimized = 1;
+            } else if (subtype == SDL_WINDOWEVENT_MAXIMIZED ||
+                       subtype == SDL_WINDOWEVENT_RESTORED ||
+                       subtype == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
+                tw->minimized = 0;                  /* visible again / state change */
+                rx_window_on_resized(tw);           /* re-derive backing surface */
+                /* Emit Resize carrying the DESIGN size (owning host's width/height),
+                 * so L2 re-derives layout + content scale. SDL also fires RESIZED
+                 * for an actual size change; this guarantees a Resize even for a
+                 * pure DPI/display move that keeps the window size constant. */
+                RxHostPrefix *oh = (RxHostPrefix *)tw->owner;
+                if (oh) {
+                    ruxen_canvas_push_event(towner, RX_EV_RESIZE,
+                                            (double)oh->width, (double)oh->height);
+                    if (is_self) forwarded++;
+                }
             }
             break;
         }
@@ -1241,6 +1380,44 @@ int64_t ruxen_canvas_window_pump_test_keydown(int64_t self, int64_t sym, int64_t
     if (!rx_is_control_keysym((int32_t)sym)) return 0; /* printable: filtered */
     ruxen_canvas_push_event(self, RX_EV_KEY_DOWN, (double)sym, 0.0);
     return 1;
+}
+
+/* Test seam: run the pump's SDL_WINDOWEVENT subtype handling (Phase-1.5) on a
+ * synthetic window-state transition, headless. The live pump can't run in the
+ * forked harness (no real SDL window), so this allocates a TRANSIENT test slot
+ * for `self`, applies the EXACT minimized/Resize logic the pump's WINDOWEVENT
+ * case uses (set minimized on MINIMIZED; clear it + emit Resize on MAXIMIZED /
+ * RESTORED / DISPLAY_CHANGED), then frees the slot. Returns the slot's resulting
+ * `minimized` flag (0/1). The test polls the host ring to assert the Resize.
+ * `design_w/design_h` stand in for the owning host's logical size (this seam
+ * doesn't read the real host struct, so the caller passes it explicitly). */
+int64_t ruxen_canvas_window_pump_test_window_event(int64_t self, int64_t subtype,
+                                                   int64_t design_w, int64_t design_h) {
+    if (!self) return RXC_ERR_BAD_ARGS;
+    /* a real window for this host would shadow the test slot — refuse so we never
+     * stomp a live slot (the harness never has one, but be defensive). */
+    if (rx_win_for((void *)self)) return RXC_ERR_BUSY;
+    RxWin *w = rx_win_alloc((void *)self);
+    if (!w) return RXC_ERR_BUSY;
+    /* win stays NULL (no OS window) — teardown is a plain memset, no SDL calls. */
+    int result = 0;
+    unsigned char st = (unsigned char)subtype;
+    if (st == SDL_WINDOWEVENT_MINIMIZED) {
+        w->minimized = 1;
+        result = 1;
+    } else if (st == SDL_WINDOWEVENT_MAXIMIZED ||
+               st == SDL_WINDOWEVENT_RESTORED ||
+               st == SDL_WINDOWEVENT_DISPLAY_CHANGED) {
+        w->minimized = 0;
+        /* rx_window_on_resized is a no-op here (no glctx / mtl_layer); the Resize
+         * emission is the observable part, carrying the design size. */
+        rx_window_on_resized(w);
+        ruxen_canvas_push_event(self, RX_EV_RESIZE, (double)design_w, (double)design_h);
+        result = 0;
+    }
+    /* free the transient slot (owner = NULL) so it never leaks into another op. */
+    memset(w, 0, sizeof(RxWin));
+    return result;
 }
 
 /* Tear ONE window slot down (idempotent on a free slot). The dlopen handle

@@ -192,7 +192,30 @@ headless (capability + fallback) and pixel-verify via a standalone
 - [ ] **Render-to-texture / raster cache.**
 - [ ] **Drag-and-drop.**
 - [ ] **File dialogs.**
-- [ ] **Fullscreen / minimize-maximize / DPI-change events.**
+- [x] **Fullscreen / minimize-maximize / DPI-change events.** **DONE.** Per-window
+      setters, each resolving its `RxWin` slot by the owning host (multi-window
+      correct): `Window#set_fullscreen(on:)` (`SDL_SetWindowFullscreen` with
+      `SDL_WINDOW_FULLSCREEN_DESKTOP` — borderless desktop fullscreen, the modern
+      no-mode-switch default; the exclusive mode is deliberately not used),
+      `#maximize` / `#minimize` / `#restore`, and `#set_min_size(w,h)` /
+      `#set_max_size(w,h)`. Each `Ok(nil)` on success; `Err` when the window is not
+      shown (`RXC_ERR_PRESENT`) or the SDL entry point is absent (`RXC_ERR_NO_SDL`);
+      negative min/max size is `RXC_ERR_BAD_ARGS`. **Pump window-event handling:**
+      `SDL_WINDOWEVENT_MINIMIZED` sets a per-slot `minimized` flag (present /
+      gl_present / metal_present become no-ops — the **minimized-present contract**:
+      an occluded/zero-area drawable is not presented, so the render loop costs
+      nothing while minimized); `MAXIMIZED` / `RESTORED` / `DISPLAY_CHANGED` clear it,
+      re-derive the backing surface (reusing the existing resize machinery —
+      `rx_window_on_resized` → Metal drawable re-query / GL surface invalidate), and
+      emit `Event.Resize` in the window's DESIGN size. **DPI/display-change design
+      call (greenlit):** no dedicated `DisplayChanged` Event variant — `Event.Resize`
+      already carries the design size and triggers exactly the surface re-creation a
+      content-scale change needs, so a one-impl variant would add no payload. The
+      `Event` enum stays unchanged (no new tag). Pins: `tests/window_mgmt.rx`
+      (setters Err-without-window + bad-args; the minimized flag + each subtype's
+      Resize emission via the `window_pump_test_window_event` headless seam). Live
+      proof: `examples/window_mgmt_verify.c` (`PASS` on a real display —
+      fullscreen 320×240→1710×1073, maximize→1710×951, both restores→320×240).
 - [ ] **Vulkan** (additive behind the GPU seam, per `docs/GPU.md`).
 - [ ] **Per-window / multi-monitor refresh rate** (Phase-1 `refresh_rate` is
       display-0 only).
