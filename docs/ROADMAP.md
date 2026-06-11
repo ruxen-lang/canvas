@@ -118,7 +118,16 @@ headless (capability + fallback) and pixel-verify via a standalone
 
 ### E2 — desktop services core
 
-- [ ] **Clipboard** — `Window.clipboard_text` / `set_clipboard_text`.
+- [x] **Clipboard** — `Window.clipboard_text -> Result[String, String]` /
+      `Window.set_clipboard_text(s)` via `SDL_GetClipboardText` /
+      `SDL_SetClipboardText`. **Works headless** — SDL's clipboard round-trips a
+      set->get under the dummy video driver with no live window (verified), so the
+      harness pins a REAL round-trip, not just the Err contract. C→Ruxen String
+      return uses `ruxen_string_from` (a Ruxen String IS a malloc'd `char*`), so the
+      returned text is Ruxen-owned (the SDL copy is `SDL_free`'d); under the forked
+      harness the dummy driver is forced for fork-safety (the real Cocoa pasteboard
+      is unsafe post-`fork()`). Pinned in `tests/clipboard.rx` (set->get round-trip,
+      overwrite replaces, set/get availability agree).
 - [ ] **IME composition events** — `Event.TextEditing` + marked-text side-channel.
 - [ ] **Mouse cursors** — `Window#set_cursor(kind)`.
 

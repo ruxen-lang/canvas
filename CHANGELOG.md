@@ -7,6 +7,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Clipboard — `Window.clipboard_text` / `Window.set_clipboard_text` (E2).** The
+  system clipboard via `SDL_GetClipboardText` / `SDL_SetClipboardText` (dlopen
+  tier). `clipboard_text -> Result[String, String]` (`Ok(text)`, possibly empty;
+  `Err` when no SDL / no clipboard backend); `set_clipboard_text(s) -> Result[nil,
+  String]`. **Works without a window** — SDL's clipboard round-trips a set->get
+  under the dummy video driver headless (verified), so the harness pins a REAL
+  round-trip. **New FFI convention (docs/FFI.md): returning a String from C to
+  Ruxen.** A Ruxen String is a `malloc`'d `char*`, so the C side builds the
+  returned text with `ruxen_string_from` (Ruxen-owned, freed by Ruxen's allocator)
+  and `SDL_free`s the SDL copy — never hand a foreign-allocator pointer to a Ruxen
+  String. Under the forked harness the dummy driver is forced for fork-safety (the
+  real Cocoa pasteboard is unsafe post-`fork()`). Pinned in `tests/clipboard.rx`.
 - **Blur image filter — `Canvas#save_layer_blur(sigma)`.** Pushes an offscreen
   layer whose paint carries a Gaussian blur image filter (`sk_imagefilter_new_blur`
   + `sk_paint_set_imagefilter`), so everything drawn into the layer is blurred when

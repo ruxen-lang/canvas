@@ -229,6 +229,31 @@ class Window
     end
   end
 
+  ## The system clipboard's text (E2 desktop services), via SDL's clipboard —
+  ## works without an on-screen window. `Ok(text)` (the text may be the empty
+  ## string when the clipboard holds no text — still a valid `Ok`), or `Err` when
+  ## SDL / the clipboard is unavailable (no SDL installed, or a headless host
+  ## without a clipboard backend). Process-global, so it is a class method.
+  def self.clipboard_text -> Result[String, String]
+    if RawHost.clipboard_available == 1
+      Ok(RawHost.clipboard_get)
+    else
+      Err("canvas: clipboard unavailable (no SDL / no clipboard backend)")
+    end
+  end
+
+  ## Set the system clipboard text (E2 desktop services), via SDL's clipboard.
+  ## `Ok(nil)` on success, `Err` when SDL / the clipboard is unavailable.
+  ## Process-global, so it is a class method.
+  def self.set_clipboard_text(text: String) -> Result[nil, String]
+    let code = RawHost.clipboard_set(&text)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_clipboard_text failed (no SDL / no clipboard backend)")
+    end
+  end
+
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
   ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested, 6 Scroll, 7 TextInput.

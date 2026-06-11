@@ -26,6 +26,24 @@ binary/link surface small and every bound call tested.
 - **All pointers cross the ABI as machine-word integers**; `void` returns map to
   no return value — matching how the Ruxen runtime ABI table treats pointers.
 
+## Returning a String from C to Ruxen (the clipboard pattern)
+
+A Ruxen `String` **is** a `malloc`'d, NUL-terminated `char*` (no length header;
+`library/std/string/runtime/string.c`). So a C shim function can return a Ruxen
+`String` by returning a `char*` **allocated with the Ruxen allocator** — call the
+runtime constructor `ruxen_string_from(const char *)`, which `malloc`s a copy.
+
+This is load-bearing for OWNERSHIP: never return a pointer allocated by a foreign
+allocator (e.g. `SDL_GetClipboardText`'s SDL-`malloc`'d buffer) directly as a
+`String` — the Ruxen owner would free it with the *wrong* allocator on drop. Copy
+through `ruxen_string_from`, then release the foreign buffer (`SDL_free`).
+
+Used by `ruxen_canvas_clipboard_get` (E2). Declare the constructor as
+`extern char *ruxen_string_from(const char *s);` in the shim, and the `lib`
+declaration as `def self.clipboard_get as "…" -> String`. A failure path returns
+`0` (NULL) and the Ruxen wrapper gates on a separate `*_available` probe rather
+than constructing a String from NULL.
+
 ## C/C++ boundary
 
 Skia's public surface is C++. `skia_shim.c` (and/or `.cpp`) is the single

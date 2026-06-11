@@ -38,6 +38,13 @@
 #include <dlfcn.h>
 #include <string.h>
 
+/* Ruxen's String runtime constructor (library/std/string/runtime/string.c): a
+ * Ruxen String IS a malloc'd NUL-terminated char*, so a clipboard string returned
+ * to the Ruxen side must be built with this (NOT SDL's own malloc — Ruxen frees it
+ * with its allocator on drop). C copies the SDL text through here, then SDL_free's
+ * the SDL copy. */
+extern char *ruxen_string_from(const char *s);
+
 /* ---- status codes (keep in sync with skia_shim.c) ---- */
 #define RXC_OK             0
 #define RXC_ERR_BAD_ARGS   1
@@ -174,6 +181,12 @@ static const char *(*s_GetError)(void);
  * UTF-8) instead of relying on raw keysyms. OPTIONAL — a miss just means no text
  * events (control keys via KEYDOWN still work). */
 static void  (*s_StartTextInput)(void);
+/* Clipboard (E2 desktop services). Work headless under the dummy video driver —
+ * no live window needed (verified). SDL_GetClipboardText returns a malloc'd UTF-8
+ * string SDL owns; release it with SDL_free. OPTIONAL — a miss reports Err. */
+static char *(*s_GetClipboardText)(void);
+static int   (*s_SetClipboardText)(const char *);
+static void  (*s_SDL_free)(void *);
 
 /* GL-context entry points (resolved best-effort; a miss only disables the GPU
  * path — the raster path above never depends on them). These are the SDL side
@@ -347,6 +360,9 @@ static int load_sdl(void) {
     s_GetWindowID    = (uint32_t (*)(void *))sym("SDL_GetWindowID");  /* event demux */
     s_GetError       = (const char *(*)(void))sym("SDL_GetError");
     s_StartTextInput = (void (*)(void))sym("SDL_StartTextInput");  /* OPTIONAL */
+    s_GetClipboardText = (char *(*)(void))sym("SDL_GetClipboardText");  /* OPTIONAL */
+    s_SetClipboardText = (int (*)(const char *))sym("SDL_SetClipboardText");
+    s_SDL_free         = (void (*)(void *))sym("SDL_free");
     if (!s_Init || !s_CreateWindow || !s_CreateRenderer || !s_CreateTexture ||
         !s_UpdateTexture || !s_RenderClear || !s_RenderCopy || !s_RenderPresent ||
         !s_PollEvent) {
@@ -735,6 +751,57 @@ int64_t ruxen_canvas_window_is_metal(int64_t self) {
  * 0 when no SDL2 is installed anywhere on the candidate paths. */
 int64_t ruxen_canvas_sdl_available(void) {
     return load_sdl() ? 1 : 0;
+}
+
+/* Ensure SDL is loaded + the video subsystem inited so the clipboard works
+ * (SDL clipboard requires video; it does NOT require a window — verified to
+ * round-trip headless under the dummy driver). Under the forked test harness we
+ * force SDL_VIDEODRIVER=dummy BEFORE init: the real macOS Cocoa pasteboard touches
+ * AppKit, which is unsafe after fork()-without-exec() (same reason real windows
+ * are gated off). The dummy driver's clipboard is process-local but round-trips a
+ * set->get, which is exactly what the headless pin asserts. Outside the harness
+ * (real apps) the real driver + system clipboard are used. Returns 1 on success. */
+static int rx_clipboard_init(void) {
+    if (!load_sdl()) return 0;
+    if (!s_GetClipboardText || !s_SetClipboardText) return 0;
+    if (getenv("RUXEN_TEST_FORMAT") && !getenv("RUXEN_CANVAS_WINDOW")) {
+        /* fork-safe headless: dummy video driver (only takes effect if video is
+         * not already inited — harmless if a real window already set it up). */
+        setenv("SDL_VIDEODRIVER", "dummy", 0);
+    }
+    if (s_Init(SDL_INIT_VIDEO) != 0) return 0;
+    return 1;
+}
+
+/* Set the system clipboard to `text` (a Ruxen &String -> NUL-terminated char*).
+ * Returns RXC_OK, or RXC_ERR_NO_SDL when SDL / the clipboard is unavailable. */
+int64_t ruxen_canvas_clipboard_set(int64_t text) {
+    const char *t = (const char *)text;
+    if (!t) return RXC_ERR_BAD_ARGS;
+    if (!rx_clipboard_init()) return RXC_ERR_NO_SDL;
+    return s_SetClipboardText(t) == 0 ? RXC_OK : RXC_ERR_NO_SDL;
+}
+
+/* Get the system clipboard text as a freshly Ruxen-allocated String (malloc'd via
+ * ruxen_string_from, so the Ruxen owner frees it correctly on drop). Returns the
+ * String pointer, or 0 (NULL) when SDL / the clipboard is unavailable — the Ruxen
+ * wrapper maps 0 to Err and a non-zero pointer to Ok(text) (text may be the empty
+ * string when the clipboard holds no text, which is a valid Ok). The SDL-owned
+ * copy is released with SDL_free. */
+int64_t ruxen_canvas_clipboard_get(void) {
+    if (!rx_clipboard_init()) return 0;
+    char *sdl_text = s_GetClipboardText();   /* SDL-malloc'd; never NULL per SDL docs */
+    if (!sdl_text) return 0;
+    char *owned = ruxen_string_from(sdl_text);   /* Ruxen-malloc'd copy */
+    if (s_SDL_free) s_SDL_free(sdl_text);
+    return (int64_t)owned;
+}
+
+/* True (1) when the clipboard is usable here (SDL loaded + video inited + the
+ * clipboard symbols resolved). The Ruxen wrapper uses this to return Err cleanly
+ * without round-tripping a string. */
+int64_t ruxen_canvas_clipboard_available(void) {
+    return rx_clipboard_init() ? 1 : 0;
 }
 
 /* The desktop display's refresh rate in Hz for display 0 (the frame-pacing hint,

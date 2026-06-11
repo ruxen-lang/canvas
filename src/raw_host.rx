@@ -113,6 +113,11 @@ class RawHost
     # Display refresh rate (Hz) for the frame-pacing hint (docs/decisions/
     # frame-pacing.md): > 0 on success, negative -RXC_ERR_NO_SDL when unavailable.
     def self.refresh_rate as "ruxen_canvas_refresh_rate" -> Int
+    # Clipboard (E2 desktop services). get returns a Ruxen-owned String (the C
+    # side builds it via ruxen_string_from); available gates the Err contract.
+    def self.clipboard_get as "ruxen_canvas_clipboard_get" -> String
+    def self.clipboard_set as "ruxen_canvas_clipboard_set"(text: &String) -> Int
+    def self.clipboard_available as "ruxen_canvas_clipboard_available" -> Int
     # Test seams: run the pump's exact handling on synthetic events headlessly.
     # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
     # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:
