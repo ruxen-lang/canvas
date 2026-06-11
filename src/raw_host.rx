@@ -56,6 +56,10 @@ class RawHost
     def draw_paragraph_shaped_raw as "ruxen_canvas_draw_paragraph_shaped"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, font_path: &String, align: Int, direction: Int, argb: Int) -> Int
     def measure_paragraph_shaped_raw as "ruxen_canvas_measure_paragraph_shaped"(self, text: &String, max_width: Float, size: Float, font_path: &String, direction: Int) -> Int
     def shaping_available_raw as "ruxen_canvas_shaping_available"(self) -> Bool
+    def draw_text_fallback_raw as "ruxen_canvas_draw_text_fallback"(self, text: &String, x: Float, y: Float, size: Float, argb: Int) -> Int
+    def measure_text_fallback_raw as "ruxen_canvas_measure_text_fallback"(self, text: &String, size: Float) -> Int
+    def fallback_available_raw as "ruxen_canvas_fallback_available"(self) -> Bool
+    def last_fallback_family_raw as "ruxen_canvas_last_fallback_family"(self) -> String
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
     def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int

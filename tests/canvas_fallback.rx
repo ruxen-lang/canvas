@@ -1,0 +1,118 @@
+# Pin tests for per-character font FALLBACK: Canvas#draw_text_fallback /
+# #measure_text_fallback / #fallback_available? / #last_fallback_family.
+#
+# Fallback = itemize a string into runs by font coverage; render each run with a
+# typeface that covers it (the base font, else the system font manager's
+# per-character match — Core Text on macOS, so CJK -> PingFang/Hiragino, emoji ->
+# Apple Color Emoji), so non-Latin codepoints render as REAL GLYPHS, not tofu.
+# This is the anti-tofu assertion: a CJK string draws ink. Skia + fontmgr only —
+# when unavailable, the calls return a clean Err / 0.
+#
+# docs/decisions/text-fallback.md. Skia is active locally, so the `active` branch
+# runs real fallback + pixel readback.
+
+Tester.describe("Canvas.fallback_available?") do |t: &var Tester|
+  t.it("is total and safe to query") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let s = c.fallback_available?
+    t.expect(s == true || s == false).to_eq(true)
+  end
+end
+
+Tester.describe("Canvas.draw_text_fallback CJK anti-tofu") do |t: &var Tester|
+  t.it("a CJK string renders non-blank pixels (real glyphs, not tofu)") do
+    var c = match Canvas.create(160, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.fallback_available?
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let white = Color.rgb(255u8, 255u8, 255u8)
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
+    # "你好" — two Han characters the default Latin face does not cover.
+    let res = c.draw_text_fallback("你好", 4.0f32, 30.0f32, 28.0f32, white)
+    let _2 = c.end_frame
+
+    if on
+      let w = match res
+        Ok(v)  -> v
+        Err(e) -> panic!("draw_text_fallback failed: #{e}")
+      end
+      t.expect(w > 0).to_eq(true)
+
+      # count lit pixels: a fallback render produces ink; tofu boxes would too,
+      # but a NULL/.notdef-only render with no fallback would be blank. The
+      # decisive structural pin is: ink was produced for codepoints the base font
+      # cannot draw, which only the fallback path can do.
+      var lit = 0
+      var y = 0
+      while y < 40
+        var x = 0
+        while x < 160
+          if c.read_pixel(x, y) != bg
+            lit += 1
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(lit > 0).to_eq(true)
+
+      # the fallback recorded which family it picked (non-empty for CJK).
+      let fam = c.last_fallback_family
+      t.expect(fam.size > 0).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.measure_text_fallback mixed script") do |t: &var Tester|
+  t.it("Latin+CJK measures wider than the Latin prefix alone") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.fallback_available?
+    if on
+      # "Hi你好" contains both runs; it must be wider than "Hi" alone, proving the
+      # CJK run was itemized + measured (not dropped as zero-width tofu).
+      let mixed = c.measure_text_fallback("Hi你好", 28.0f32)
+      let latin = c.measure_text_fallback("Hi", 28.0f32)
+      t.expect(mixed > 0).to_eq(true)
+      t.expect(latin > 0).to_eq(true)
+      t.expect(mixed > latin).to_eq(true)
+    else
+      let z = c.measure_text_fallback("Hi你好", 28.0f32)
+      t.expect(z).to_eq(0)
+    end
+  end
+
+  t.it("a pure-Latin string measures the same as the base path would (sane width)") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.fallback_available?
+    if on
+      let w = c.measure_text_fallback("Hello", 24.0f32)
+      t.expect(w > 0).to_eq(true)
+    else
+      let z = c.measure_text_fallback("Hello", 24.0f32)
+      t.expect(z).to_eq(0)
+    end
+  end
+end

@@ -7,6 +7,30 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Per-character font fallback (CJK / emoji) — `Canvas#draw_text_fallback` /
+  `#measure_text_fallback` / `#fallback_available?` / `#last_fallback_family`
+  (Phase 3 — text i18n).** Any codepoint the base font lacks (all CJK / emoji under
+  a Latin face) now renders as REAL GLYPHS instead of tofu boxes. The string is
+  itemized into runs by font coverage (`sk_typeface_unichar_to_glyph`, glyph 0 =
+  not covered); each uncovered run is matched to a covering typeface by the SYSTEM
+  font manager (`sk_fontmgr_match_family_style_character`, Core Text on macOS — so
+  CJK → PingFang/Hiragino, emoji → Apple Color Emoji, **without us naming or
+  shipping any font**) and rendered through Skia's direct glyph mapping
+  (`sk_font_unichar_to_glyph` + `sk_font_get_widths_bounds` → positioned textblob),
+  so no font FILE / HarfBuzz is needed for the fallback runs. A process-wide
+  fallback-typeface cache keyed by Unicode block keeps a CJK paragraph from calling
+  the (Core-Text-backed) fontmgr per character. **NO new native dependency** — the
+  system font manager is already in `libSkiaSharp`. Color emoji renders in color
+  automatically (Skia detects the color glyph table). Skia + fontmgr only — a clean
+  `Err` when the fontmgr surface is absent; the non-fallback shaped/text path is
+  untouched. **Binding gotchas pinned** (skia_capi.h): the per-character match
+  SEGFAULTS with a NULL style (we pass a normal style), and
+  `sk_typeface_get_family_name` RETURNS an owned `sk_string_t*` (the buf-fill form
+  returns empty). Pixel-pinned in `tests/canvas_fallback.rx` (a CJK string renders
+  non-blank pixels; Latin+CJK measures strictly wider than the Latin prefix; the
+  fallback family is reported). ADR: `docs/decisions/text-fallback.md`. **Scope:**
+  CJK + emoji render; complex-script SHAPING (Indic/Arabic ligature+reorder) inside
+  a fallback font needs the font file for HarfBuzz and is the documented remainder.
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

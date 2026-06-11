@@ -32,6 +32,8 @@ typedef struct sk_image_t      sk_image_t;
 typedef struct sk_data_t       sk_data_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
+typedef struct sk_fontmgr_t    sk_fontmgr_t;
+typedef struct sk_string_t     sk_string_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
 typedef struct sk_path_t       sk_path_t;
 typedef struct sk_path_effect_t sk_path_effect_t;
@@ -245,6 +247,43 @@ typedef void            (*pfn_fontstyle_delete)(sk_fontstyle_t *);
 typedef sk_font_t     *(*pfn_font_new_with_values)(sk_typeface_t *, float size, float scale_x,
         float skew_x);
 typedef void           (*pfn_font_set_size)(sk_font_t *, float);
+
+/* ---- per-character font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * The system font manager (Core Text on macOS) resolves which installed font
+ * covers a codepoint, so CJK / emoji render instead of tofu without us naming or
+ * shipping any font. sk_fontmgr_match_family_style_character takes a base family
+ * (NULL = no preference), a style, a BCP-47 array (NULL/0 here), and a codepoint,
+ * and returns an OWNED typeface that covers it (release with typeface_unref) or
+ * NULL. sk_typeface_unichar_to_glyph is the coverage test: glyph 0 (.notdef) ==
+ * the typeface does NOT cover the codepoint.
+ *
+ * BINDING GOTCHAS (empirically determined on the pinned 3.119.4 libSkiaSharp):
+ *   - sk_fontmgr_match_family_style_character SEGFAULTS with a NULL style — it
+ *     requires a NON-NULL sk_fontstyle_t*. We always pass a normal style
+ *     (weight 400 / width 5 / upright).
+ *   - sk_typeface_get_family_name RETURNS an OWNED sk_string_t* (it does NOT
+ *     buf-fill — the buf-fill signature returns empty). Read it with
+ *     sk_string_get_c_str / sk_string_get_size, free with sk_string_destructor. */
+typedef sk_fontmgr_t  *(*pfn_fontmgr_ref_default)(void);
+typedef void           (*pfn_fontmgr_unref)(sk_fontmgr_t *);
+typedef sk_typeface_t *(*pfn_fontmgr_match_family_style_character)(sk_fontmgr_t *,
+        const char *family, const sk_fontstyle_t *style, const char **bcp47,
+        int bcp47_count, int32_t character);
+typedef uint16_t       (*pfn_typeface_unichar_to_glyph)(const sk_typeface_t *, int32_t unichar);
+typedef sk_string_t   *(*pfn_typeface_get_family_name)(const sk_typeface_t *);
+typedef const char    *(*pfn_string_get_c_str)(const sk_string_t *);
+typedef size_t         (*pfn_string_get_size)(const sk_string_t *);
+typedef void           (*pfn_string_destructor)(sk_string_t *);
+typedef void           (*pfn_font_set_typeface)(sk_font_t *, sk_typeface_t *);
+/* Map a codepoint to this font's glyph id (0 = .notdef = not covered), and read
+ * per-glyph horizontal advances. These let a fallback run be rendered directly
+ * through Skia (1:1 codepoint->glyph + advance) without a font FILE for HarfBuzz
+ * — the obtainable path for CJK/emoji fallback (docs/decisions/text-fallback.md).
+ * sk_font_get_widths_bounds fills widths[count] (and bounds, which we pass NULL). */
+typedef uint16_t       (*pfn_font_unichar_to_glyph)(const sk_font_t *, int32_t unichar);
+typedef void           (*pfn_font_get_widths_bounds)(const sk_font_t *, const uint16_t *glyphs,
+        int count, float *widths, sk_rect_t *bounds, const sk_paint_t *);
 typedef void           (*pfn_font_delete)(sk_font_t *);
 typedef float          (*pfn_font_measure_text)(const sk_font_t *, const void *text, size_t byte_len,
         int encoding, sk_rect_t *bounds, const sk_paint_t *);
@@ -541,6 +580,21 @@ typedef struct {
     pfn_font_delete               font_delete;
     pfn_font_measure_text         font_measure_text;
     pfn_font_get_metrics          font_get_metrics;
+
+    /* Per-character font fallback (OPTIONAL; absence leaves fallback_ok = 0 so
+     * draw_text_fallback reports Err and the non-fallback path is unaffected). */
+    pfn_fontmgr_ref_default                  fontmgr_ref_default;
+    pfn_fontmgr_unref                        fontmgr_unref;
+    pfn_fontmgr_match_family_style_character fontmgr_match_character;
+    pfn_typeface_unichar_to_glyph            typeface_unichar_to_glyph;
+    pfn_typeface_get_family_name             typeface_get_family_name;
+    pfn_string_get_c_str                     string_get_c_str;
+    pfn_string_get_size                      string_get_size;
+    pfn_string_destructor                    string_destructor;
+    pfn_font_set_typeface                    font_set_typeface;
+    pfn_font_unichar_to_glyph                font_unichar_to_glyph;
+    pfn_font_get_widths_bounds               font_get_widths_bounds;
+    int fallback_ok;  /* 1 iff every fontmgr-fallback symbol resolved */
 
     pfn_path_new           path_new;
     pfn_path_delete        path_delete;

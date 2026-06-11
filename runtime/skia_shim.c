@@ -260,6 +260,20 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(textblob_builder_make,         "sk_textblob_builder_make");
     RX_SK_OPTIONAL(textblob_unref,                "sk_textblob_unref");
     RX_SK_OPTIONAL(canvas_draw_text_blob,         "sk_canvas_draw_text_blob");
+
+    /* Per-character font fallback (docs/decisions/text-fallback.md). OPTIONAL:
+     * a miss leaves fallback_ok = 0, disabling only the fallback path. */
+    RX_SK_OPTIONAL(fontmgr_ref_default,           "sk_fontmgr_ref_default");
+    RX_SK_OPTIONAL(fontmgr_unref,                 "sk_fontmgr_unref");
+    RX_SK_OPTIONAL(fontmgr_match_character,        "sk_fontmgr_match_family_style_character");
+    RX_SK_OPTIONAL(typeface_unichar_to_glyph,     "sk_typeface_unichar_to_glyph");
+    RX_SK_OPTIONAL(typeface_get_family_name,      "sk_typeface_get_family_name");
+    RX_SK_OPTIONAL(string_get_c_str,              "sk_string_get_c_str");
+    RX_SK_OPTIONAL(string_get_size,               "sk_string_get_size");
+    RX_SK_OPTIONAL(string_destructor,             "sk_string_destructor");
+    RX_SK_OPTIONAL(font_set_typeface,             "sk_font_set_typeface");
+    RX_SK_OPTIONAL(font_unichar_to_glyph,         "sk_font_unichar_to_glyph");
+    RX_SK_OPTIONAL(font_get_widths_bounds,        "sk_font_get_widths_bounds");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
 
@@ -309,6 +323,22 @@ const RxSkia *rx_skia(void) {
         skia.textblob_builder_make &&
         skia.canvas_draw_text_blob &&
         skia.textblob_unref ? 1 : 0;
+
+    /* Per-character font fallback needs: the default font manager, the
+     * per-character match, the coverage test (unichar_to_glyph), and the ability
+     * to build a sized font over a matched typeface. typeface_get_family_name is
+     * for the family-probe accessor (its absence only disables the probe, so it
+     * is NOT required here). If a core symbol is absent, draw_text_fallback Errs
+     * and the non-fallback shaped/text path is the fallback. */
+    skia.fallback_ok =
+        skia.fontmgr_ref_default &&
+        skia.fontmgr_match_character &&
+        skia.typeface_unichar_to_glyph &&
+        skia.font_unichar_to_glyph &&
+        skia.font_get_widths_bounds &&
+        skia.font_set_typeface &&
+        skia.font_new_with_values &&
+        skia.glyph_render_ok ? 1 : 0;
 
     /* Keep the handle open for the process lifetime (no dlclose): the resolved
      * pointers must stay valid. */
@@ -3222,6 +3252,302 @@ int64_t ruxen_canvas_measure_paragraph_shaped(int64_t self, int64_t text, double
     if (n < 0) return -RXC_ERR_BAD_ARGS;
     int64_t height = (int64_t)n * lh;
     return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- per-character font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * The shaped/draw_text paths above render ONE font: any codepoint that font
+ * lacks comes out as TOFU (a .notdef box) — all CJK and emoji under a Latin face.
+ * This section itemizes a string into runs by FONT COVERAGE and renders each run
+ * with a typeface that covers it (the base font when it covers the codepoint,
+ * else the system font manager's per-character match — Core Text on macOS, so CJK
+ * resolves to PingFang/Hiragino and emoji to Apple Color Emoji without us naming
+ * any font). Each run is rendered through Skia's DIRECT glyph mapping
+ * (sk_font_unichar_to_glyph + sk_font_get_widths_bounds) into a positioned
+ * textblob — no font FILE is needed (fontmgr returns an sk_typeface_t, not a
+ * path), so HarfBuzz is not involved on the fallback runs. SCOPE: this renders
+ * CJK + emoji correctly (1:1 codepoint->glyph + advance); complex-script SHAPING
+ * (Indic/Arabic ligature+reorder) inside a fallback font would need the font file
+ * for HarfBuzz and is the documented remainder. Skia+fallback-only — clean Err
+ * when the fontmgr surface is absent. */
+
+/* Decode the next UTF-8 codepoint at text[*i]; advance *i past it. Returns the
+ * codepoint, or 0xFFFD (replacement) on a malformed byte (advancing 1 so we never
+ * loop). Stops are the caller's job (*i < len). */
+static int32_t rxc_utf8_next(const char *text, size_t *i, size_t len) {
+    unsigned char c = (unsigned char)text[*i];
+    if (c < 0x80) { (*i)++; return c; }
+    if ((c & 0xE0) == 0xC0 && *i + 1 < len) {
+        int32_t cp = ((c & 0x1F) << 6) | ((unsigned char)text[*i + 1] & 0x3F);
+        *i += 2; return cp;
+    }
+    if ((c & 0xF0) == 0xE0 && *i + 2 < len) {
+        int32_t cp = ((c & 0x0F) << 12) | (((unsigned char)text[*i + 1] & 0x3F) << 6)
+                   | ((unsigned char)text[*i + 2] & 0x3F);
+        *i += 3; return cp;
+    }
+    if ((c & 0xF8) == 0xF0 && *i + 3 < len) {
+        int32_t cp = ((c & 0x07) << 18) | (((unsigned char)text[*i + 1] & 0x3F) << 12)
+                   | (((unsigned char)text[*i + 2] & 0x3F) << 6)
+                   | ((unsigned char)text[*i + 3] & 0x3F);
+        *i += 4; return cp;
+    }
+    (*i)++; return 0xFFFD;   /* malformed: skip one byte */
+}
+
+/* Fallback typeface cache, keyed by (Unicode block = codepoint>>8, style-bits).
+ * A run of Han / emoji shares a block and one slot, so a CJK paragraph does not
+ * call the (Core-Text-backed) fontmgr per character. Process-wide singletons,
+ * never freed (the same model as the family cache). A full cache resolves
+ * uncached (correct, just unmemoized). */
+#define RXC_FALLBACK_CACHE_CAP 32
+
+typedef struct {
+    int32_t        block;   /* codepoint >> 8 */
+    sk_typeface_t *tf;      /* the typeface covering that block, or NULL if none */
+    int            used;
+} RxFallbackEntry;
+
+/* The last family name a fallback resolved to (for Canvas#last_fallback_family).
+ * Updated whenever a fallback typeface is matched, so a test/L2 can document what
+ * the fallback picked. "" until the first fallback. */
+static char rxc_last_fallback_family[64] = {0};
+
+/* The default base typeface (system default), reused as the run's primary font.
+ * Built once; NULL when Skia is absent. */
+static sk_typeface_t *rx_default_typeface(void) {
+    static sk_typeface_t *tf = NULL;
+    static int tried = 0;
+    if (tried) return tf;
+    tried = 1;
+    const RxSkia *sk = rx_skia();
+    if (sk->typeface_create_default) tf = sk->typeface_create_default();
+    return tf;   /* may be NULL: caller handles */
+}
+
+/* Resolve a typeface that covers `cp`, cached by Unicode block. NULL when the
+ * fontmgr finds none (the caller then renders .notdef for that run — honest, not
+ * a crash). Records the picked family in rxc_last_fallback_family. */
+static sk_typeface_t *rx_fallback_typeface(const RxSkia *sk, int32_t cp) {
+    static RxFallbackEntry cache[RXC_FALLBACK_CACHE_CAP];
+    static int count = 0;
+    int32_t block = cp >> 8;
+    for (int i = 0; i < count; i++) {
+        if (cache[i].used && cache[i].block == block) return cache[i].tf;
+    }
+    /* The match REQUIRES a non-NULL style (NULL segfaults — see the binding
+     * gotcha in skia_capi.h). Build a normal style once. */
+    sk_fontstyle_t *style = sk->fontstyle_new ? sk->fontstyle_new(400, 5, 0) : NULL;
+    sk_fontmgr_t *mgr = sk->fontmgr_ref_default();
+    sk_typeface_t *tf = (mgr && style)
+        ? sk->fontmgr_match_character(mgr, NULL, style, NULL, 0, cp) : NULL;
+    if (mgr && sk->fontmgr_unref) sk->fontmgr_unref(mgr);
+    if (style && sk->fontstyle_delete) sk->fontstyle_delete(style);
+    /* Record the picked family. get_family_name RETURNS an owned sk_string_t*
+     * (the buf-fill form returns empty on this build). */
+    if (tf && sk->typeface_get_family_name && sk->string_get_c_str) {
+        sk_string_t *nm = sk->typeface_get_family_name(tf);
+        if (nm) {
+            const char *cstr = sk->string_get_c_str(nm);
+            if (cstr) {
+                strncpy(rxc_last_fallback_family, cstr,
+                        sizeof(rxc_last_fallback_family) - 1);
+                rxc_last_fallback_family[sizeof(rxc_last_fallback_family) - 1] = '\0';
+            }
+            if (sk->string_destructor) sk->string_destructor(nm);
+        }
+    }
+    if (count < RXC_FALLBACK_CACHE_CAP) {
+        cache[count].block = block;
+        cache[count].tf = tf;
+        cache[count].used = 1;
+        count++;
+    }
+    return tf;
+}
+
+/* A scratch sk_font we re-point at each run's typeface (font_set_typeface), so we
+ * do not build a new sk_font per run. Process-wide, size set per call. NULL when
+ * the symbols are absent. */
+static sk_font_t *rx_fallback_scratch_font(const RxSkia *sk, double size) {
+    static sk_font_t *f = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        if (sk->font_new_with_values)
+            f = sk->font_new_with_values(NULL, (float)size, 1.0f, 0.0f);
+    }
+    if (f && sk->font_set_size && size > 0.0) sk->font_set_size(f, (float)size);
+    return f;
+}
+
+/* Render (draw != 0) or measure ONE coverage run: codepoints cp[0..n) that all
+ * resolve to typeface `tf`, at pen origin (penx, y), color argb, onto `canvas`.
+ * Maps each codepoint to a glyph via sk_font_unichar_to_glyph and lays them out
+ * with sk_font_get_widths_bounds advances into a positioned textblob. Returns the
+ * run's advance width in pixels (>= 0), or -1 on an allocation failure. */
+static double rx_fallback_render_run(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *tf, double size, const int32_t *cp, int n,
+        double penx, double y, int64_t argb, int draw) {
+    if (n <= 0) return 0.0;
+    sk_font_t *font = rx_fallback_scratch_font(sk, size);
+    if (!font) return -1.0;
+    sk->font_set_typeface(font, tf);            /* tf may be NULL -> .notdef glyphs */
+
+    uint16_t glyphs_stack[128];
+    float    widths_stack[128];
+    uint16_t *glyphs = glyphs_stack;
+    float    *widths = widths_stack;
+    if (n > 128) {
+        glyphs = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+        widths = (float *)malloc((size_t)n * sizeof(float));
+        if (!glyphs || !widths) { free(glyphs); free(widths); return -1.0; }
+    }
+    for (int i = 0; i < n; i++) glyphs[i] = sk->font_unichar_to_glyph(font, cp[i]);
+    sk->font_get_widths_bounds(font, glyphs, n, widths, NULL, NULL);
+
+    double run_w = 0.0;
+    for (int i = 0; i < n; i++) run_w += widths[i];
+
+    if (draw && canvas && sk->textblob_builder_new) {
+        sk_textblob_builder_t *b = sk->textblob_builder_new();
+        if (b) {
+            sk_textblob_runbuffer_t rb;
+            sk->textblob_builder_alloc_run_pos(b, font, n, NULL, &rb);
+            uint16_t *gout = (uint16_t *)rb.glyphs;
+            float    *pout = (float *)rb.pos;
+            double x = penx;
+            for (int i = 0; i < n; i++) {
+                gout[i] = glyphs[i];
+                pout[2 * i + 0] = (float)x;
+                pout[2 * i + 1] = 0.0f;
+                x += widths[i];
+            }
+            sk_textblob_t *blobt = sk->textblob_builder_make(b);
+            sk->textblob_builder_delete(b);
+            if (blobt) {
+                sk_paint_t *paint = sk->paint_new();
+                if (paint) {
+                    sk->paint_set_antialias(paint, 1);
+                    sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                    sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                    /* y is the baseline; positions are run-relative, so draw at
+                     * (0, y) and the per-glyph x carries the layout. */
+                    sk->canvas_draw_text_blob(canvas, blobt, 0.0f, (float)y, paint);
+                    sk->paint_delete(paint);
+                }
+                sk->textblob_unref(blobt);
+            }
+        }
+    }
+    if (glyphs != glyphs_stack) free(glyphs);
+    if (widths != widths_stack) free(widths);
+    return run_w;
+}
+
+/* Itemize `text` into coverage runs and render (draw != 0) or measure them. Each
+ * codepoint uses the base typeface when it covers it (glyph != 0), else the
+ * fontmgr fallback for that codepoint; consecutive codepoints on the SAME
+ * typeface coalesce into one run. Returns the total advance width in pixels, or a
+ * NEGATIVE -RXC_ERR_* on failure. */
+static int64_t rx_text_fallback(RxHost *h, const char *text, double x, double y,
+                                double size, int64_t argb, int draw) {
+    if (!text) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+
+    sk_typeface_t *base = rx_default_typeface();
+    /* base may be NULL; unichar_to_glyph on a NULL-typeface font returns 0, so
+     * every codepoint then takes the fallback path — still correct. */
+
+    size_t len = strlen(text);
+    size_t i = 0;
+    double penx = x;
+
+    /* Build one run at a time: collect codepoints sharing a typeface. */
+    int32_t  run_cp[256];
+    int      run_n = 0;
+    sk_typeface_t *run_tf = NULL;
+    int      have_run = 0;
+
+    sk_font_t *probe = rx_fallback_scratch_font(sk, size);
+    if (!probe) return -RXC_ERR_NO_SKIA;
+
+    #define RXC_FLUSH_FB_RUN()                                                  \
+        do {                                                                    \
+            if (have_run && run_n > 0) {                                        \
+                double w = rx_fallback_render_run(sk, canvas, run_tf, size,     \
+                        run_cp, run_n, penx, y, argb, draw);                    \
+                if (w < 0.0) return -RXC_ERR_NO_SKIA;                           \
+                penx += w;                                                      \
+            }                                                                   \
+            run_n = 0; have_run = 0;                                            \
+        } while (0)
+
+    while (i < len) {
+        int32_t cp = rxc_utf8_next(text, &i, len);
+        /* Which typeface renders this codepoint? base if it covers it, else the
+         * fontmgr match for it (NULL when none -> .notdef, but no crash). */
+        sk_typeface_t *tf = base;
+        sk->font_set_typeface(probe, base);
+        if (sk->font_unichar_to_glyph(probe, cp) == 0) {
+            tf = rx_fallback_typeface(sk, cp);
+        }
+        if (have_run && tf == run_tf && run_n < 256) {
+            run_cp[run_n++] = cp;
+        } else {
+            RXC_FLUSH_FB_RUN();
+            run_tf = tf; run_cp[run_n++] = cp; have_run = 1;
+        }
+    }
+    RXC_FLUSH_FB_RUN();
+    #undef RXC_FLUSH_FB_RUN
+
+    return (int64_t)(penx - x + 0.5);
+}
+
+/* True (1) when per-character font fallback can run: the fontmgr + direct-glyph
+ * surface resolved. A capability probe. */
+int64_t ruxen_canvas_fallback_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    return (sk->available && sk->fallback_ok) ? 1 : 0;
+}
+
+/* Draw `text` at baseline (x, y) with per-character font fallback: each codepoint
+ * the base font lacks (CJK, emoji) is rendered with a system-matched font so it
+ * is real glyphs, not tofu. color packed 0xAARRGGBB. Returns the total advance
+ * width in pixels (>= 0), or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_draw_text_fallback(int64_t self, int64_t text, double x, double y,
+                                        double size, int64_t argb) {
+    return rx_text_fallback((RxHost *)self, (const char *)text, x, y, size, argb, /*draw*/1);
+}
+
+/* Total advance width in pixels of `text` rendered with font fallback, without
+ * drawing — for layout/centering. NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_fallback(int64_t self, int64_t text, double size) {
+    return rx_text_fallback((RxHost *)self, (const char *)text, 0.0, 0.0, size, 0, /*draw*/0);
+}
+
+/* The family name the most recent fallback resolved to (e.g. "PingFang SC",
+ * "Apple Color Emoji"), as a Ruxen-owned String. "" when no fallback has run yet.
+ * Lets a test/L2 document what the fallback picked. */
+int64_t ruxen_canvas_last_fallback_family(int64_t self) {
+    (void)self;
+    return (int64_t)ruxen_string_from(rxc_last_fallback_family);
 }
 
 /* ---- event queue ---- */

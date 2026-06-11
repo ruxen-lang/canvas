@@ -324,11 +324,41 @@ headless (capability + fallback) and pixel-verify via a standalone
 > QUIVER-side (L2) concern, tracked in quiver's roadmap, NOT here. Canvas's job
 > (the primitive) is done; L2 owns the DSL sugar over it.
 
+## Prod-parity Phase 3 — text i18n completion + accessibility bridge
+
+The text-i18n follow-ups deferred out of the shaping cycle (the SHAPING.md
+"deferred follow-ups" list) plus the accessibility-bridge design pass. Same
+zero-ambiguity discipline as Phase 2: each item is `[x]`-with-pin or
+filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
+
+### Part A — text i18n completion
+
+- [x] **Font fallback chains (CJK / emoji)** — `Canvas#draw_text_fallback` /
+      `#measure_text_fallback` / `#fallback_available?` / `#last_fallback_family`.
+      **NO new dependency** — the system font manager
+      (`sk_fontmgr_match_family_style_character`, Core Text on macOS) is already in
+      `libSkiaSharp` (verified `nm -gU`). When the base font lacks a glyph
+      (`sk_typeface_unichar_to_glyph` returns 0), the string is itemized into
+      coverage runs and each uncovered run is rendered with a system-matched
+      typeface via Skia's direct glyph mapping (`sk_font_unichar_to_glyph` +
+      `sk_font_get_widths_bounds` → positioned textblob; no font FILE / HarfBuzz
+      needed for fallback runs). CJK → PingFang/Hiragino, emoji → Apple Color
+      Emoji. A process-wide fallback-typeface cache keyed by Unicode block. **Two
+      binding gotchas pinned:** the per-character match SEGFAULTS with a NULL style
+      (pass a normal style), and `sk_typeface_get_family_name` RETURNS an owned
+      `sk_string_t*` (the buf-fill form returns empty). Pixel-pinned in
+      `tests/canvas_fallback.rx` (CJK renders non-blank pixels; Latin+CJK measures
+      strictly wider than the Latin prefix; fallback family reported). ADR:
+      `docs/decisions/text-fallback.md`. **Scope:** CJK + emoji render;
+      complex-script shaping inside a fallback font is the documented remainder.
+
+### Part B — accessibility bridge
+
+- _(in progress — ADR + minimal subset, see `docs/decisions/accessibility.md`.)_
+
 ## Later cycles
 
 - Full canvas surface: `draw_path`, `draw_image`, transforms, clips, layers.
-- Text i18n / accessibility (HarfBuzz shaping + paragraph layout via a separate
-  `HarfBuzzSharp` native lib + ICU).
 - Platform matrix: macOS/Windows/Linux → Android/iOS → web (WASM + canvas).
 
 ## Remaining — tracked checklist

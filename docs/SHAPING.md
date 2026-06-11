@@ -85,9 +85,18 @@ silent wrong render). The font is selected by **file path** this round.
   tables), and shapes each line with one direction; full bidi reordering of
   mixed-direction text is not yet done. This is the last piece for "full"
   international text.
-- **Per-line multi-run shaping / font fallback.** A line is shaped as one run in
-  one font; itemizing a line into runs by script + per-run font fallback (for
-  mixed scripts / missing glyphs) is a follow-up.
+- **Font fallback (CJK / emoji) — LANDED (Phase 3).** `Canvas#draw_text_fallback`
+  itemizes a string into runs by font coverage and renders each uncovered run
+  (CJK / emoji) with a system-font-manager-matched typeface
+  (`sk_fontmgr_match_family_style_character`) via Skia's direct glyph mapping — so
+  non-Latin text shows real glyphs, not tofu. No new dependency (the fontmgr is in
+  `libSkiaSharp`); no font file needed for fallback runs. See
+  `docs/decisions/text-fallback.md`. Complex-script SHAPING (Indic/Arabic) inside a
+  fallback font still needs the font file for HarfBuzz — the documented remainder.
+- **Per-line multi-run shaping.** The SHAPED-paragraph path still shapes each line
+  as one HarfBuzz run in one font; integrating the coverage-run itemizer into the
+  shaped line layout (so a mixed-script shaped line splits into per-font runs) is a
+  follow-up.
 - **Family → file resolution.** Today a shaped run takes a font **file path**;
   resolving a family name to a file (via the system font manager) is a small
   follow-up.
