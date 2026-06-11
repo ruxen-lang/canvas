@@ -1,0 +1,114 @@
+# Pin tests for per-line MULTI-RUN shaping + font fallback:
+# Canvas#draw_text_shaped_multi / #measure_text_shaped_multi.
+#
+# A mixed-script line is itemized into runs by font coverage: runs the base font
+# covers are HarfBuzz-shaped (kerning/ligatures); runs it lacks (CJK/emoji) are
+# rendered with a system-matched fallback font. So a Latin+CJK line shapes the
+# Latin AND renders the CJK in one call, and measures wider than either script
+# alone. The existing single-run shaped pins (tests/canvas_shaping.rx) stay green.
+#
+# docs/decisions/text-fallback.md.
+
+Tester.describe("Canvas.measure_text_shaped_multi mixed script") do |t: &var Tester|
+  t.it("Latin+CJK measures wider than the Latin part AND the CJK part alone") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available? && c.fallback_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      # "Hi你好" splits into a Latin run (shaped) + a CJK run (fallback). Its width
+      # must exceed BOTH "Hi" (Latin only) and "你好" (CJK only) — proving both runs
+      # were laid out, not one dropped as zero-width tofu.
+      let mixed = c.measure_text_shaped_multi("Hi你好", 24.0f32, arial.clone, 0)
+      let latin = c.measure_text_shaped_multi("Hi", 24.0f32, arial.clone, 0)
+      let cjk = c.measure_text_shaped_multi("你好", 24.0f32, arial.clone, 0)
+      t.expect(mixed > 0).to_eq(true)
+      t.expect(latin > 0).to_eq(true)
+      t.expect(cjk > 0).to_eq(true)
+      t.expect(mixed > latin).to_eq(true)
+      t.expect(mixed > cjk).to_eq(true)
+    else
+      let z = c.measure_text_shaped_multi("Hi你好", 24.0f32, arial.clone, 0)
+      t.expect(z).to_eq(0)
+    end
+  end
+
+  t.it("a pure-Latin line still applies shaping (AV kerning) via the covered run") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available? && c.fallback_available?
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    if on
+      # The multi path routes a covered Latin run through the SHAPER, so kerning
+      # still applies: "AV" is tighter than "A"+"V" measured separately.
+      let av = c.measure_text_shaped_multi("AV", 24.0f32, arial.clone, 0)
+      let a = c.measure_text_shaped_multi("A", 24.0f32, arial.clone, 0)
+      let v = c.measure_text_shaped_multi("V", 24.0f32, arial.clone, 0)
+      t.expect(av > 0 && a > 0 && v > 0).to_eq(true)
+      t.expect(av < a + v).to_eq(true)
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.draw_text_shaped_multi renders both scripts") do |t: &var Tester|
+  t.it("a mixed line renders ink across the full width (Latin and CJK)") do
+    var c = match Canvas.create(220, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available? && c.fallback_available?
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let white = Color.rgb(255u8, 255u8, 255u8)
+    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
+    let res = c.draw_text_shaped_multi("Hi你好World", 4.0f32, 30.0f32, 24.0f32, arial, 0, white)
+    let _2 = c.end_frame
+
+    if on
+      let w = match res
+        Ok(v)  -> v
+        Err(e) -> panic!("draw_text_shaped_multi failed: #{e}")
+      end
+      t.expect(w > 0).to_eq(true)
+      # ink appears in BOTH the left (Latin "Hi") and the middle (CJK) regions —
+      # find lit columns left of x=40 and right of x=40, proving both runs drew.
+      var left_lit = false
+      var mid_lit = false
+      var y = 0
+      while y < 40
+        var x = 0
+        while x < 220
+          if c.read_pixel(x, y) != bg
+            if x < 40
+              left_lit = true
+            elsif x >= 40 && x < 120
+              mid_lit = true
+            end
+          end
+          x += 1
+        end
+        y += 1
+      end
+      t.expect(left_lit).to_eq(true)
+      t.expect(mid_lit).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end

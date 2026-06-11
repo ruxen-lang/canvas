@@ -3249,6 +3249,115 @@ int64_t ruxen_canvas_measure_text_shaped(int64_t self, int64_t text, double size
                         (const char *)font_path, direction, 0, /*draw*/0);
 }
 
+/* ---- per-line MULTI-RUN shaping + font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * draw_text_shaped above shapes a line as ONE HarfBuzz run in ONE font (by file),
+ * so any codepoint that font lacks comes out tofu. This itemizes a line into runs
+ * by FONT COVERAGE and shapes each run with the typeface that covers it:
+ *   - a run the BASE font (font_path) covers is shaped with HarfBuzz on that file
+ *     (kerning + ligatures preserved — the existing shaped path), then drawn;
+ *   - a run it does NOT cover (CJK / emoji) is rendered with the system-matched
+ *     fallback typeface via Skia's direct glyph mapping (rx_fallback_line).
+ * So a mixed Latin+CJK line shapes the Latin (with kerning) AND renders the CJK,
+ * and measures wider than either script alone. Forward declarations for the
+ * fallback line renderer (defined later) — it shares the fallback machinery. */
+static double rx_fallback_line(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *base, double size, const char *text, size_t start,
+        size_t sublen, double x0, double y, int64_t argb, int draw);
+static sk_typeface_t *rx_default_typeface(void);
+static int32_t rxc_utf8_next(const char *text, size_t *i, size_t len);
+
+/* Shape/measure `text` with per-codepoint coverage routing. Covered runs go
+ * through the shaper (HarfBuzz on font_path); uncovered runs go through the
+ * fallback line renderer. Returns the total advance width in pixels, or a NEGATIVE
+ * -RXC_ERR_* on failure. When draw != 0, renders at baseline (x, y). */
+static int64_t rx_shape_run_multi(RxHost *h, const char *text, double x, double y,
+        double size, const char *font_path, int64_t dir, int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->glyph_render_ok || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, font_path, size, dir);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+    }
+    sk_typeface_t *fb_base = rx_default_typeface();
+
+    size_t len = strlen(text);
+    size_t i = 0;
+    double penx = x;
+    int64_t err = 0;
+
+    /* Walk codepoints; a run is a maximal byte range whose coverage state is the
+     * same (all covered by the base file, or all not). Flush a run by routing it. */
+    size_t run_start = 0;
+    int    run_covered = -1;   /* -1 = no run yet */
+
+    #define RXC_FLUSH_SHAPE_RUN(end_byte)                                        \
+        do {                                                                     \
+            size_t rlen = (end_byte) - run_start;                                \
+            if (rlen > 0 && run_covered == 1) {                                  \
+                int w = rx_shaper_measure(&shaper, text, run_start, rlen);        \
+                if (draw) rx_shaper_draw(&shaper, canvas, text, run_start, rlen,  \
+                                         penx, y, argb);                          \
+                penx += w;                                                       \
+            } else if (rlen > 0) {                                               \
+                double w = rx_fallback_line(sk, draw ? canvas : NULL, fb_base,    \
+                        size, text, run_start, rlen, penx, y, argb, draw);        \
+                if (w < 0.0) { err = -RXC_ERR_NO_SKIA; }                          \
+                else penx += w;                                                  \
+            }                                                                    \
+        } while (0)
+
+    while (i < len && !err) {
+        size_t cp_start = i;
+        int32_t cp = rxc_utf8_next(text, &i, len);
+        int covered = (shaper.tf && sk->typeface_unichar_to_glyph(shaper.tf, cp) != 0) ? 1 : 0;
+        if (run_covered == -1) {
+            run_start = cp_start; run_covered = covered;
+        } else if (covered != run_covered) {
+            RXC_FLUSH_SHAPE_RUN(cp_start);
+            run_start = cp_start; run_covered = covered;
+        }
+    }
+    if (!err && run_covered != -1) RXC_FLUSH_SHAPE_RUN(len);
+    #undef RXC_FLUSH_SHAPE_RUN
+
+    rx_shaper_drop(&shaper);
+    if (err) return err;
+    return (int64_t)(penx - x + 0.5);
+}
+
+/* Draw a mixed-script line with per-run shaping + font fallback: the base-font
+ * runs are HarfBuzz-shaped (kerning/ligatures), the uncovered runs (CJK/emoji)
+ * use the system fallback. Returns Ok(total advance width) or a NEGATIVE
+ * -RXC_ERR_*. direction 0 auto / 1 LTR / 2 RTL applies to the shaped runs. */
+int64_t ruxen_canvas_draw_text_shaped_multi(int64_t self, int64_t text, double x, double y,
+        double size, int64_t font_path, int64_t direction, int64_t argb) {
+    return rx_shape_run_multi((RxHost *)self, (const char *)text, x, y, size,
+                              (const char *)font_path, direction, argb, /*draw*/1);
+}
+
+/* Total advance width of a per-run-shaped + fallback line, without drawing.
+ * NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_shaped_multi(int64_t self, int64_t text, double size,
+        int64_t font_path, int64_t direction) {
+    return rx_shape_run_multi((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                              (const char *)font_path, direction, 0, /*draw*/0);
+}
+
 /* ---- shaped paragraphs: word-wrap with SHAPED line widths + glyph render ----
  *
  * The same greedy whitespace word-wrap as ruxen_canvas_draw_paragraph, but each

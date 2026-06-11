@@ -100,10 +100,14 @@ silent wrong render). The font is selected by **file path** this round.
   `libSkiaSharp`); no font file needed for fallback runs. See
   `docs/decisions/text-fallback.md`. Complex-script SHAPING (Indic/Arabic) inside a
   fallback font still needs the font file for HarfBuzz — the documented remainder.
-- **Per-line multi-run shaping.** The SHAPED-paragraph path still shapes each line
-  as one HarfBuzz run in one font; integrating the coverage-run itemizer into the
-  shaped line layout (so a mixed-script shaped line splits into per-font runs) is a
-  follow-up.
+- **Per-line multi-run shaping — LANDED (Phase 3).**
+  `Canvas#draw_text_shaped_multi` itemizes a line into runs by font coverage:
+  base-font runs are HarfBuzz-shaped (kerning/ligatures), uncovered runs (CJK/emoji)
+  use the system fallback. So a mixed Latin+CJK line shapes the Latin AND renders
+  the CJK. See `docs/decisions/text-fallback.md`. Integrating this into the
+  word-wrapped `draw_paragraph_shaped` layout (so wrapped shaped lines also split
+  per-font) is a follow-up; per-run SCRIPT/direction boundary splitting beyond
+  coverage is the bidi item.
 - **Family → file resolution.** Today a shaped run takes a font **file path**;
   resolving a family name to a file (via the system font manager) is a small
   follow-up.

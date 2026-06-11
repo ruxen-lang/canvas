@@ -603,6 +603,29 @@ class Canvas
     self.raw.last_fallback_family_raw
   end
 
+  ## Draw a single line with **per-run shaping + font fallback**: each run the base
+  ## font (`font_path`) covers is HarfBuzz-shaped (kerning / ligatures), and each
+  ## run it lacks (CJK / emoji) is rendered with a system-matched fallback font. So
+  ## a mixed Latin+CJK line shapes the Latin AND renders the CJK in one call.
+  ## Returns `Ok(width)` — the total advance in pixels — or `Err` when shaping /
+  ## fallback is unavailable. `direction` 0 auto / 1 LTR / 2 RTL (applies to the
+  ## shaped runs). `docs/decisions/text-fallback.md`.
+  def var draw_text_shaped_multi(text: String, x: Float32, y: Float32, size: Float32, font_path: String, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_shaped_multi_raw(&text, x as Float, y as Float, size as Float, &font_path, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_text_shaped_multi")
+  end
+
+  ## Total advance width in pixels of a per-run-shaped + fallback line, without
+  ## drawing — for layout/centering. 0 when shaping/fallback is unavailable.
+  def measure_text_shaped_multi(text: String, size: Float32, font_path: String, direction: Int) -> Int
+    let code = self.raw.measure_text_shaped_multi_raw(&text, size as Float, &font_path, direction)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
   ## True when ICU Unicode segmentation is available (the system `libicucore` is
   ## reachable). A capability probe; when false, `grapheme_count` /
   ## `grapheme_boundary_at` return 0 / -1 and the paragraph wrap uses the

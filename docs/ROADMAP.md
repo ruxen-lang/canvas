@@ -377,6 +377,19 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       grapheme; CJK = 1 per Han char; byte-offset mapping for `a中b`; a CJK
       paragraph wraps to multiple lines fitting the column). ADR:
       `docs/decisions/text-fallback.md`.
+- [x] **Per-line multi-run shaping** — `Canvas#draw_text_shaped_multi` /
+      `#measure_text_shaped_multi`. A line is itemized into runs by FONT COVERAGE:
+      runs the base font (`font_path`) covers are HarfBuzz-shaped (kerning /
+      ligatures preserved — the existing shaped path); runs it lacks (CJK / emoji)
+      are rendered with the system-matched fallback typeface via Skia's direct
+      glyph mapping. So a mixed Latin+CJK line shapes the Latin AND renders the CJK
+      in one call. Pins in `tests/canvas_shaped_multi.rx` (Latin+CJK measures wider
+      than BOTH the Latin part and the CJK part alone; a pure-Latin line still
+      applies AV kerning through the covered run; a mixed line renders ink in both
+      the Latin and CJK regions). The existing single-run shaped pins
+      (`tests/canvas_shaping.rx`) stay green. ADR: `docs/decisions/text-fallback.md`.
+      **Scope:** itemization is by font coverage; per-run SCRIPT/direction
+      boundary splitting beyond coverage (and bidi reorder) is Part A item 6.
 
 ### Part B — accessibility bridge
 

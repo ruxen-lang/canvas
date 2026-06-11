@@ -53,6 +53,15 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   byte offsets. ICU + fallback only (clean Err / 0 otherwise; the greedy-whitespace
   wrap stays the fallback). Pinned in `tests/canvas_segmentation.rx`. ADR:
   `docs/decisions/text-fallback.md`.
+- **Per-line multi-run shaping — `Canvas#draw_text_shaped_multi` /
+  `#measure_text_shaped_multi` (Phase 3 — text i18n).** A line is itemized into
+  runs by font coverage: runs the base font (`font_path`) covers are HarfBuzz-shaped
+  (kerning / ligatures preserved); runs it lacks (CJK / emoji) use the system
+  fallback via Skia's direct glyph mapping. So a mixed Latin+CJK line shapes the
+  Latin AND renders the CJK in one call, and measures wider than either script
+  alone. Pinned in `tests/canvas_shaped_multi.rx` (mixed wider than both parts; AV
+  kerning still applies to a covered Latin run; ink in both regions). The existing
+  single-run shaped pins stay green. ADR: `docs/decisions/text-fallback.md`.
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,
