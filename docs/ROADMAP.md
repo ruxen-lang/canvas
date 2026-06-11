@@ -361,6 +361,22 @@ filed-with-reason. ADRs land first per item-group (`docs/decisions/`).
       a single-color outline). HONEST-SCOPE: if a future host's `libSkiaSharp`
       lacked color-table support the pin would catch it as a monochrome render and
       it would be filed; on the pinned binary it works.
+- [x] **ICU segmentation (line-break + grapheme)** — **NO new dependency.** The
+      system `/usr/lib/libicucore.A.dylib` is dlopen'd (it has no on-disk file —
+      dyld-cache only — so the symbol check is a runtime dlsym probe, NOT `nm`); on
+      this host the BARE `ubrk_*` names resolve, and the loader falls back to a
+      version-suffix scan (`_70.._78`) for forward-compat. Two uses: (1)
+      `Canvas#grapheme_count` / `#grapheme_boundary_at` (UTF-8 byte offsets) for
+      L2's caret/selection — an emoji+ZWJ family sequence counts as ONE grapheme;
+      (2) `Canvas#draw_paragraph_icu` / `#measure_paragraph_icu[_width]` — a
+      paragraph wrap that breaks at ICU line-break opportunities and renders each
+      line with font fallback, so CJK (no spaces) wraps at character boundaries
+      instead of overflowing. `Canvas#icu_available?` probes; ICU + fallback only
+      (clean Err / 0 otherwise, greedy wrap stays the fallback). Pins in
+      `tests/canvas_segmentation.rx` (ASCII one-per-char; the ZWJ family emoji = 1
+      grapheme; CJK = 1 per Han char; byte-offset mapping for `a中b`; a CJK
+      paragraph wraps to multiple lines fitting the column). ADR:
+      `docs/decisions/text-fallback.md`.
 
 ### Part B — accessibility bridge
 

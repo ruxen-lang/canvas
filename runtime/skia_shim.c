@@ -414,6 +414,73 @@ const RxHB *rx_hb(void) {
     return &hb;
 }
 
+/* ---- ICU loader (segmentation, docs/decisions/text-fallback.md) ----
+ *
+ * /usr/lib/libicucore.A.dylib is already on macOS (dyld-shared-cache only — no
+ * on-disk file, so `nm` can't see it; the symbol check is THIS runtime dlsym).
+ * On this host the BARE `ubrk_*` names resolve (Apple re-exports the unsuffixed
+ * symbols); the resolver falls back to scanning a small version-suffix range if a
+ * future host only exports suffixed names (the documented forward-compat hedge).
+ * Process-wide singleton; ->available 0 -> ICU features report unavailable and the
+ * greedy-whitespace wrap stays the fallback (never a wrong wrap). */
+static void *rx_icu_dlopen(void) {
+    const char *env = getenv("RUXEN_CANVAS_ICU");
+    if (env && env[0]) {
+        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    void *h = dlopen("/usr/lib/libicucore.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    h = dlopen("libicucore.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    /* Linux fallback (a system ICU); the suffix scan in rx_icu_sym handles the
+     * versioned names common there. */
+    return dlopen("libicuuc.so", RTLD_NOW | RTLD_LOCAL);
+}
+
+/* Resolve an ICU symbol: try the BARE name first (Apple's libicucore), then a
+ * small version-suffix scan (_70.._78, covering ICU 70-78 ≈ macOS 13-16+ and most
+ * recent Linux ICU). The first hit wins. Returns NULL if none resolve. */
+static void *rx_icu_sym(void *lib, const char *base) {
+    void *s = dlsym(lib, base);
+    if (s) return s;
+    char name[64];
+    for (int v = 70; v <= 78; v++) {
+        snprintf(name, sizeof(name), "%s_%d", base, v);
+        s = dlsym(lib, name);
+        if (s) return s;
+    }
+    return NULL;
+}
+
+const RxICU *rx_icu(void) {
+    static RxICU icu;
+    static int initialized = 0;
+    if (initialized) return &icu;
+    initialized = 1;
+
+    void *lib = rx_icu_dlopen();
+    if (!lib) return &icu;   /* not available; ICU features report unavailable */
+
+    int ok = 1;
+#define RX_ICU_REQ(field, sym)                                  \
+    do {                                                        \
+        *(void **)(&icu.field) = rx_icu_sym(lib, sym);          \
+        if (!icu.field) ok = 0;                                 \
+    } while (0)
+    RX_ICU_REQ(ubrk_open,      "ubrk_open");
+    RX_ICU_REQ(ubrk_setText,   "ubrk_setText");
+    RX_ICU_REQ(ubrk_first,     "ubrk_first");
+    RX_ICU_REQ(ubrk_next,      "ubrk_next");
+    RX_ICU_REQ(ubrk_following, "ubrk_following");
+    RX_ICU_REQ(ubrk_close,     "ubrk_close");
+    RX_ICU_REQ(u_strFromUTF8,  "u_strFromUTF8");
+#undef RX_ICU_REQ
+
+    icu.available = ok;
+    return &icu;
+}
+
 /* ---- Metal device + command queue (Apple GPU, docs/GPU.md) ----
  *
  * The GrDirectContext for Metal needs an id<MTLDevice> + id<MTLCommandQueue>.
@@ -3445,6 +3512,57 @@ static double rx_fallback_render_run(const RxSkia *sk, sk_canvas_t *canvas,
     return run_w;
 }
 
+/* Itemize the byte sub-range [start, start+sublen) of `text` into coverage runs
+ * (base typeface where it covers the codepoint, else the fontmgr fallback;
+ * consecutive same-typeface codepoints coalesce) and render (draw != 0) or measure
+ * them at pen origin (x0, y). Returns the laid-out advance width in pixels (>= 0),
+ * or a NEGATIVE -RXC_ERR_* on an allocation failure. This is the per-LINE engine
+ * shared by single-line fallback text and the ICU-wrapped fallback paragraph. */
+static double rx_fallback_line(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *base, double size, const char *text, size_t start,
+        size_t sublen, double x0, double y, int64_t argb, int draw) {
+    size_t end = start + sublen;
+    size_t i = start;
+    double penx = x0;
+
+    int32_t  run_cp[256];
+    int      run_n = 0;
+    sk_typeface_t *run_tf = NULL;
+    int      have_run = 0;
+
+    sk_font_t *probe = rx_fallback_scratch_font(sk, size);
+    if (!probe) return -1.0;
+
+    #define RXC_FLUSH_FB_RUN()                                                  \
+        do {                                                                    \
+            if (have_run && run_n > 0) {                                        \
+                double w = rx_fallback_render_run(sk, canvas, run_tf, size,     \
+                        run_cp, run_n, penx, y, argb, draw);                    \
+                if (w < 0.0) return -1.0;                                       \
+                penx += w;                                                      \
+            }                                                                   \
+            run_n = 0; have_run = 0;                                            \
+        } while (0)
+
+    while (i < end) {
+        int32_t cp = rxc_utf8_next(text, &i, end);
+        sk_typeface_t *tf = base;
+        sk->font_set_typeface(probe, base);
+        if (sk->font_unichar_to_glyph(probe, cp) == 0) {
+            tf = rx_fallback_typeface(sk, cp);
+        }
+        if (have_run && tf == run_tf && run_n < 256) {
+            run_cp[run_n++] = cp;
+        } else {
+            RXC_FLUSH_FB_RUN();
+            run_tf = tf; run_cp[run_n++] = cp; have_run = 1;
+        }
+    }
+    RXC_FLUSH_FB_RUN();
+    #undef RXC_FLUSH_FB_RUN
+    return penx - x0;
+}
+
 /* Itemize `text` into coverage runs and render (draw != 0) or measure them. Each
  * codepoint uses the base typeface when it covers it (glyph != 0), else the
  * fontmgr fallback for that codepoint; consecutive codepoints on the SAME
@@ -3472,51 +3590,10 @@ static int64_t rx_text_fallback(RxHost *h, const char *text, double x, double y,
     sk_typeface_t *base = rx_default_typeface();
     /* base may be NULL; unichar_to_glyph on a NULL-typeface font returns 0, so
      * every codepoint then takes the fallback path — still correct. */
-
-    size_t len = strlen(text);
-    size_t i = 0;
-    double penx = x;
-
-    /* Build one run at a time: collect codepoints sharing a typeface. */
-    int32_t  run_cp[256];
-    int      run_n = 0;
-    sk_typeface_t *run_tf = NULL;
-    int      have_run = 0;
-
-    sk_font_t *probe = rx_fallback_scratch_font(sk, size);
-    if (!probe) return -RXC_ERR_NO_SKIA;
-
-    #define RXC_FLUSH_FB_RUN()                                                  \
-        do {                                                                    \
-            if (have_run && run_n > 0) {                                        \
-                double w = rx_fallback_render_run(sk, canvas, run_tf, size,     \
-                        run_cp, run_n, penx, y, argb, draw);                    \
-                if (w < 0.0) return -RXC_ERR_NO_SKIA;                           \
-                penx += w;                                                      \
-            }                                                                   \
-            run_n = 0; have_run = 0;                                            \
-        } while (0)
-
-    while (i < len) {
-        int32_t cp = rxc_utf8_next(text, &i, len);
-        /* Which typeface renders this codepoint? base if it covers it, else the
-         * fontmgr match for it (NULL when none -> .notdef, but no crash). */
-        sk_typeface_t *tf = base;
-        sk->font_set_typeface(probe, base);
-        if (sk->font_unichar_to_glyph(probe, cp) == 0) {
-            tf = rx_fallback_typeface(sk, cp);
-        }
-        if (have_run && tf == run_tf && run_n < 256) {
-            run_cp[run_n++] = cp;
-        } else {
-            RXC_FLUSH_FB_RUN();
-            run_tf = tf; run_cp[run_n++] = cp; have_run = 1;
-        }
-    }
-    RXC_FLUSH_FB_RUN();
-    #undef RXC_FLUSH_FB_RUN
-
-    return (int64_t)(penx - x + 0.5);
+    double w = rx_fallback_line(sk, canvas, base, size, text, 0, strlen(text),
+                                x, y, argb, draw);
+    if (w < 0.0) return -RXC_ERR_NO_SKIA;
+    return (int64_t)(w + 0.5);
 }
 
 /* True (1) when per-character font fallback can run: the fontmgr + direct-glyph
@@ -3548,6 +3625,282 @@ int64_t ruxen_canvas_measure_text_fallback(int64_t self, int64_t text, double si
 int64_t ruxen_canvas_last_fallback_family(int64_t self) {
     (void)self;
     return (int64_t)ruxen_string_from(rxc_last_fallback_family);
+}
+
+/* ---- ICU line-break + font-fallback paragraph (docs/decisions/text-fallback.md) ----
+ *
+ * A word-wrapped paragraph that wraps at ICU LINE-BREAK opportunities (not just
+ * whitespace) and renders each line through the font-fallback path. So it handles
+ * CJK — which has NO spaces, and which greedy-whitespace wrap would overflow — by
+ * breaking between characters per Unicode rules, AND renders mixed CJK/Latin/emoji
+ * (each line itemized by font coverage). ICU + fallback only: a clean Err when ICU
+ * or the fallback surface is absent (callers use the greedy draw_paragraph_shaped
+ * / draw_paragraph fallback). (x, y) = column left edge + first baseline; lines
+ * stack one line-height below; align 0 left / 1 center / 2 right. */
+
+/* Stack cap for the grapheme/line-break helpers. Strings longer than this fall
+ * back to a clean "unavailable" (0) rather than heap-thrashing — L2 segments
+ * visible text, which is short; a giant blob is not a caret/selection case. */
+#define RXC_SEG_MAX 2048
+/* UTF-8 -> UTF-16 + offset map; defined in the segmentation section below. */
+static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
+                                int *b2u, int u16cap);
+
+#define RXC_ICU_BREAKS_MAX 1024
+
+/* Collect ICU line-break opportunities of `text` as UTF-8 BYTE offsets into
+ * brk[0..*nbrk) (each > 0 and <= len; the final entry is len). Returns 1 on
+ * success, 0 if ICU is unavailable or the text is too long. Uses the same
+ * UTF-8<->UTF-16 offset map as the grapheme path. */
+static int rx_icu_line_breaks(const char *text, size_t len, int *brk, int *nbrk) {
+    const RxICU *icu = rx_icu();
+    if (!icu->available || len == 0 || len > RXC_SEG_MAX) return 0;
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(text, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return 0;
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_LINE, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return 0; }
+    int n = 0;
+    int32_t p = icu->ubrk_first(bi);   /* 0 */
+    while ((p = icu->ubrk_next(bi)) != RX_UBRK_DONE && n < RXC_ICU_BREAKS_MAX) {
+        brk[n++] = (p >= u16n) ? (int)len : b2u[p];
+    }
+    icu->ubrk_close(bi);
+    *nbrk = n;
+    return n > 0 ? 1 : 0;
+}
+
+/* Wrap + (optionally) draw `text` into a `max_width` column, breaking at ICU
+ * line-break opportunities and rendering each line with font fallback. Returns the
+ * laid-out total height in pixels, or a NEGATIVE -RXC_ERR_* on failure. Writes the
+ * widest line width to *out_w when non-NULL. */
+static int64_t rx_paragraph_icu(RxHost *h, const char *text, double x, double y,
+        double max_width, double size, int align, int64_t argb, int draw, int *out_w) {
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+    sk_typeface_t *base = rx_default_typeface();
+    sk_font_t *mf = rx_fallback_scratch_font(sk, size);
+    if (!mf) return -RXC_ERR_NO_SKIA;
+    int line_height = (int)rx_text_height_with_font(mf);
+    if (line_height < 1) line_height = 1;
+
+    size_t len = strlen(text);
+    int brk[RXC_ICU_BREAKS_MAX];
+    int nbrk = 0;
+    if (!rx_icu_line_breaks(text, len, brk, &nbrk)) return -RXC_ERR_NO_SKIA;
+
+    int max_col = (max_width > 0.0) ? (int)(max_width + 0.5) : 0;
+    int n_lines = 0;
+    int widest = 0;
+
+    /* Greedy pack break-delimited segments into lines. line_start is a byte
+     * offset; we extend the line to the next break while it fits, else flush. A
+     * single segment wider than the column is placed alone (overflow, never loop).
+     * Trailing spaces at a break are kept in the measured range (harmless). */
+    size_t line_start = 0;
+    int    prev = 0;       /* byte offset of the last accepted break (>= line_start) */
+    int    have = 0;
+
+    for (int bi = 0; bi < nbrk; bi++) {
+        int seg_end = brk[bi];
+        if (seg_end <= (int)line_start) continue;
+        double cand_w = rx_fallback_line(sk, NULL, base, size, text, line_start,
+                                         (size_t)seg_end - line_start, 0, 0, argb, 0);
+        if (cand_w < 0.0) return -RXC_ERR_NO_SKIA;
+        if (max_col > 0 && (int)(cand_w + 0.5) > max_col && have) {
+            /* flush [line_start, prev) as a line, start the new line at prev */
+            double lw = rx_fallback_line(sk, draw ? canvas : NULL, base, size, text,
+                    line_start, (size_t)prev - line_start, 0, 0, argb, 0);
+            int lwi = (int)(lw + 0.5);
+            if (lwi > widest) widest = lwi;
+            if (draw) {
+                double off = 0.0;
+                if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lwi) / 2.0;
+                else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lwi;
+                if (off < 0.0) off = 0.0;
+                double by = y + (double)n_lines * line_height;
+                rx_fallback_line(sk, canvas, base, size, text, line_start,
+                                 (size_t)prev - line_start, x + off, by, argb, 1);
+            }
+            n_lines++;
+            line_start = (size_t)prev;
+            /* re-measure the current segment from the new line start */
+            cand_w = rx_fallback_line(sk, NULL, base, size, text, line_start,
+                                      (size_t)seg_end - line_start, 0, 0, argb, 0);
+            if (cand_w < 0.0) return -RXC_ERR_NO_SKIA;
+        }
+        prev = seg_end;
+        have = 1;
+    }
+    /* flush the final pending line [line_start, prev) */
+    if (have && prev > (int)line_start) {
+        double lw = rx_fallback_line(sk, draw ? canvas : NULL, base, size, text,
+                line_start, (size_t)prev - line_start, 0, 0, argb, 0);
+        int lwi = (int)(lw + 0.5);
+        if (lwi > widest) widest = lwi;
+        if (draw) {
+            double off = 0.0;
+            if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lwi) / 2.0;
+            else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lwi;
+            if (off < 0.0) off = 0.0;
+            double by = y + (double)n_lines * line_height;
+            rx_fallback_line(sk, canvas, base, size, text, line_start,
+                             (size_t)prev - line_start, x + off, by, argb, 1);
+        }
+        n_lines++;
+    }
+
+    if (out_w) *out_w = widest;
+    return (int64_t)n_lines * line_height;
+}
+
+/* Draw an ICU-line-broken, font-fallback paragraph; returns Ok(total_height) or a
+ * NEGATIVE -RXC_ERR_* (ICU + fallback only — callers fall back to the greedy
+ * draw_paragraph_shaped / draw_paragraph). align 0 left / 1 center / 2 right. */
+int64_t ruxen_canvas_draw_paragraph_icu(int64_t self, int64_t text, double x, double y,
+        double max_width, double size, int64_t align, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width))
+        return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+    return rx_paragraph_icu(h, s, x, y, max_width, size, (int)align, argb, 1, NULL);
+}
+
+/* Measure an ICU-line-broken, font-fallback paragraph WITHOUT drawing: returns
+ * (max_line_width << 32) | total_height, or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_paragraph_icu(int64_t self, int64_t text, double max_width,
+        double size) {
+    const char *s = (const char *)text;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    int max_w = 0;
+    int64_t height = rx_paragraph_icu((RxHost *)self, s, 0.0, 0.0, max_width, size,
+                                      RXC_ALIGN_LEFT, 0, 0, &max_w);
+    if (height < 0) return height;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- ICU segmentation: grapheme + line-break (docs/decisions/text-fallback.md) ----
+ *
+ * Grapheme boundaries (UBRK_CHARACTER) for L2's caret/selection — an emoji+ZWJ
+ * sequence is ONE grapheme, a combining mark stays with its base. ICU works in
+ * UTF-16; the input is a Ruxen String (UTF-8 char*), so we convert UTF-8 -> UTF-16
+ * AND record a UTF-16-unit -> UTF-8-byte offset map during our own decode, so the
+ * boundaries we hand back to L2 are UTF-8 BYTE offsets (what L2 indexes the String
+ * by). The non-ICU fallback (icu unavailable) is a clean 0 / unavailable. */
+
+/* Convert `text` (UTF-8, `len` bytes) to UTF-16 in `u16` (cap `u16cap` units),
+ * filling `b2u`[unit] with the UTF-8 BYTE offset each UTF-16 unit starts at (so a
+ * boundary at unit k maps to byte b2u[k]); b2u[count] = len (the end). Returns the
+ * number of UTF-16 units, or -1 if it would overflow. A surrogate pair (cp >
+ * 0xFFFF) is two units, both mapping to the codepoint's starting byte. */
+static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
+                                int *b2u, int u16cap) {
+    int n = 0;
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        int32_t cp = rxc_utf8_next(text, &i, len);
+        if (cp > 0xFFFF) {
+            if (n + 2 > u16cap) return -1;
+            cp -= 0x10000;
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)(0xD800 + (cp >> 10));
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)(0xDC00 + (cp & 0x3FF));
+        } else {
+            if (n + 1 > u16cap) return -1;
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)cp;
+        }
+    }
+    if (n < u16cap) b2u[n] = (int)len;   /* the end boundary */
+    return n;
+}
+
+/* Count grapheme clusters in `text` (UTF-8). 0 when ICU is unavailable or the
+ * string is empty / too long. An emoji+ZWJ sequence counts as ONE. */
+int64_t ruxen_canvas_grapheme_count(int64_t self, int64_t text) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s) return 0;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return 0;
+    size_t len = strlen(s);
+    if (len == 0) return 0;
+    if (len > RXC_SEG_MAX) return 0;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(s, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return 0;
+
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_CHARACTER, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return 0; }
+    int count = 0;
+    int32_t p = icu->ubrk_first(bi);
+    while ((p = icu->ubrk_next(bi)) != RX_UBRK_DONE) count++;
+    icu->ubrk_close(bi);
+    return count;
+}
+
+/* The UTF-8 BYTE offset of the `n`-th grapheme boundary in `text` (0-based: n=0
+ * is the start = byte 0, n=grapheme_count is the end = byte length). -1 when ICU
+ * is unavailable, n is out of range, or the string is too long. Lets L2 map a
+ * caret index to a byte offset for selection/editing. */
+int64_t ruxen_canvas_grapheme_boundary_at(int64_t self, int64_t text, int64_t n) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s || n < 0) return -1;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return -1;
+    size_t len = strlen(s);
+    if (len > RXC_SEG_MAX) return -1;
+    if (len == 0) return (n == 0) ? 0 : -1;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(s, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return -1;
+
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_CHARACTER, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return -1; }
+
+    int64_t result = -1;
+    int idx = 0;
+    int32_t p = icu->ubrk_first(bi);   /* always 0 */
+    if (n == 0) { result = (int64_t)b2u[0]; }
+    while (result < 0 && (p = icu->ubrk_next(bi)) != RX_UBRK_DONE) {
+        idx++;
+        if (idx == (int)n) {
+            /* p is a UTF-16 unit offset in [0, u16n]; map to a UTF-8 byte offset.
+             * p == u16n is the end -> byte length. */
+            result = (p >= u16n) ? (int64_t)len : (int64_t)b2u[p];
+        }
+    }
+    icu->ubrk_close(bi);
+    return result;
+}
+
+/* True (1) when ICU segmentation is available (libicucore loaded + break-iterator
+ * symbols resolved). A capability probe for the grapheme / ICU-wrap features. */
+int64_t ruxen_canvas_icu_available(int64_t self) {
+    (void)self;
+    return rx_icu()->available ? 1 : 0;
 }
 
 /* ---- event queue ---- */

@@ -37,6 +37,22 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   automatically for a color typeface under a normal fill paint. Pixel-pinned in
   `tests/canvas_color_emoji.rx`: a grinning-face emoji renders with multiple
   distinct colors and non-white ink (the anti-monochrome / anti-tofu assertion).
+- **ICU segmentation — grapheme boundaries + line-break wrap (Phase 3 — text
+  i18n).** `Canvas#grapheme_count` / `#grapheme_boundary_at` (UTF-8 byte offsets,
+  for L2's caret/selection — an emoji+ZWJ family sequence is ONE grapheme),
+  `Canvas#draw_paragraph_icu` / `#measure_paragraph_icu[_width]` (a paragraph wrap
+  that breaks at ICU line-break opportunities and renders each line with font
+  fallback, so CJK — no spaces — wraps at character boundaries instead of
+  overflowing), and `Canvas#icu_available?`. **NO new dependency:** the system
+  `/usr/lib/libicucore.A.dylib` is dlopen'd. It has NO on-disk file on modern macOS
+  (dyld-shared-cache only), so the symbol check is a runtime dlsym probe, not `nm`;
+  on this host the BARE `ubrk_*` names resolve (Apple re-exports the unsuffixed
+  symbols), and the loader scans a version-suffix range (`_70.._78`) as a
+  forward-compat hedge. ICU works in UTF-16, so the input UTF-8 is converted with a
+  parallel UTF-16-unit → UTF-8-byte offset map, so boundaries returned to L2 are
+  byte offsets. ICU + fallback only (clean Err / 0 otherwise; the greedy-whitespace
+  wrap stays the fallback). Pinned in `tests/canvas_segmentation.rx`. ADR:
+  `docs/decisions/text-fallback.md`.
 - **Native file dialogs (macOS) — `Window.open_file_dialog` /
   `Window.save_file_dialog` (Phase 2).** A real **NSOpenPanel / NSSavePanel** driven
   through the objc runtime via `dlopen` (`objc_getClass` + `objc_msgSend`,

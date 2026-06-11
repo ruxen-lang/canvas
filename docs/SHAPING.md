@@ -79,11 +79,18 @@ silent wrong render). The font is selected by **file path** this round.
   tighter, ffi 1.8px tighter, textblob inked).
 
 **Deferred (the follow-ups to "full" international text):**
-- **Bidi + line-break + grapheme segmentation (ICU).** Multi-directional
-  paragraphs and Unicode line-breaking need ICU (large, build-heavy). The shaped
-  paragraph path still uses **greedy whitespace** word-wrap (not ICU line-break
-  tables), and shapes each line with one direction; full bidi reordering of
-  mixed-direction text is not yet done. This is the last piece for "full"
+- **Line-break + grapheme segmentation (ICU) — LANDED (Phase 3).** No new
+  dependency: the system `libicucore` (macOS) is dlopen'd (bare `ubrk_*` names, a
+  suffix-scan forward-compat hedge). `Canvas#grapheme_count` /
+  `#grapheme_boundary_at` expose grapheme boundaries (UTF-8 byte offsets) for L2's
+  caret/selection; `Canvas#draw_paragraph_icu` wraps at ICU line-break
+  opportunities + font fallback, so CJK (no spaces) wraps at character boundaries.
+  See `docs/decisions/text-fallback.md`. The SHAPED-paragraph path
+  (`draw_paragraph_shaped`) still uses greedy-whitespace wrap — the ICU-wrap path
+  is the separate `draw_paragraph_icu` entry; unifying them is a follow-up.
+- **Bidi (ICU ubidi).** Full bidi reordering of mixed-direction text is not yet
+  done (`ubidi_*` is present in libicucore — verified). The shaped paragraph shapes
+  each line with one direction. This is the remaining piece for "full"
   international text.
 - **Font fallback (CJK / emoji) — LANDED (Phase 3).** `Canvas#draw_text_fallback`
   itemizes a string into runs by font coverage and renders each uncovered run

@@ -508,6 +508,55 @@ typedef struct {
  * process-wide singleton. Never NULL — check ->available. (runtime/skia_shim.c) */
 const RxHB *rx_hb(void);
 
+/* ---- ICU segmentation (libicucore, docs/decisions/text-fallback.md) ----
+ *
+ * Unicode line-break + grapheme-cluster boundaries, for: (a) wrapping a paragraph
+ * at proper break opportunities (so CJK — which has NO spaces — wraps at character
+ * boundaries instead of overflowing), and (b) grapheme boundaries exposed to L2
+ * for caret/selection (an emoji+ZWJ sequence is ONE grapheme).
+ *
+ * NO new dependency on macOS: /usr/lib/libicucore.A.dylib is already on the host.
+ * It has NO on-disk file (dyld-shared-cache only), so `nm` cannot see it — the
+ * symbol check is a runtime dlsym probe. On this host the BARE names resolve
+ * (Apple re-exports the unsuffixed `ubrk_*`); the loader falls back to scanning a
+ * small version-suffix range (_70.._78) if a future host only exports suffixed
+ * names. ICU works in UTF-16, so we convert the UTF-8 input with u_strFromUTF8.
+ *
+ * UBreakIteratorType (stable ABI): UBRK_CHARACTER=0 (grapheme), UBRK_WORD=1,
+ * UBRK_LINE=2, UBRK_SENTENCE=3. UBRK_DONE = -1 (no more boundaries). UErrorCode <
+ * 0 is a benign warning (e.g. U_USING_DEFAULT_WARNING), > 0 a real failure. */
+typedef struct UBreakIterator UBreakIterator;
+typedef uint16_t rx_uchar;     /* UChar — UTF-16 code unit */
+
+enum { RX_UBRK_CHARACTER = 0, RX_UBRK_LINE = 2 };
+enum { RX_UBRK_DONE = -1 };
+
+typedef UBreakIterator *(*pfn_ubrk_open)(int type, const char *locale,
+        const rx_uchar *text, int32_t text_len, int32_t *status);
+typedef void            (*pfn_ubrk_setText)(UBreakIterator *, const rx_uchar *text,
+        int32_t text_len, int32_t *status);
+typedef int32_t         (*pfn_ubrk_first)(UBreakIterator *);
+typedef int32_t         (*pfn_ubrk_next)(UBreakIterator *);
+typedef int32_t         (*pfn_ubrk_following)(UBreakIterator *, int32_t offset);
+typedef void            (*pfn_ubrk_close)(UBreakIterator *);
+typedef void            (*pfn_u_strFromUTF8)(rx_uchar *dest, int32_t dest_cap,
+        int32_t *dest_len, const char *src, int32_t src_len, int32_t *status);
+
+typedef struct {
+    int available;   /* 1 iff libicucore loaded and the break-iterator symbols resolved */
+    pfn_ubrk_open       ubrk_open;
+    pfn_ubrk_setText    ubrk_setText;
+    pfn_ubrk_first      ubrk_first;
+    pfn_ubrk_next       ubrk_next;
+    pfn_ubrk_following  ubrk_following;
+    pfn_ubrk_close      ubrk_close;
+    pfn_u_strFromUTF8   u_strFromUTF8;
+} RxICU;
+
+/* Lazily dlopen()s libicucore and resolves the table on first call; process-wide
+ * singleton. Never NULL — check ->available. (runtime/skia_shim.c) */
+const RxICU *rx_icu(void);
+
 /* ---- the resolved loader ---- */
 typedef struct {
     int available;    /* 1 iff the .so loaded and all required symbols resolved */

@@ -603,6 +603,65 @@ class Canvas
     self.raw.last_fallback_family_raw
   end
 
+  ## True when ICU Unicode segmentation is available (the system `libicucore` is
+  ## reachable). A capability probe; when false, `grapheme_count` /
+  ## `grapheme_boundary_at` return 0 / -1 and the paragraph wrap uses the
+  ## greedy-whitespace fallback (`docs/decisions/text-fallback.md`).
+  def icu_available? -> Bool
+    self.raw.icu_available_raw
+  end
+
+  ## The number of **grapheme clusters** (user-perceived characters) in `text`,
+  ## via ICU. An emoji+ZWJ sequence (e.g. a family emoji) counts as ONE; a
+  ## combining mark stays with its base. 0 when ICU is unavailable or the string
+  ## is empty. L2 uses this for caret/selection counts.
+  def grapheme_count(text: String) -> Int
+    self.raw.grapheme_count_raw(&text)
+  end
+
+  ## The UTF-8 **byte offset** of the `n`-th grapheme boundary in `text` (`n = 0`
+  ## is byte 0; `n = grapheme_count` is the byte length). -1 when ICU is
+  ## unavailable or `n` is out of range. L2 maps a caret index to a byte offset
+  ## for selection/editing with this.
+  def grapheme_boundary_at(text: String, n: Int) -> Int
+    self.raw.grapheme_boundary_at_raw(&text, n)
+  end
+
+  ## Draw a word-wrapped paragraph that breaks at **ICU Unicode line-break**
+  ## opportunities (not just whitespace) and renders each line with **font
+  ## fallback** — so CJK text (which has NO spaces) wraps at character boundaries
+  ## instead of overflowing the column, and mixed CJK/Latin/emoji renders. `(x, y)`
+  ## is the column left edge + first baseline; `align` 0 left / 1 center / 2 right.
+  ## Returns `Ok(total_height)` or `Err` when ICU or the fallback surface is
+  ## unavailable (callers then use `draw_paragraph_shaped` / `draw_paragraph`).
+  def var draw_paragraph_icu(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, align: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_icu_raw(&text, x as Float, y as Float, max_width as Float, size as Float, align, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph_icu")
+  end
+
+  ## Measure an ICU-line-broken, font-fallback paragraph without drawing: the
+  ## laid-out block height in pixels. 0 when ICU/fallback is unavailable. Pair with
+  ## `draw_paragraph_icu` to reserve space.
+  def measure_paragraph_icu(text: String, max_width: Float32, size: Float32) -> Int
+    let packed = self.raw.measure_paragraph_icu_raw(&text, max_width as Float, size as Float)
+    if packed < 0
+      0
+    else
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest wrapped line of an ICU-line-broken paragraph in pixels (the
+  ## block's content width). 0 when ICU/fallback is unavailable.
+  def measure_paragraph_icu_width(text: String, max_width: Float32, size: Float32) -> Int
+    let packed = self.raw.measure_paragraph_icu_raw(&text, max_width as Float, size as Float)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String
