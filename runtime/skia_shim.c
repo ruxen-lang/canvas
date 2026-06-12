@@ -28,8 +28,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <dlfcn.h>
 
+#include "rx_dlopen.h"   /* rx_dlopen / rx_dlsym / rx_dlclose — the loader seam
+                          * (POSIX dlfcn on macOS/Linux, LoadLibrary on _WIN32) */
 #include "rx_canvas_internal.h"
 #include "skia/skia_capi.h"
 
@@ -59,7 +60,7 @@ static int rxc_finite_pixels(double v) {
 
 /* ---- Skia loader (dlopen, lazy, process-wide singleton) ----
  *
- * libSkiaSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here — never
+ * libSkiaSharp is fetched by runtime/fetch_skia.sh and rx_dlopen()'d here — never
  * linked (see docs/SKIA.md). rx_skia() resolves the sk_* table on first call;
  * if the library or any required symbol is missing, ->available stays 0 and
  * every drawing op falls back to the software raster path below. */
@@ -69,7 +70,12 @@ static int rxc_finite_pixels(double v) {
  * macOS, .so on Linux — see runtime/fetch_skia.sh); we try the native name
  * first but always try both, so a cross-named or system-installed copy still
  * resolves. The system-loader (no path) form uses the same names. */
-#if defined(__APPLE__)
+#if defined(_WIN32)
+/* Windows (EXPERIMENTAL — compiles-untested-until-CI, docs/ROADMAP.md Phase 4):
+ * the NuGet member is runtimes/win-<arch>/native/libSkiaSharp.dll; fetch_skia.sh
+ * installs it under that basename. */
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.dll", "libSkiaSharp.so" };
+#elif defined(__APPLE__)
 static const char *const rx_skia_basenames[] = { "libSkiaSharp.dylib", "libSkiaSharp.so" };
 #else
 static const char *const rx_skia_basenames[] = { "libSkiaSharp.so", "libSkiaSharp.dylib" };
@@ -110,10 +116,10 @@ static void *rx_dlopen_exe_relative(const char *basename) {
     if (!rx_exe_dir(dir, sizeof(dir))) return NULL;
     char path[4096];
     snprintf(path, sizeof(path), "%s/../Frameworks/%s", dir, basename);
-    void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (h) return h;
     snprintf(path, sizeof(path), "%s/%s", dir, basename);
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    return rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
 }
 #else
 static void *rx_dlopen_exe_relative(const char *basename) { (void)basename; return NULL; }
@@ -125,7 +131,7 @@ static void *rx_skia_dlopen_in_dir(const char *dir) {
     char path[4096];
     for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
         snprintf(path, sizeof(path), "%s/%s", dir, rx_skia_basenames[i]);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
     return NULL;
@@ -138,7 +144,7 @@ static void *rx_skia_dlopen(void) {
     const char *env = getenv("RUXEN_CANVAS_SKIA");
     if (env && env[0]) {
         /* An explicit override is a full path (no basename guessing). */
-        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
     /* A SHIPPED app prefers the dylib it CARRIES (a known, SHA-verified version)
@@ -161,7 +167,7 @@ static void *rx_skia_dlopen(void) {
     }
     /* Fall back to the system loader (LD_LIBRARY_PATH / DYLD path / ldconfig). */
     for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
-        void *h = dlopen(rx_skia_basenames[i], RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_dlopen(rx_skia_basenames[i], RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
     return NULL;
@@ -191,11 +197,11 @@ const RxSkia *rx_skia(void) {
     int ok = 1;
 #define RX_SK_REQUIRED(field, sym)                                  \
     do {                                                            \
-        *(void **)(&skia.field) = dlsym(lib, sym);                  \
+        *(void **)(&skia.field) = rx_dlsym(lib, sym);                  \
         if (!skia.field) ok = 0;                                    \
     } while (0)
 #define RX_SK_OPTIONAL(field, sym)                                  \
-    do { *(void **)(&skia.field) = dlsym(lib, sym); } while (0)
+    do { *(void **)(&skia.field) = rx_dlsym(lib, sym); } while (0)
 
     RX_SK_REQUIRED(surface_new_raster_direct, "sk_surface_new_raster_direct");
     RX_SK_REQUIRED(surface_get_canvas,        "sk_surface_get_canvas");
@@ -397,39 +403,68 @@ const RxSkia *rx_skia(void) {
 
 /* ---- HarfBuzz loader (text shaping, docs/SHAPING.md) ----
  *
- * libHarfBuzzSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here —
+ * libHarfBuzzSharp is fetched by runtime/fetch_skia.sh and rx_dlopen()'d here —
  * never linked, exactly like Skia/SDL. rx_hb() resolves the hb_* table on first
  * call; if the library or any required symbol is missing, ->available stays 0
  * and the shaped-text ops report a clean Err (the non-shaped path is unaffected).
  * Process-wide singleton. */
+/* HarfBuzz basenames in platform-preference order — same host-aware discipline as
+ * rx_skia_basenames. fetch_skia.sh installs the platform's convention into the
+ * cache (.dylib on macOS, .so on Linux, .dll on Windows); we try the native name
+ * first but always try the others, so a cross-named copy still resolves. The
+ * PRIOR loader hard-coded `.dylib` in every cache/HOME probe and only tried `.so`
+ * as the last system-loader fallback — so on Linux the fetched
+ * `~/.cache/ruxen-canvas/libHarfBuzzSharp.so` was NEVER found and shaping stayed
+ * silently unavailable. (Phase-4 Linux fix.) */
+#if defined(_WIN32)
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.dll", "libHarfBuzzSharp.so" };
+#elif defined(__APPLE__)
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.dylib", "libHarfBuzzSharp.so" };
+#else
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.so", "libHarfBuzzSharp.dylib" };
+#endif
+#define RX_HB_NBASENAMES (int)(sizeof(rx_hb_basenames) / sizeof(rx_hb_basenames[0]))
+
+/* rx_dlopen each basename inside `dir` (absolute), first that loads wins, or NULL. */
+static void *rx_hb_dlopen_in_dir(const char *dir) {
+    char path[4096];
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, rx_hb_basenames[i]);
+        void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
+}
+
 static void *rx_hb_dlopen(void) {
     const char *env = getenv("RUXEN_CANVAS_HARFBUZZ");
     if (env && env[0]) {
-        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
-    /* Bundled-app probe (packaging.md): the carried dylib wins over a dev cache. */
-    {
-        void *h = rx_dlopen_exe_relative("libHarfBuzzSharp.dylib");
-        if (!h) h = rx_dlopen_exe_relative("libHarfBuzzSharp.so");
+    /* Bundled-app probe (packaging.md): the carried lib wins over a dev cache. */
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        void *h = rx_dlopen_exe_relative(rx_hb_basenames[i]);
         if (h) return h;
     }
-    char path[4096];
     const char *cache = getenv("RUXEN_CANVAS_CACHE");
     if (cache && cache[0]) {
-        snprintf(path, sizeof(path), "%s/libHarfBuzzSharp.dylib", cache);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_hb_dlopen_in_dir(cache);
         if (h) return h;
     }
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libHarfBuzzSharp.dylib", home);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s/.cache/ruxen-canvas", home);
+        void *h = rx_hb_dlopen_in_dir(dir);
         if (h) return h;
     }
-    void *h = dlopen("libHarfBuzzSharp.dylib", RTLD_NOW | RTLD_LOCAL);
-    if (h) return h;
-    return dlopen("libHarfBuzzSharp.so", RTLD_NOW | RTLD_LOCAL);
+    /* System loader (LD_LIBRARY_PATH / DYLD path / PATH on Windows). */
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        void *h = rx_dlopen(rx_hb_basenames[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
 }
 
 const RxHB *rx_hb(void) {
@@ -444,7 +479,7 @@ const RxHB *rx_hb(void) {
     int ok = 1;
 #define RX_HB_REQ(field, sym)                                  \
     do {                                                       \
-        *(void **)(&hb.field) = dlsym(lib, sym);               \
+        *(void **)(&hb.field) = rx_dlsym(lib, sym);               \
         if (!hb.field) ok = 0;                                 \
     } while (0)
     RX_HB_REQ(blob_create_from_file,             "hb_blob_create_from_file_or_fail");
@@ -471,41 +506,57 @@ const RxHB *rx_hb(void) {
 
 /* ---- ICU loader (segmentation, docs/decisions/text-fallback.md) ----
  *
- * /usr/lib/libicucore.A.dylib is already on macOS (dyld-shared-cache only — no
- * on-disk file, so `nm` can't see it; the symbol check is THIS runtime dlsym).
- * On this host the BARE `ubrk_*` names resolve (Apple re-exports the unsuffixed
- * symbols); the resolver falls back to scanning a small version-suffix range if a
- * future host only exports suffixed names (the documented forward-compat hedge).
- * Process-wide singleton; ->available 0 -> ICU features report unavailable and the
- * greedy-whitespace wrap stays the fallback (never a wrong wrap). */
-static void *rx_icu_dlopen(void) {
-    const char *env = getenv("RUXEN_CANVAS_ICU");
-    if (env && env[0]) {
-        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
-        if (h) return h;
-    }
-    void *h = dlopen("/usr/lib/libicucore.A.dylib", RTLD_NOW | RTLD_LOCAL);
-    if (h) return h;
-    h = dlopen("libicucore.dylib", RTLD_NOW | RTLD_LOCAL);
-    if (h) return h;
-    /* Linux fallback (a system ICU); the suffix scan in rx_icu_sym handles the
-     * versioned names common there. */
-    return dlopen("libicuuc.so", RTLD_NOW | RTLD_LOCAL);
+ * TWO platforms, two symbol-naming regimes:
+ *
+ *  - macOS: /usr/lib/libicucore.A.dylib is already present (dyld-shared-cache
+ *    only — no on-disk file, so `nm` can't see it; the symbol check is THIS
+ *    runtime dlsym). Apple re-exports the BARE `ubrk_*` / `ubidi_*` names, so the
+ *    unsuffixed dlsym resolves and ALL of ICU lives in one library handle.
+ *
+ *  - Linux: the system ICU exports VERSION-SUFFIXED symbols (`ubrk_open_74`,
+ *    `ubidi_open_74`, …) from VERSIONED sonames (`libicuuc.so.74`). The
+ *    unversioned `.so` is a -dev symlink that a runtime-only image (Debian slim,
+ *    most CI/containers) does NOT ship, so we scan a range of majors. ICU is also
+ *    SPLIT across two libraries there: `ubrk_*` live in libicuuc, but `ubidi_*`
+ *    may live in libicuuc OR libicui18n depending on the build, so we open BOTH
+ *    and resolve each symbol against whichever has it (icu.lib_uc / icu.lib_i18n).
+ *
+ * The suffix and the soname must AGREE (you cannot dlsym `ubrk_open_72` from a
+ * `.so.74`), so on Linux we DISCOVER the major once by probing a sentinel symbol,
+ * then bind every symbol with that one major. A miss -> ->available 0 -> ICU
+ * features report unavailable and the greedy-whitespace wrap stays the fallback
+ * (never a wrong wrap). Process-wide singleton. */
+
+/* The ICU major-version range we scan on Linux (and for the macOS suffix hedge).
+ * 66 ≈ Ubuntu 20.04 / Debian 11; the upper bound stays ahead of current releases.
+ * The DISCOVERED major (Linux) is cached so every symbol uses the matching suffix. */
+#define RX_ICU_MAJOR_MIN 66
+#define RX_ICU_MAJOR_MAX 80
+static int s_icu_major = 0;   /* 0 = bare names (macOS); >0 = the Linux suffix */
+
+/* dlsym a symbol applying the discovered suffix regime: bare name when
+ * s_icu_major==0 (macOS), else `<base>_<major>` (Linux). Returns NULL on a miss. */
+static void *rx_icu_dlsym(void *lib, const char *base) {
+    if (!lib) return NULL;
+    if (s_icu_major == 0) return rx_dlsym(lib, base);   /* macOS: bare */
+    char name[80];
+    snprintf(name, sizeof(name), "%s_%d", base, s_icu_major);
+    return rx_dlsym(lib, name);
 }
 
-/* Resolve an ICU symbol: try the BARE name first (Apple's libicucore), then a
- * small version-suffix scan (_70.._78, covering ICU 70-78 ≈ macOS 13-16+ and most
- * recent Linux ICU). The first hit wins. Returns NULL if none resolve. */
-static void *rx_icu_sym(void *lib, const char *base) {
-    void *s = dlsym(lib, base);
-    if (s) return s;
+/* Open the macOS libicucore, or NULL. */
+static void *rx_icu_dlopen_macos(void) {
+    void *h = rx_dlopen("/usr/lib/libicucore.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    return rx_dlopen("libicucore.dylib", RTLD_NOW | RTLD_LOCAL);
+}
+
+/* Open a versioned Linux soname `<stem>.so.<major>` (e.g. libicuuc.so.74), or
+ * NULL. dlopen of a bare soname searches the loader's library path. */
+static void *rx_icu_dlopen_soname(const char *stem, int major) {
     char name[64];
-    for (int v = 70; v <= 78; v++) {
-        snprintf(name, sizeof(name), "%s_%d", base, v);
-        s = dlsym(lib, name);
-        if (s) return s;
-    }
-    return NULL;
+    snprintf(name, sizeof(name), "%s.so.%d", stem, major);
+    return rx_dlopen(name, RTLD_NOW | RTLD_LOCAL);
 }
 
 const RxICU *rx_icu(void) {
@@ -514,13 +565,64 @@ const RxICU *rx_icu(void) {
     if (initialized) return &icu;
     initialized = 1;
 
-    void *lib = rx_icu_dlopen();
-    if (!lib) return &icu;   /* not available; ICU features report unavailable */
+    void *lib_uc = NULL;     /* ubrk_* / u_strFromUTF8 (and macOS: everything) */
+    void *lib_i18n = NULL;   /* Linux: ubidi_* may live here instead of lib_uc  */
+
+    /* 1. Explicit override (an absolute path to one ICU library; bare names). */
+    const char *env = getenv("RUXEN_CANVAS_ICU");
+    if (env && env[0]) {
+        lib_uc = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        s_icu_major = 0;   /* an override is dlsym'd with bare names */
+    }
+
+    /* 2. macOS libicucore (bare symbols, one handle). */
+    if (!lib_uc) {
+        lib_uc = rx_icu_dlopen_macos();
+        if (lib_uc) s_icu_major = 0;
+    }
+
+    /* 3. Linux: discover the major by probing each `libicuuc.so.<N>` for the
+     *    suffixed sentinel `ubrk_open_<N>`. The first soname whose suffixed
+     *    sentinel resolves fixes BOTH the handle and the suffix; then open the
+     *    matching libicui18n.so.<N> for ubidi_* (best-effort — bidi is optional). */
+    if (!lib_uc) {
+        for (int v = RX_ICU_MAJOR_MAX; v >= RX_ICU_MAJOR_MIN; v--) {
+            void *cand = rx_icu_dlopen_soname("libicuuc", v);
+            if (!cand) continue;
+            char sentinel[64];
+            snprintf(sentinel, sizeof(sentinel), "ubrk_open_%d", v);
+            if (rx_dlsym(cand, sentinel)) { lib_uc = cand; s_icu_major = v; break; }
+            rx_dlclose(cand);   /* wrong major (no matching suffixed symbol) */
+        }
+        /* Last-ditch: the unversioned -dev symlink, if a dev image has it. The
+         * symbols there are STILL suffixed, so the suffix scan below needs a
+         * major — probe the same range against this one handle. */
+        if (!lib_uc) {
+            void *cand = rx_dlopen("libicuuc.so", RTLD_NOW | RTLD_LOCAL);
+            if (cand) {
+                for (int v = RX_ICU_MAJOR_MAX; v >= RX_ICU_MAJOR_MIN; v--) {
+                    char sentinel[64];
+                    snprintf(sentinel, sizeof(sentinel), "ubrk_open_%d", v);
+                    if (rx_dlsym(cand, sentinel)) { lib_uc = cand; s_icu_major = v; break; }
+                }
+                /* Some dev builds expose BARE names from the .so symlink. */
+                if (!lib_uc && rx_dlsym(cand, "ubrk_open")) { lib_uc = cand; s_icu_major = 0; }
+                if (!lib_uc) rx_dlclose(cand);
+            }
+        }
+        /* Open the companion i18n library at the discovered major for ubidi_*. */
+        if (lib_uc && s_icu_major > 0)
+            lib_i18n = rx_icu_dlopen_soname("libicui18n", s_icu_major);
+    }
+
+    if (!lib_uc) return &icu;   /* not available; ICU features report unavailable */
+    icu.lib_uc   = lib_uc;
+    icu.lib_i18n = lib_i18n;
 
     int ok = 1;
 #define RX_ICU_REQ(field, sym)                                  \
     do {                                                        \
-        *(void **)(&icu.field) = rx_icu_sym(lib, sym);          \
+        *(void **)(&icu.field) = rx_icu_dlsym(lib_uc, sym);     \
         if (!icu.field) ok = 0;                                 \
     } while (0)
     RX_ICU_REQ(ubrk_open,      "ubrk_open");
@@ -532,12 +634,21 @@ const RxICU *rx_icu(void) {
     RX_ICU_REQ(u_strFromUTF8,  "u_strFromUTF8");
 #undef RX_ICU_REQ
 
-    /* bidi — OPTIONAL: a miss only disables the run-reorder path, not all of ICU. */
-    icu.ubidi_open         = (pfn_ubidi_open)        rx_icu_sym(lib, "ubidi_open");
-    icu.ubidi_setPara      = (pfn_ubidi_setPara)     rx_icu_sym(lib, "ubidi_setPara");
-    icu.ubidi_countRuns    = (pfn_ubidi_countRuns)   rx_icu_sym(lib, "ubidi_countRuns");
-    icu.ubidi_getVisualRun = (pfn_ubidi_getVisualRun)rx_icu_sym(lib, "ubidi_getVisualRun");
-    icu.ubidi_close        = (pfn_ubidi_close)       rx_icu_sym(lib, "ubidi_close");
+    /* bidi — OPTIONAL: a miss only disables the run-reorder path, not all of ICU.
+     * Resolve from libicuuc first (macOS, and Linux builds that keep ubidi there),
+     * then fall back to libicui18n (Linux distros that split it out). */
+#define RX_ICU_BIDI(field, sym)                                              \
+    do {                                                                     \
+        void *p = rx_icu_dlsym(lib_uc, sym);                                 \
+        if (!p && lib_i18n) p = rx_icu_dlsym(lib_i18n, sym);                 \
+        *(void **)(&icu.field) = p;                                          \
+    } while (0)
+    RX_ICU_BIDI(ubidi_open,         "ubidi_open");
+    RX_ICU_BIDI(ubidi_setPara,      "ubidi_setPara");
+    RX_ICU_BIDI(ubidi_countRuns,    "ubidi_countRuns");
+    RX_ICU_BIDI(ubidi_getVisualRun, "ubidi_getVisualRun");
+    RX_ICU_BIDI(ubidi_close,        "ubidi_close");
+#undef RX_ICU_BIDI
     icu.bidi_ok = (icu.ubidi_open && icu.ubidi_setPara && icu.ubidi_countRuns &&
                    icu.ubidi_getVisualRun && icu.ubidi_close) ? 1 : 0;
 
@@ -571,20 +682,20 @@ static const RxMetal *rx_metal(void) {
 
     /* Metal.framework: MTLCreateSystemDefaultDevice is a plain C function (it
      * does not appear in nm's exported list but dlsym resolves it). */
-    void *mtl = dlopen("/System/Library/Frameworks/Metal.framework/Metal",
+    void *mtl = rx_dlopen("/System/Library/Frameworks/Metal.framework/Metal",
                        RTLD_NOW | RTLD_GLOBAL);
     if (!mtl) return &m;
-    void *(*create_device)(void) = (void *(*)(void))dlsym(mtl, "MTLCreateSystemDefaultDevice");
+    void *(*create_device)(void) = (void *(*)(void))rx_dlsym(mtl, "MTLCreateSystemDefaultDevice");
     if (!create_device) return &m;
 
     /* Objective-C runtime: we need one no-arg message send ([device
      * newCommandQueue]). On arm64/x86_64 a simple id-returning, no-struct
      * objc_msgSend is called through a plain function-pointer cast. */
-    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
-    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    void *objc = rx_dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = rx_dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
     if (!objc) return &m;
-    void *(*msg_send)(void *, void *) = (void *(*)(void *, void *))dlsym(objc, "objc_msgSend");
-    void *(*sel_reg)(const char *)    = (void *(*)(const char *))dlsym(objc, "sel_registerName");
+    void *(*msg_send)(void *, void *) = (void *(*)(void *, void *))rx_dlsym(objc, "objc_msgSend");
+    void *(*sel_reg)(const char *)    = (void *(*)(const char *))rx_dlsym(objc, "sel_registerName");
     if (!msg_send || !sel_reg) return &m;
 
     void *device = create_device();
@@ -4371,14 +4482,19 @@ const char *rx_a11y_internal_node(int n, int *role, double *x, double *y,
                                   double *w, double *h, int64_t *id) {
     if (n < 0 || n >= rxc_a11y_count) {
         if (role) *role = -1;
-        if (x) *x = 0; if (y) *y = 0; if (w) *w = 0; if (h) *h = 0;
+        if (x) *x = 0;
+        if (y) *y = 0;
+        if (w) *w = 0;
+        if (h) *h = 0;
         if (id) *id = -1;
         return "";
     }
     const RxA11yNode *nd = &rxc_a11y_nodes[n];
     if (role) *role = nd->role;
-    if (x) *x = (double)nd->x; if (y) *y = (double)nd->y;
-    if (w) *w = (double)nd->w; if (h) *h = (double)nd->h;
+    if (x) *x = (double)nd->x;
+    if (y) *y = (double)nd->y;
+    if (w) *w = (double)nd->w;
+    if (h) *h = (double)nd->h;
     if (id) *id = nd->id;
     return nd->label;
 }

@@ -40,7 +40,7 @@ Tester.describe("Canvas.draw_text_shaped") do |t: &var Tester|
       Err(_) -> panic!("begin_frame failed")
     end
     let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
-    let res = c.draw_text_shaped("Shaping Works", 4.0f32, 28.0f32, 24.0f32, "/System/Library/Fonts/Supplemental/Arial.ttf", 0, white)
+    let res = c.draw_text_shaped("Shaping Works", 4.0f32, 28.0f32, 24.0f32, "tests/fixtures/LiberationSans.ttf", 0, white)
     let _2 = c.end_frame
 
     if on
@@ -87,7 +87,7 @@ Tester.describe("Canvas.measure_text_shaped kerning + ligatures") do |t: &var Te
       Err(_) -> panic!("create failed")
     end
     let on = c.shaping_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       # The decisive, face-independent kerning proof: shaping the PAIR "AV"
       # applies GPOS negative kerning, so it is strictly NARROWER than the sum of
@@ -111,7 +111,7 @@ Tester.describe("Canvas.measure_text_shaped kerning + ligatures") do |t: &var Te
       Err(_) -> panic!("create failed")
     end
     let on = c.shaping_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       # Arial maps "ffi" to a single ffi ligature glyph, narrower than 3 'f'
       # advances — a ligature can only happen via shaping, never naive placement.

@@ -36,16 +36,22 @@ nupkg_sha256_for_pkg() {
   case "$1" in
     skiasharp.nativeassets.linux) echo "fae0554059b1107ef7888e46c20bdfb548401ef7a7a6f7391ad4fadc7432d50a" ;;
     skiasharp.nativeassets.macos) echo "f7f2f539ce5bba337aa4a8d6eac25caf58cbdd12edf3f32ddcc98294e730cf2c" ;;
+    skiasharp.nativeassets.win32) echo "5a5698b1b4e1fdc9ffe9868df6874db5fa69f21a4de76ba71a01a542e9b43391" ;;
     *)                            echo "" ;;
   esac
 }
 
 # Expected sha256 of the extracted native binary, keyed by package member path.
+# Windows (win-*) members are pinned but EXPERIMENTAL — fetchable + verifiable from
+# any host, but the shim is compiles-untested-until-CI (docs/ROADMAP.md Phase 4).
 bin_sha256_for_member() {
   case "$1" in
-    runtimes/linux-x64/native/libSkiaSharp.so) echo "66c856eaf1a47a00b23204c30c6ee407987bf5086ecc0a1a6b4fd67526b0cd02" ;;
-    runtimes/osx/native/libSkiaSharp.dylib)    echo "e09f07ae1df62ded475351f56d8dc8366cd679043f28b65d9dee597a5fd0da6c" ;;
-    *)                                         echo "" ;;   # not sha-pinned yet
+    runtimes/linux-x64/native/libSkiaSharp.so)    echo "66c856eaf1a47a00b23204c30c6ee407987bf5086ecc0a1a6b4fd67526b0cd02" ;;
+    runtimes/linux-arm64/native/libSkiaSharp.so)  echo "87d2d56c49a9b1d1da618dfa20994ee213f752f9ada04e085703115162997aef" ;;
+    runtimes/osx/native/libSkiaSharp.dylib)       echo "e09f07ae1df62ded475351f56d8dc8366cd679043f28b65d9dee597a5fd0da6c" ;;
+    runtimes/win-x64/native/libSkiaSharp.dll)     echo "7dec3ba900ab353491e6446f0083739924c6f8dd668832e2f09d38ebffdbbe1c" ;;
+    runtimes/win-arm64/native/libSkiaSharp.dll)   echo "f7409fcfc3557e272d3e8df2dcd6f737ee5a68b09fdbc6d6ff8c9a3c24b2e36a" ;;
+    *)                                            echo "" ;;   # not sha-pinned yet
   esac
 }
 
@@ -71,6 +77,19 @@ case "$os" in
     member="runtimes/${RID}/native/libSkiaSharp.so"
     DEST_BASENAME="libSkiaSharp.so"
     ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    # Windows (EXPERIMENTAL, docs/ROADMAP.md Phase 4). Bash under Git-Bash / MSYS2
+    # reports MINGW*/MSYS*; the Skia native package for Windows is the .Win32
+    # variant (per-arch RID under runtimes/win-<arch>/native/libSkiaSharp.dll).
+    case "$arch" in
+      x86_64|amd64)   RID="win-x64"   ;;
+      aarch64|arm64)  RID="win-arm64" ;;
+      *) echo "fetch_skia: unsupported Windows arch '$arch'" >&2; exit 1 ;;
+    esac
+    SKIA_PKG="skiasharp.nativeassets.win32"
+    member="runtimes/${RID}/native/libSkiaSharp.dll"
+    DEST_BASENAME="libSkiaSharp.dll"
+    ;;
   *)
     echo "fetch_skia: unsupported OS '$os'" >&2; exit 1 ;;
 esac
@@ -79,19 +98,26 @@ esac
 # Latin kerning/ligatures + RTL/complex shaping needs a shaper. The fetched
 # libSkiaSharp ships NO SkShaper, so we fetch HarfBuzzSharp (HarfBuzz's flat
 # `hb_*` C API) — the shim shapes a run with HarfBuzz and renders the positioned
-# glyphs with Skia's textblob API. Same fetch+dlopen+SHA-pin discipline. macOS
-# only for now (this is where Skia is active); Linux shaping is a later wire-up.
+# glyphs with Skia's textblob API. Same fetch+dlopen+SHA-pin discipline. Host-aware:
+# macOS universal dylib + Linux per-RID .so, both SHA-pinned (Phase-4: Linux shaping
+# now wired so the container suite's shaping pins run on-platform).
 HARFBUZZ_VER="8.3.1.5"
 nupkg_sha256_for_pkg_hb() {
   case "$1" in
     harfbuzzsharp.nativeassets.macos) echo "9f733df17a45794db221a592ee23b574302bbe354254656fa4dd495c4c9a104d" ;;
+    harfbuzzsharp.nativeassets.linux) echo "6b95b9cddec035d0a85accd18a29c42038ac7714d366a004494de7f0b9b66157" ;;
+    harfbuzzsharp.nativeassets.win32) echo "940856fef8c9373754e5443e21e7f00c716c91e44e6d062d3ffce4c63bab2bcd" ;;
     *)                                echo "" ;;
   esac
 }
 bin_sha256_for_member_hb() {
   case "$1" in
-    runtimes/osx/native/libHarfBuzzSharp.dylib) echo "f8e9ab02b74e68d151abc3781098c9201e57c392b827b40451515d42386d6b0d" ;;
-    *)                                          echo "" ;;
+    runtimes/osx/native/libHarfBuzzSharp.dylib)         echo "f8e9ab02b74e68d151abc3781098c9201e57c392b827b40451515d42386d6b0d" ;;
+    runtimes/linux-arm64/native/libHarfBuzzSharp.so)    echo "68fc5ef842ac0dbd57e8063a11de5bb2f3c2b5af530a2d4fa07a7cf5d6ea4259" ;;
+    runtimes/linux-x64/native/libHarfBuzzSharp.so)      echo "1d5c3afef13545bf34bf8f068b14e25ee619c3b6dee235c44e260fe61cb24018" ;;
+    runtimes/win-x64/native/libHarfBuzzSharp.dll)       echo "cf97ae00945e6f5290967ba4ff3051f1cd47a0758b7d9a7159fb352b33655d43" ;;
+    runtimes/win-arm64/native/libHarfBuzzSharp.dll)     echo "e8c9923c68c08e83f632e18fec2c9dd812f64e1e553e4b6702b5396b3834f821" ;;
+    *)                                                  echo "" ;;
   esac
 }
 
@@ -184,13 +210,31 @@ PY
 fetch_one "$SKIA_PKG" "$SKIA_VER" "$member" "$DEST_BASENAME" \
           "$NUPKG_SHA256" "$EXPECT_SO_SHA"
 
-# HarfBuzz (macOS only this round; a miss is non-fatal — shaping just stays
-# unavailable and the non-shaped text path remains the fallback).
-if [ "$os" = "Darwin" ]; then
-  hb_member="runtimes/osx/native/libHarfBuzzSharp.dylib"
-  fetch_one "harfbuzzsharp.nativeassets.macos" "$HARFBUZZ_VER" "$hb_member" \
-            "libHarfBuzzSharp.dylib" \
-            "$(nupkg_sha256_for_pkg_hb harfbuzzsharp.nativeassets.macos)" \
+# HarfBuzz (host-aware; a miss is non-fatal — shaping just stays unavailable and
+# the non-shaped text path remains the fallback). The package + member + install
+# basename mirror the Skia host-selection above.
+case "$os" in
+  Darwin)
+    HB_PKG="harfbuzzsharp.nativeassets.macos"
+    hb_member="runtimes/osx/native/libHarfBuzzSharp.dylib"
+    HB_BASENAME="libHarfBuzzSharp.dylib"
+    ;;
+  Linux)
+    HB_PKG="harfbuzzsharp.nativeassets.linux"
+    hb_member="runtimes/${RID}/native/libHarfBuzzSharp.so"
+    HB_BASENAME="libHarfBuzzSharp.so"
+    ;;
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    HB_PKG="harfbuzzsharp.nativeassets.win32"
+    hb_member="runtimes/${RID}/native/libHarfBuzzSharp.dll"
+    HB_BASENAME="libHarfBuzzSharp.dll"
+    ;;
+  *)
+    HB_PKG="" ;;
+esac
+if [ -n "$HB_PKG" ]; then
+  fetch_one "$HB_PKG" "$HARFBUZZ_VER" "$hb_member" "$HB_BASENAME" \
+            "$(nupkg_sha256_for_pkg_hb "$HB_PKG")" \
             "$(bin_sha256_for_member_hb "$hb_member")" \
     || echo "fetch_skia: HarfBuzz fetch failed — shaping will be unavailable (non-fatal)" >&2
 fi

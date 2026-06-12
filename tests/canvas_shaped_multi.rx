@@ -16,7 +16,7 @@ Tester.describe("Canvas.measure_text_shaped_multi mixed script") do |t: &var Tes
       Err(_) -> panic!("create failed")
     end
     let on = c.shaping_available? && c.fallback_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       # "Hi你好" splits into a Latin run (shaped) + a CJK run (fallback). Its width
       # must exceed BOTH "Hi" (Latin only) and "你好" (CJK only) — proving both runs
@@ -41,7 +41,7 @@ Tester.describe("Canvas.measure_text_shaped_multi mixed script") do |t: &var Tes
       Err(_) -> panic!("create failed")
     end
     let on = c.shaping_available? && c.fallback_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       # The multi path routes a covered Latin run through the SHAPER, so kerning
       # still applies: "AV" is tighter than "A"+"V" measured separately.
@@ -65,7 +65,7 @@ Tester.describe("Canvas.draw_text_shaped_multi renders both scripts") do |t: &va
     let on = c.shaping_available? && c.fallback_available?
     let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
     let white = Color.rgb(255u8, 255u8, 255u8)
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
 
     match c.begin_frame
       Ok(_)  -> nil

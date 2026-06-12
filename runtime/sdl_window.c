@@ -1,7 +1,7 @@
 /*
  * sdl_window.c — a real OS window for the canvas software backend.
  *
- * Strategy: dlopen("libSDL2-2.0.so.0") at runtime with self-declared
+ * Strategy: rx_dlopen("libSDL2-2.0.so.0") at runtime with self-declared
  * prototypes. The SDL2 *runtime* library ships with every desktop distro;
  * the -devel headers do not — so this file declares the dozen symbols it
  * needs itself and never includes <SDL2/SDL.h>. No link-time dependency,
@@ -35,8 +35,10 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdlib.h>
-#include <dlfcn.h>
 #include <string.h>
+
+#include "rx_dlopen.h"   /* rx_dlopen / rx_dlsym / rx_dlclose — the loader seam
+                          * (POSIX dlfcn on macOS/Linux, LoadLibrary on _WIN32) */
 
 /* Ruxen's String runtime constructor (library/std/string/runtime/string.c): a
  * Ruxen String IS a malloc'd NUL-terminated char*, so a clipboard string returned
@@ -439,7 +441,7 @@ static int rx_win_count(void) {
     return n;
 }
 
-static void *sym(const char *name) { return dlsym(s_lib, name); }
+static void *sym(const char *name) { return rx_dlsym(s_lib, name); }
 
 /* Begin SDL text-input mode so the pump receives SDL_TEXTINPUT (layout/shift-
  * correct UTF-8) for printable typing. Called once after a window is created;
@@ -457,7 +459,7 @@ static void rx_enable_file_drop(void) {
 
 static int load_sdl(void) {
     if (s_lib) return 1;
-    /* Host-aware: try a candidate list, first that dlopen()s wins. macOS does
+    /* Host-aware: try a candidate list, first that rx_dlopen()s wins. macOS does
      * NOT have a standalone SDL2 on the default loader path and dlopen does not
      * search Homebrew dirs, so we list the macOS dylib names + the Homebrew full
      * paths (arm64 /opt/homebrew, x86_64 /usr/local) + the framework, and keep
@@ -465,17 +467,21 @@ static int load_sdl(void) {
      * miss on ALL candidates → return 0 → clean headless fallback (the
      * framebuffer/event path keeps working). */
     static const char *const sdl_candidates[] = {
+#if defined(_WIN32)
+        "SDL2.dll",                                     /* Windows (EXPERIMENTAL) */
+#else
         "libSDL2-2.0.0.dylib",                          /* macOS, on the path */
         "libSDL2.dylib",
         "/opt/homebrew/lib/libSDL2-2.0.0.dylib",        /* arm64 Homebrew */
         "/usr/local/lib/libSDL2-2.0.0.dylib",           /* x86_64 Homebrew */
         "/Library/Frameworks/SDL2.framework/SDL2",      /* framework install */
         "libSDL2-2.0.so.0",                             /* Linux */
+#endif
     };
     const char *env = getenv("RUXEN_CANVAS_SDL2");
-    if (env && env[0]) s_lib = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+    if (env && env[0]) s_lib = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
     for (size_t i = 0; !s_lib && i < sizeof(sdl_candidates) / sizeof(sdl_candidates[0]); i++) {
-        s_lib = dlopen(sdl_candidates[i], RTLD_NOW | RTLD_LOCAL);
+        s_lib = rx_dlopen(sdl_candidates[i], RTLD_NOW | RTLD_LOCAL);
     }
     if (!s_lib) return 0;
     s_Init           = (int (*)(uint32_t))sym("SDL_Init");
@@ -512,7 +518,7 @@ static int load_sdl(void) {
         !s_PollEvent) {
         /* never leave a half-initialized handle: the s_lib guard above
          * would otherwise report success with NULL function pointers */
-        dlclose(s_lib);
+        rx_dlclose(s_lib);
         s_lib = NULL;
         return 0;
     }
@@ -548,13 +554,13 @@ static int load_sdl(void) {
  * through message sends. A miss forecloses windowed Metal. */
 static int metal_objc_init(void) {
     if (s_metal_objc_ok) return 1;
-    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
-    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    void *objc = rx_dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = rx_dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
     if (!objc) return 0;
-    s_objc_msgSend = (void *(*)(void *, void *))dlsym(objc, "objc_msgSend");
-    s_sel          = (void *(*)(const char *))dlsym(objc, "sel_registerName");
+    s_objc_msgSend = (void *(*)(void *, void *))rx_dlsym(objc, "objc_msgSend");
+    s_sel          = (void *(*)(const char *))rx_dlsym(objc, "sel_registerName");
     /* QuartzCore must be loaded so CAMetalLayer + its selectors are present. */
-    dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW | RTLD_GLOBAL);
+    rx_dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW | RTLD_GLOBAL);
     s_metal_objc_ok = (s_objc_msgSend && s_sel) ? 1 : 0;
     return s_metal_objc_ok;
 }
@@ -600,14 +606,14 @@ static int rx_window_allowed(void);   /* fwd: the fork gate (shared with windowi
 static int rx_appkit_init(void) {
     if (s_appkit_ok) return 1;
     if (!metal_objc_init()) return 0;   /* gives us objc_msgSend + sel_registerName */
-    void *objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
-    if (!objc) objc = dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    void *objc = rx_dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = rx_dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
     if (!objc) return 0;
-    s_objc_getClass = (void *(*)(const char *))dlsym(objc, "objc_getClass");
+    s_objc_getClass = (void *(*)(const char *))rx_dlsym(objc, "objc_getClass");
     if (!s_objc_getClass) return 0;
     /* AppKit must be loaded so NSOpenPanel / NSSavePanel / NSApplication are
      * registered with the runtime before objc_getClass can find them. */
-    if (!dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW | RTLD_GLOBAL))
+    if (!rx_dlopen("/System/Library/Frameworks/AppKit.framework/AppKit", RTLD_NOW | RTLD_GLOBAL))
         return 0;
     s_appkit_ok = 1;
     return 1;

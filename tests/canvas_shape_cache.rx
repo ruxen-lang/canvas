@@ -15,7 +15,7 @@ Tester.describe("Canvas.shape_cache_hits") do |t: &var Tester|
       Err(_) -> panic!("create failed")
     end
     let on = c.shaping_available? && c.fallback_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       # First measure populates the cache (a miss); the second identical measure
       # must register at least one more hit than the first.

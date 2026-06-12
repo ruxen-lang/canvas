@@ -1,0 +1,83 @@
+# Dockerfile.linux-verify — the Linux verification ENVIRONMENT for canvas (Phase 4).
+#
+# This image carries ONLY the toolchain needed to build ruxen from source and run
+# the canvas pin suite on Linux: a Rust toolchain, a C compiler, system ICU, SDL2,
+# and the fetch tools (curl/unzip). It deliberately carries NO source — ruxen and
+# canvas are BIND-MOUNTED read-only at run time, so the same image verifies any
+# working tree without a rebuild.
+#
+# Build the environment image (arm64 native on an Apple-silicon host with Docker):
+#   docker build -f Dockerfile.linux-verify -t ruxen-canvas-linux-verify .
+#
+# Run the verification (ruxen + canvas mounted ro; the script does the rest):
+#   docker run --rm \
+#     -v /ABS/PATH/TO/ruxen:/ruxen:ro \
+#     -v /ABS/PATH/TO/canvas:/canvas:ro \
+#     ruxen-canvas-linux-verify
+#
+# The container's `ruxen test` result IS the Linux verification (Phase-4 headline).
+# linux_verify.sh copies the read-only sources into writable /tmp trees as needed
+# (cargo wants to write target/; the canvas cache lives under $HOME), so the mounts
+# stay ro and the host trees are never mutated.
+
+# Debian bookworm (arm64 native here) — a stable glibc base with current ICU 72.
+FROM debian:bookworm-slim
+
+# Non-interactive apt; keep the layer lean.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Toolchain:
+#   build-essential / clang   — the C shim compiler (cc) + a real linker for ruxen AOT
+#   curl ca-certificates unzip — fetch_skia.sh downloads + extracts the NuGet blobs
+#   libicu-dev                 — system ICU (libicuuc.so.NN / libicui18n.so.NN) for the
+#                                segmentation/bidi pins; -dev pulls the runtime sonames
+#   libsdl2-2.0-0              — SDL2 RUNTIME (dlopen'd by the shim); the dummy video
+#                                driver lets the clipboard/cursor probes run headless
+#   libfontconfig1             — REQUIRED transitive dep of the Linux libSkiaSharp.so
+#                                (the .so links fontconfig for system-font enumeration;
+#                                without it dlopen(libSkiaSharp.so) fails and Skia is
+#                                inactive — the macOS dylib uses Core Text instead, so
+#                                this is a Linux-ONLY runtime requirement; libfreetype6
+#                                + the dejavu base fonts arrive as its dependency). See
+#                                docs/SKIA.md / ROADMAP Phase-4 capability matrix.
+#   fonts-noto-cjk             — a CJK system font so the font-FALLBACK pin
+#                                (canvas_fallback: "你好" anti-tofu) finds real Han
+#                                glyphs via Skia's fontmgr. macOS has PingFang built
+#                                in; bare Debian has only Latin DejaVu, so the CJK
+#                                fallback would find nothing. The shaping/bidi pins use
+#                                a COMMITTED font fixture (tests/fixtures/LiberationSans.ttf)
+#                                instead, so they need no system font.
+#   git pkg-config             — install.sh tags the build from git; pkg-config for cc
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        clang \
+        curl \
+        ca-certificates \
+        unzip \
+        git \
+        pkg-config \
+        libicu-dev \
+        libsdl2-2.0-0 \
+        libfontconfig1 \
+        fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust via rustup (pinned to a recent stable; ruxen's workspace needs rust >= 1.91).
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/opt/ruxen/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --default-toolchain stable --profile minimal \
+    && rustc --version && cargo --version
+
+# Mount points for the bind-mounted sources (populated at `docker run` time).
+RUN mkdir -p /ruxen /canvas /opt/ruxen
+WORKDIR /canvas
+
+# The verification entrypoint reads the script from the mounted canvas tree (so a
+# script change needs no image rebuild). RUXEN_SRC/CANVAS_DIR default to the mounts.
+ENV RUXEN_SRC=/ruxen \
+    CANVAS_DIR=/canvas \
+    RUXEN_PREFIX=/opt/ruxen \
+    SDL_VIDEODRIVER=dummy
+CMD ["bash", "/canvas/scripts/linux_verify.sh"]

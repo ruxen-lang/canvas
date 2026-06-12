@@ -560,6 +560,13 @@ typedef void            (*pfn_u_strFromUTF8)(rx_uchar *dest, int32_t dest_cap,
 
 typedef struct {
     int available;   /* 1 iff libicucore loaded and the break-iterator symbols resolved */
+    /* The open library handle(s). On macOS lib_uc is libicucore and lib_i18n is
+     * NULL (everything lives in one handle). On Linux lib_uc is libicuuc.so.<N>
+     * and lib_i18n is libicui18n.so.<N> (ubidi_* may live in either — the loader
+     * resolves each symbol against whichever exports it). Retained for the
+     * process lifetime (ICU is a never-freed singleton); never dlclose'd. */
+    void *lib_uc;
+    void *lib_i18n;
     pfn_ubrk_open       ubrk_open;
     pfn_ubrk_setText    ubrk_setText;
     pfn_ubrk_first      ubrk_first;

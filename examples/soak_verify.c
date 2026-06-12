@@ -24,7 +24,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <mach/mach.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>      /* task_info — RSS on macOS */
+#elif defined(__linux__)
+#include <stdio.h>          /* /proc/self/statm — RSS on Linux */
+#include <unistd.h>         /* sysconf(_SC_PAGESIZE) */
+#endif
 
 /* ---- the Ruxen String runtime constructor the shim expects (a Ruxen String IS a
  * malloc'd char*); the soak provides a faithful stub so the shim links standalone.
@@ -70,11 +75,26 @@ extern int64_t ruxen_canvas_skia_available(int64_t self);
 enum { EV_POINTER_MOVE = 0, EV_TEXT_EDITING = 8, EV_FILE_DROP = 9 };
 
 static long rss_kb(void) {
+#if defined(__APPLE__)
     struct mach_task_basic_info info;
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
                   (task_info_t)&info, &count) != KERN_SUCCESS) return -1;
     return (long)(info.resident_size / 1024);
+#elif defined(__linux__)
+    /* /proc/self/statm field 2 is resident-set size in PAGES. Multiply by the
+     * page size for bytes, then to KiB — the same unit the macOS arm returns. */
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return -1;
+    long size_pages = 0, resident_pages = 0;
+    int got = fscanf(f, "%ld %ld", &size_pages, &resident_pages);
+    fclose(f);
+    if (got != 2) return -1;
+    long page_kb = sysconf(_SC_PAGESIZE) / 1024;
+    return resident_pages * page_kb;
+#else
+    return -1;   /* unknown platform: RSS unavailable (the soak still runs) */
+#endif
 }
 
 /* One representative unit of work: a frame of drawing + text-cache churn (VARYING

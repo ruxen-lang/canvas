@@ -31,7 +31,7 @@ Tester.describe("Canvas.draw_text_bidi mixed direction") do |t: &var Tester|
     let on = c.bidi_available?
     let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
     let white = Color.rgb(255u8, 255u8, 255u8)
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     # "abc שלום 123" — Latin, a Hebrew (RTL) word, and digits. ICU resolves the
     # visual order; we shape each run with its direction.
     let s = "abc שלום 123"
@@ -88,7 +88,7 @@ Tester.describe("Canvas.draw_text_bidi mixed direction") do |t: &var Tester|
       Err(_) -> panic!("create failed")
     end
     let on = c.bidi_available?
-    let arial = "/System/Library/Fonts/Supplemental/Arial.ttf"
+    let arial = "tests/fixtures/LiberationSans.ttf"
     if on
       let mixed = c.measure_text_bidi("abc שלום", 22.0f32, arial.clone)
       let latin = c.measure_text_bidi("abc", 22.0f32, arial.clone)
