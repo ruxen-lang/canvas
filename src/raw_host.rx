@@ -8,24 +8,35 @@ class RawHost
     def width as "ruxen_canvas_host_width"(self) -> Int
     def height as "ruxen_canvas_host_height"(self) -> Int
     def is_null as "ruxen_canvas_host_is_null"(self) -> Bool
+    # Identity: this host's machine-word handle as an Int (for bindings that take a
+    # host by value, e.g. RawImage.snapshot_of). Mirrors RawImage#ptr.
+    def handle as "ruxen_canvas_host_ptr"(self) -> Int
     def read_pixel as "ruxen_canvas_read_pixel"(self, x: Int, y: Int) -> Int
     def begin_frame_raw as "ruxen_canvas_begin_frame"(self) -> Int
     def end_frame_raw as "ruxen_canvas_end_frame"(self) -> Int
     def save_raw as "ruxen_canvas_save"(self) -> Int
     def restore_raw as "ruxen_canvas_restore"(self) -> Int
+    def save_layer_raw as "ruxen_canvas_save_layer"(self) -> Int
+    def save_layer_blur_raw as "ruxen_canvas_save_layer_blur"(self, sigma: Float) -> Int
+    def save_layer_alpha_raw as "ruxen_canvas_save_layer_alpha"(self, alpha: Int) -> Int
     def restore_to_count_raw as "ruxen_canvas_restore_to_count"(self, count: Int) -> Int
     def save_count_raw as "ruxen_canvas_save_count"(self) -> Int
     def translate_raw as "ruxen_canvas_translate"(self, dx: Float, dy: Float) -> Int
     def scale_raw as "ruxen_canvas_scale"(self, sx: Float, sy: Float) -> Int
     def rotate_raw as "ruxen_canvas_rotate"(self, degrees: Float) -> Int
+    def skew_raw as "ruxen_canvas_skew"(self, sx: Float, sy: Float) -> Int
+    def concat_raw as "ruxen_canvas_concat"(self, a: Float, b: Float, c: Float, d: Float, e: Float, f: Float) -> Int
     def clip_rect_raw as "ruxen_canvas_clip_rect"(self, x: Float, y: Float, w: Float, h: Float) -> Int
     def clip_round_rect_raw as "ruxen_canvas_clip_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float) -> Int
+    def set_blend_mode_raw as "ruxen_canvas_set_blend_mode"(self, mode: Int) -> Int
     def clear_raw as "ruxen_canvas_clear"(self, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_rect_raw as "ruxen_canvas_draw_rect"(self, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_circle_raw as "ruxen_canvas_draw_circle"(self, cx: Float, cy: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
     def draw_round_rect_raw as "ruxen_canvas_draw_round_rect"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, stroke_w: Float, argb: Int) -> Int
     def draw_rrect_radii_raw as "ruxen_canvas_draw_rrect_radii"(self, x: Float, y: Float, w: Float, h: Float, tl: Float, tr: Float, br: Float, bl: Float, stroke_w: Float, argb: Int) -> Int
     def draw_line_raw as "ruxen_canvas_draw_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, argb: Int) -> Int
+    def draw_dashed_line_raw as "ruxen_canvas_draw_dashed_line"(self, x0: Float, y0: Float, x1: Float, y1: Float, stroke_w: Float, on_len: Float, off_len: Float, phase: Float, argb: Int) -> Int
+    def draw_path_raw as "ruxen_canvas_draw_path"(self, path: Int, stroke_w: Float, argb: Int) -> Int
     def fill_rect_gradient_raw as "ruxen_canvas_fill_rect_gradient"(self, x: Float, y: Float, w: Float, h: Float, gx0: Float, gy0: Float, gx1: Float, gy1: Float, argb0: Int, argb1: Int) -> Int
     def fill_round_rect_gradient_raw as "ruxen_canvas_fill_round_rect_gradient"(self, x: Float, y: Float, w: Float, h: Float, radius: Float, gx0: Float, gy0: Float, gx1: Float, gy1: Float, argb0: Int, argb1: Int) -> Int
     def fill_circle_radial_raw as "ruxen_canvas_fill_circle_radial"(self, cx: Float, cy: Float, radius: Float, argb0: Int, argb1: Int) -> Int
@@ -35,18 +46,66 @@ class RawHost
     def draw_image_rect_src_raw as "ruxen_canvas_draw_image_rect_src"(self, img: Int, sx: Float, sy: Float, sw: Float, sh: Float, dx: Float, dy: Float, dw: Float, dh: Float) -> Int
     def draw_text_raw as "ruxen_canvas_draw_text"(self, text: &String, x: Float, y: Float, r: Int, g: Int, b: Int, a: Int) -> Int
     def draw_text_sized_raw as "ruxen_canvas_draw_text_sized"(self, text: &String, x: Float, y: Float, size: Float, argb: Int) -> Int
-    def measure_text_n_raw as "ruxen_canvas_measure_text_n"(self, n: Int) -> Int
+    def draw_text_font_raw as "ruxen_canvas_draw_text_font"(self, text: &String, x: Float, y: Float, size: Float, family: &String, argb: Int) -> Int
+    def measure_text_font_raw as "ruxen_canvas_measure_text_font"(self, text: &String, size: Float, family: &String) -> Int
+    def text_height_font_raw as "ruxen_canvas_text_height_font"(self, size: Float, family: &String) -> Int
+    def draw_paragraph_raw as "ruxen_canvas_draw_paragraph"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, family: &String, align: Int, argb: Int) -> Int
+    def measure_paragraph_raw as "ruxen_canvas_measure_paragraph"(self, text: &String, max_width: Float, size: Float, family: &String) -> Int
+    def draw_text_shaped_raw as "ruxen_canvas_draw_text_shaped"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, direction: Int, argb: Int) -> Int
+    def measure_text_shaped_raw as "ruxen_canvas_measure_text_shaped"(self, text: &String, size: Float, font_path: &String, direction: Int) -> Int
+    def draw_paragraph_shaped_raw as "ruxen_canvas_draw_paragraph_shaped"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, font_path: &String, align: Int, direction: Int, argb: Int) -> Int
+    def measure_paragraph_shaped_raw as "ruxen_canvas_measure_paragraph_shaped"(self, text: &String, max_width: Float, size: Float, font_path: &String, direction: Int) -> Int
+    def shaping_available_raw as "ruxen_canvas_shaping_available"(self) -> Bool
+    def shape_cache_hits_raw as "ruxen_canvas_shape_cache_hits"(self) -> Int
+    def draw_text_fallback_raw as "ruxen_canvas_draw_text_fallback"(self, text: &String, x: Float, y: Float, size: Float, argb: Int) -> Int
+    def measure_text_fallback_raw as "ruxen_canvas_measure_text_fallback"(self, text: &String, size: Float) -> Int
+    def fallback_available_raw as "ruxen_canvas_fallback_available"(self) -> Bool
+    def last_fallback_family_raw as "ruxen_canvas_last_fallback_family"(self) -> String
+    def grapheme_count_raw as "ruxen_canvas_grapheme_count"(self, text: &String) -> Int
+    def grapheme_boundary_at_raw as "ruxen_canvas_grapheme_boundary_at"(self, text: &String, n: Int) -> Int
+    def icu_available_raw as "ruxen_canvas_icu_available"(self) -> Bool
+    def draw_paragraph_icu_raw as "ruxen_canvas_draw_paragraph_icu"(self, text: &String, x: Float, y: Float, max_width: Float, size: Float, align: Int, argb: Int) -> Int
+    def measure_paragraph_icu_raw as "ruxen_canvas_measure_paragraph_icu"(self, text: &String, max_width: Float, size: Float) -> Int
+    def draw_text_shaped_multi_raw as "ruxen_canvas_draw_text_shaped_multi"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, direction: Int, argb: Int) -> Int
+    def measure_text_shaped_multi_raw as "ruxen_canvas_measure_text_shaped_multi"(self, text: &String, size: Float, font_path: &String, direction: Int) -> Int
+    def draw_text_bidi_raw as "ruxen_canvas_draw_text_bidi"(self, text: &String, x: Float, y: Float, size: Float, font_path: &String, argb: Int) -> Int
+    def measure_text_bidi_raw as "ruxen_canvas_measure_text_bidi"(self, text: &String, size: Float, font_path: &String) -> Int
+    def bidi_available_raw as "ruxen_canvas_bidi_available"(self) -> Bool
     def measure_text_raw as "ruxen_canvas_measure_text"(self, text: &String) -> Int
     def measure_text_sized_raw as "ruxen_canvas_measure_text_sized"(self, text: &String, size: Float) -> Int
     def text_height_raw as "ruxen_canvas_text_height"(self) -> Int
     def text_height_sized_raw as "ruxen_canvas_text_height_sized"(self, size: Float) -> Int
     def skia_available_raw as "ruxen_canvas_skia_available"(self) -> Bool
     def skia_active_raw as "ruxen_canvas_skia_active"(self) -> Bool
+    def gpu_available_raw as "ruxen_canvas_gpu_available"(self) -> Bool
+    def gpu_metal_available_raw as "ruxen_canvas_gpu_metal_available"(self) -> Bool
+    def gpu_active_raw as "ruxen_canvas_gpu_active"(self) -> Bool
+    def gpu_backend_kind_raw as "ruxen_canvas_gpu_backend_kind"(self) -> Int
+    def enable_gpu_raw as "ruxen_canvas_host_enable_gpu"(self, win_scale: Int) -> Int
+    def enable_gpu_offscreen_raw as "ruxen_canvas_host_enable_gpu_offscreen"(self) -> Int
+    def enable_gpu_windowed_raw as "ruxen_canvas_host_enable_gpu_windowed"(self, win_scale: Int) -> Int
+    def set_design_size_raw as "ruxen_canvas_host_set_design_size"(self, design_w: Int, design_h: Int) -> Int
+    def content_scale_raw as "ruxen_canvas_content_scale"(self) -> Int
     def push_event_i_raw as "ruxen_canvas_push_event_i"(self, kind: Int, a: Int, b: Int) -> Int
+    def push_event_d_raw as "ruxen_canvas_push_event"(self, kind: Int, a: Float, b: Float) -> Int
+    # IME composition (TextEditing): carries the marked text + (start, length).
+    def push_event_text_raw as "ruxen_canvas_push_event_text"(self, kind: Int, start: Int, length: Int, text: &String) -> Int
+    def event_text as "ruxen_canvas_event_text"(self) -> String
+    # FileDrop: the dropped path (owned heap copy in the ring, Ruxen String out).
+    def event_drop_path as "ruxen_canvas_event_drop_path"(self) -> String
+    # KeyDown: the keyboard MODIFIER bitfield (RX_MOD_*) carried in the ring slot's
+    # side-channel; 0 for any non-KeyDown event or an unmodified key.
+    def event_mods as "ruxen_canvas_event_mods"(self) -> Int
     def poll_event_raw as "ruxen_canvas_poll_event"(self) -> Int
     def event_ai as "ruxen_canvas_event_ai"(self) -> Int
     def event_bi as "ruxen_canvas_event_bi"(self) -> Int
+    def event_a as "ruxen_canvas_event_a"(self) -> Float
+    def event_b as "ruxen_canvas_event_b"(self) -> Float
     def sleep_ms_raw as "ruxen_canvas_sleep_ms"(self, ms: Int) -> nil
+    # Frame pacing (docs/decisions/frame-pacing.md): a monotonic-ns timebase +
+    # paced wait to an ABSOLUTE target tick. Process-wide clock; self ignored.
+    def ticks_ns_raw as "ruxen_canvas_ticks_ns"(self) -> Int
+    def wait_until_ns_raw as "ruxen_canvas_wait_until_ns"(self, target_ns: Int) -> nil
     def drop as "ruxen_canvas_host_drop"(self) -> nil
   end
 
@@ -56,5 +115,98 @@ class RawHost
     def window_pump as "ruxen_canvas_window_pump"(self) -> Int
     def self.window_is_shown as "ruxen_canvas_window_is_shown" -> Int
     def self.window_destroy as "ruxen_canvas_window_destroy" -> Int
+    # Per-window teardown (multi-window): tear down ONLY this host's window,
+    # leaving any other windows up. Window#hide routes through this.
+    def window_destroy_for as "ruxen_canvas_window_destroy_for"(self) -> Int
+    # GL-context seam for the GPU backend (docs/GPU.md). create_gl opens an
+    # SDL_WINDOW_OPENGL window + current GL context (clean Err on headless/no
+    # SDL); gl_present swaps the back buffer; is_gl reports the active mode.
+    def window_create_gl as "ruxen_canvas_window_create_gl"(self, win_scale: Int) -> Int
+    def window_is_gl as "ruxen_canvas_window_is_gl"(self) -> Int
+    def window_gl_present as "ruxen_canvas_window_gl_present"(self) -> Int
+    def window_gl_drawable_size as "ruxen_canvas_window_gl_drawable_size"(self) -> Int
+    # On-screen Metal present seam (docs/GPU.md). create_metal opens a
+    # SDL_WINDOW_METAL window + CAMetalLayer configured with the given device +
+    # queue; metal_next_drawable acquires the frame's drawable texture; metal_present
+    # presents + commits it. is_metal reports the active mode. SDL/Metal capability
+    # probes prove the host-aware loader resolves SDL2 even when headless.
+    def window_create_metal as "ruxen_canvas_window_create_metal"(self, device: Int, queue: Int, win_scale: Int) -> Int
+    def window_is_metal as "ruxen_canvas_window_is_metal"(self) -> Int
+    def window_metal_next_drawable as "ruxen_canvas_window_metal_next_drawable"(self) -> Int
+    def window_metal_present as "ruxen_canvas_window_metal_present"(self) -> Int
+    def window_metal_drawable_size as "ruxen_canvas_window_metal_drawable_size"(self) -> Int
+    def self.sdl_available as "ruxen_canvas_sdl_available" -> Int
+    def self.window_metal_available as "ruxen_canvas_window_metal_available" -> Int
+    # Display refresh rate (Hz) for the frame-pacing hint (docs/decisions/
+    # frame-pacing.md): > 0 on success, negative -RXC_ERR_NO_SDL when unavailable.
+    def self.refresh_rate as "ruxen_canvas_refresh_rate" -> Int
+    # Per-window / multi-monitor refresh rate (Phase 2): the Hz of the display THIS
+    # window sits on (SDL_GetWindowDisplayIndex -> SDL_GetDesktopDisplayMode). > 0 on
+    # success; negative -RXC_ERR_* when there is no live window (-PRESENT) or no SDL
+    # / unspecified rate (-NO_SDL).
+    def window_refresh_rate as "ruxen_canvas_window_refresh_rate"(self) -> Int
+    # Clipboard (E2 desktop services). get returns a Ruxen-owned String (the C
+    # side builds it via ruxen_string_from); available gates the Err contract.
+    def self.clipboard_get as "ruxen_canvas_clipboard_get" -> String
+    def self.clipboard_set as "ruxen_canvas_clipboard_set"(text: &String) -> Int
+    def self.clipboard_available as "ruxen_canvas_clipboard_available" -> Int
+    # Mouse cursors (E2). Cursor state is process-global, so set_cursor is a
+    # static (no self); cursor_available gates the Err contract.
+    def self.set_cursor as "ruxen_canvas_set_cursor"(kind: Int) -> Int
+    def self.cursor_available as "ruxen_canvas_cursor_available" -> Int
+    # Native file dialogs (Phase 2, macOS NSOpenPanel/NSSavePanel via objc). Modal,
+    # process-global, so static. Each returns the chosen path (a Ruxen-owned String
+    # via ruxen_string_from) or the EMPTY string on cancel/unavailable/headless —
+    # NEVER NULL, so the `-> String` binding is always safe. file_dialog_available
+    # gates whether Cocoa is reachable (false under the forked harness).
+    def self.open_file_dialog as "ruxen_canvas_open_file_dialog" -> String
+    def self.save_file_dialog as "ruxen_canvas_save_file_dialog"(default_name: &String) -> String
+    def self.file_dialog_available as "ruxen_canvas_file_dialog_available" -> Int
+    # Accessibility (Phase 3, docs/decisions/accessibility.md). The intake trio
+    # (push/clear/count) is ENGINE-SIDE — pure C, headless-testable. The live
+    # window touches (available / set_a11y_title) are macOS NSAccessibility via
+    # objc, fork-gated (false / Err under the forked harness). All static
+    # (process-global a11y store / app-level title).
+    def self.push_a11y_node as "ruxen_canvas_push_a11y_node"(id: Int, role: Int, label: &String, x: Float, y: Float, w: Float, h: Float) -> Int
+    def self.clear_a11y_tree as "ruxen_canvas_clear_a11y_tree" -> Int
+    def self.a11y_node_count as "ruxen_canvas_a11y_node_count" -> Int
+    def self.a11y_node_role as "ruxen_canvas_a11y_node_role"(n: Int) -> Int
+    def self.a11y_node_label as "ruxen_canvas_a11y_node_label"(n: Int) -> String
+    def self.a11y_available as "ruxen_canvas_window_a11y_available" -> Int
+    def self.set_a11y_title as "ruxen_canvas_window_set_a11y_title"(title: &String) -> Int
+    # Child-element exposure (the ADR §4 remainder, landed): push the engine-side
+    # a11y node store onto THIS window's content view as NSAccessibilityElement
+    # children (VoiceOver enumerates them). Instance (takes self -> resolves the
+    # window slot). RXC_OK / RXC_ERR_PRESENT (no reachable live window) / NO_SDL
+    # (headless/forked). Metal-window path; raster-only NSWindow access is the
+    # filed remainder. set_a11y_focus points focus at the child with L2 id `id`.
+    def window_sync_a11y_children as "ruxen_canvas_window_sync_a11y_children"(self) -> Int
+    def window_set_a11y_focus as "ruxen_canvas_window_set_a11y_focus"(self, id: Int) -> Int
+    # Window management (Phase-1.5). Per-window setters resolve their slot by self;
+    # each Errs RXC_ERR_PRESENT with no live window, RXC_ERR_NO_SDL if the SDL
+    # entry point is absent. set_fullscreen uses FULLSCREEN_DESKTOP (borderless).
+    def window_set_fullscreen as "ruxen_canvas_window_set_fullscreen"(self, on: Int) -> Int
+    def window_maximize as "ruxen_canvas_window_maximize"(self) -> Int
+    def window_minimize as "ruxen_canvas_window_minimize"(self) -> Int
+    def window_restore as "ruxen_canvas_window_restore"(self) -> Int
+    def window_set_min_size as "ruxen_canvas_window_set_min_size"(self, min_w: Int, min_h: Int) -> Int
+    def window_set_max_size as "ruxen_canvas_window_set_max_size"(self, max_w: Int, max_h: Int) -> Int
+    # Test seams: run the pump's exact handling on synthetic events headlessly.
+    # pointer: point->design mapping (/ show_scale). text: SDL_TEXTINPUT UTF-8 ->
+    # first codepoint -> TextInput (returns the codepoint, -1 if none). keydown:
+    # repeat + control-only filter -> KeyDown (returns 1 emitted / 0 filtered).
+    def window_pump_test_pointer as "ruxen_canvas_window_pump_test_pointer"(self, show_scale: Int, win_x: Int, win_y: Int) -> Int
+    def window_pump_test_text as "ruxen_canvas_window_pump_test_text"(self, utf8: &String) -> Int
+    def window_pump_test_textediting as "ruxen_canvas_window_pump_test_textediting"(self, utf8: &String, start: Int, length: Int) -> Int
+    def window_pump_test_keydown as "ruxen_canvas_window_pump_test_keydown"(self, sym: Int, repeat: Int, mods: Int) -> Int
+    # Window-event seam (Phase-1.5): run the pump's WINDOWEVENT subtype handling on
+    # a synthetic transition (6 MINIMIZED / 7 MAXIMIZED / 8 RESTORED / 18
+    # DISPLAY_CHANGED). Returns the resulting minimized flag (0/1); pushes a Resize
+    # for the non-minimize transitions, which the test polls back.
+    def window_pump_test_window_event as "ruxen_canvas_window_pump_test_window_event"(self, subtype: Int, design_w: Int, design_h: Int) -> Int
+    # File-drop seam (Phase-1.5): run the pump's SDL_DROPFILE handling on a
+    # synthetic path — emits Event.FileDrop carrying the path through the ring's
+    # owned-path side-channel (no 32-byte truncation). Returns RXC_OK / push error.
+    def window_pump_test_dropfile as "ruxen_canvas_window_pump_test_dropfile"(self, path: &String) -> Int
   end
 end

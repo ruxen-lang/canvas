@@ -1,0 +1,112 @@
+## A mutable builder for an arbitrary 2D path — lines, quadratic/cubic béziers,
+## and SVG-style elliptical arcs — that any `Canvas` can fill or stroke. The
+## building block L2 needs for icons, custom containers, and any non-rect/rrect
+## shape (`docs/FFI.md`, the 4-step incremental binding).
+##
+## `Path2D` owns its underlying Skia path; dropping it frees it deterministically
+## (no GC), the same ownership shape as `Image`. Paths require the Skia backend:
+## `Path2D.create` returns `Err` when it is unavailable, and `Canvas#draw_path` /
+## `stroke_path` surface a clear `Err` rather than a silent no-op.
+##
+## Coordinates are device pixels. A contour starts with `move_to`; `close`
+## ends it with a straight segment back to its start. The fill rule defaults to
+## non-zero winding; call `even_odd` for the even-odd rule (e.g. donut holes).
+##
+##   let p = match Path2D.create
+##     Ok(v)  -> v
+##     Err(e) -> return Err(e)
+##   end
+##   p.move_to(10.0f32, 10.0f32)
+##   p.line_to(50.0f32, 10.0f32)
+##   p.line_to(30.0f32, 40.0f32)
+##   p.close
+##   canvas.draw_path(&p, Color.rgb(255u8, 0u8, 0u8))
+class Path2D
+  raw: RawPath
+
+  def init(@raw: RawPath)
+  end
+
+  ## Allocate an empty path. `Err` when the Skia backend isn't available
+  ## (there is no software fallback for arbitrary paths).
+  def self.create -> Result[Path2D, String]
+    let raw = RawPath.alloc_raw
+    if raw.is_null
+      return Err("canvas: Path2D requires the Skia backend (run runtime/fetch_skia.sh)")
+    end
+    Ok(Path2D.new(raw))
+  end
+
+  ## Begin a new sub-contour at (x, y).
+  def var move_to(x: Float32, y: Float32) -> Result[nil, String]
+    Path2D.result(self.raw.move_to_raw(x as Float, y as Float), "move_to")
+  end
+
+  ## Straight segment from the current point to (x, y).
+  def var line_to(x: Float32, y: Float32) -> Result[nil, String]
+    Path2D.result(self.raw.line_to_raw(x as Float, y as Float), "line_to")
+  end
+
+  ## Quadratic bézier through control point (cx, cy) to (x, y).
+  def var quad_to(cx: Float32, cy: Float32, x: Float32, y: Float32) -> Result[nil, String]
+    Path2D.result(self.raw.quad_to_raw(cx as Float, cy as Float, x as Float, y as Float), "quad_to")
+  end
+
+  ## Cubic bézier through controls (c1x, c1y) and (c2x, c2y) to (x, y).
+  def var cubic_to(c1x: Float32, c1y: Float32, c2x: Float32, c2y: Float32, x: Float32, y: Float32) -> Result[nil, String]
+    Path2D.result(self.raw.cubic_to_raw(c1x as Float, c1y as Float, c2x as Float, c2y as Float, x as Float, y as Float), "cubic_to")
+  end
+
+  ## SVG-style elliptical arc to (x, y): radii (rx, ry), `x_axis_rotate` in
+  ## degrees, `large_arc` selects the larger of the two arcs, `clockwise`
+  ## selects the sweep direction.
+  def var arc_to(rx: Float32, ry: Float32, x_axis_rotate: Float32, large_arc: Bool, clockwise: Bool, x: Float32, y: Float32) -> Result[nil, String]
+    let la: Int = if large_arc
+      1
+    else
+      0
+    end
+    let sw: Int = if clockwise
+      1
+    else
+      0
+    end
+    Path2D.result(self.raw.arc_to_raw(rx as Float, ry as Float, x_axis_rotate as Float, la, sw, x as Float, y as Float), "arc_to")
+  end
+
+  ## Close the current sub-contour with a straight segment back to its start.
+  def var close -> Result[nil, String]
+    Path2D.result(self.raw.close_raw, "close")
+  end
+
+  ## Use the even-odd fill rule (holes where contours overlap an even number of
+  ## times). Affects fills only, not strokes.
+  def var even_odd -> Result[nil, String]
+    Path2D.result(self.raw.set_fill_type_raw(1), "even_odd")
+  end
+
+  ## Use the non-zero winding fill rule (the default).
+  def var winding -> Result[nil, String]
+    Path2D.result(self.raw.set_fill_type_raw(0), "winding")
+  end
+
+  ## INTERNAL — the raw `sk_path` pointer, passed to `Canvas#draw_path`.
+  def handle -> Int
+    self.raw.ptr
+  end
+
+  private
+
+  ## Map a C-shim status code onto the package's error story.
+  def self.result(code: Int, what: &String) -> Result[nil, String]
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_no_skia(code)
+      Err("canvas: Path2D##{what} requires the Skia backend (run runtime/fetch_skia.sh)")
+    elsif Rxc.is_bad_args(code)
+      Err("canvas: Path2D##{what} failed: invalid arguments")
+    else
+      Err("canvas: Path2D##{what} failed with unknown status #{code}")
+    end
+  end
+end

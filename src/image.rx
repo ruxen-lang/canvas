@@ -14,7 +14,7 @@ class Image
   def self.load(path: String) -> Result[Image, String]
     let raw = RawImage.load_raw(&path)
     if raw.is_null
-      return Err(String.from("canvas: could not load image '#{path}' (missing, undecodable, or no Skia backend)"))
+      return Err("canvas: could not load image '#{path}' (missing, undecodable, or no Skia backend)")
     end
     Ok(Image.new(raw))
   end

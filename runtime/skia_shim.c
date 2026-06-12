@@ -28,10 +28,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <dlfcn.h>
 
+#include "rx_dlopen.h"   /* rx_dlopen / rx_dlsym / rx_dlclose — the loader seam
+                          * (POSIX dlfcn on macOS/Linux, LoadLibrary on _WIN32) */
 #include "rx_canvas_internal.h"
 #include "skia/skia_capi.h"
+
+/* Ruxen's String runtime constructor (library/std/string/runtime/string.c): a
+ * Ruxen String IS a malloc'd NUL-terminated char*. Used to return the IME marked
+ * text to the Ruxen side as a Ruxen-owned String (see ruxen_canvas_event_text). */
+extern char *ruxen_string_from(const char *s);
 
 /* floor()/isnan() without libm, so the shim adds no link dependencies.
  * (Geometry values are device pixels — far inside int64 range.) */
@@ -54,33 +60,117 @@ static int rxc_finite_pixels(double v) {
 
 /* ---- Skia loader (dlopen, lazy, process-wide singleton) ----
  *
- * libSkiaSharp is fetched by runtime/fetch_skia.sh and dlopen()'d here — never
+ * libSkiaSharp is fetched by runtime/fetch_skia.sh and rx_dlopen()'d here — never
  * linked (see docs/SKIA.md). rx_skia() resolves the sk_* table on first call;
  * if the library or any required symbol is missing, ->available stays 0 and
  * every drawing op falls back to the software raster path below. */
 
-static void *rx_skia_dlopen(void) {
-    /* Search order: explicit override, the fetch-script cache, then the system
-     * loader. dlopen of an absolute path is CWD-independent. */
-    const char *env = getenv("RUXEN_CANVAS_SKIA");
-    if (env && env[0]) {
-        void *h = dlopen(env, RTLD_NOW | RTLD_LOCAL);
+/* The native-library basenames to try, in platform-preference order. The
+ * fetch script installs the platform's convention into the cache (.dylib on
+ * macOS, .so on Linux — see runtime/fetch_skia.sh); we try the native name
+ * first but always try both, so a cross-named or system-installed copy still
+ * resolves. The system-loader (no path) form uses the same names. */
+#if defined(_WIN32)
+/* Windows (EXPERIMENTAL — compiles-untested-until-CI, docs/ROADMAP.md Phase 4):
+ * the NuGet member is runtimes/win-<arch>/native/libSkiaSharp.dll; fetch_skia.sh
+ * installs it under that basename. */
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.dll", "libSkiaSharp.so" };
+#elif defined(__APPLE__)
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.dylib", "libSkiaSharp.so" };
+#else
+static const char *const rx_skia_basenames[] = { "libSkiaSharp.so", "libSkiaSharp.dylib" };
+#endif
+#define RX_SKIA_NBASENAMES (int)(sizeof(rx_skia_basenames) / sizeof(rx_skia_basenames[0]))
+
+/* ---- executable-relative dylib probe (packaging, docs/decisions/packaging.md) ----
+ *
+ * A SHIPPED app bundle carries libSkiaSharp / libHarfBuzzSharp inside
+ * MyApp.app/Contents/Frameworks/, and a user who never ran fetch_skia.sh has no
+ * ~/.cache copy. We never LINK these (so no @rpath), so to find a bundled dylib
+ * with zero env setup the loader probes RELATIVE TO THE MAIN EXECUTABLE: the
+ * canonical Frameworks/ dir (one level up + over from a Contents/MacOS binary) and
+ * the binary's own directory. Returns 1 + writes the directory of the running
+ * executable into `out` (capacity `cap`), 0 if it can't be determined. macOS arm;
+ * Linux/Windows arms are the filed remainder (the ADR). */
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>   /* _NSGetExecutablePath */
+#include <libgen.h>        /* dirname */
+static int rx_exe_dir(char *out, size_t cap) {
+    char raw[4096];
+    uint32_t n = (uint32_t)sizeof(raw);
+    if (_NSGetExecutablePath(raw, &n) != 0) return 0;   /* path too long */
+    /* dirname may modify its arg and returns a pointer into static/arg storage;
+     * copy out immediately. */
+    char *d = dirname(raw);
+    if (!d) return 0;
+    size_t len = strlen(d);
+    if (len + 1 > cap) return 0;
+    memcpy(out, d, len + 1);
+    return 1;
+}
+/* Try `<exe-dir>/../Frameworks/<basename>` then `<exe-dir>/<basename>`. The first
+ * is the .app bundle convention; the second covers a flat dist (dylib beside the
+ * binary). Returns the handle or NULL. */
+static void *rx_dlopen_exe_relative(const char *basename) {
+    char dir[4096];
+    if (!rx_exe_dir(dir, sizeof(dir))) return NULL;
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/../Frameworks/%s", dir, basename);
+    void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    snprintf(path, sizeof(path), "%s/%s", dir, basename);
+    return rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+#else
+static void *rx_dlopen_exe_relative(const char *basename) { (void)basename; return NULL; }
+#endif
+
+/* dlopen each basename inside `dir` (absolute), returning the first that loads
+ * or NULL. dlopen of an absolute path is CWD-independent. */
+static void *rx_skia_dlopen_in_dir(const char *dir) {
+    char path[4096];
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, rx_skia_basenames[i]);
+        void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
         if (h) return h;
     }
-    char path[4096];
+    return NULL;
+}
+
+static void *rx_skia_dlopen(void) {
+    /* Search order: explicit override, the fetch-script cache (env override,
+     * then $HOME/.cache), then the system loader. Each cache location tries the
+     * platform's library basenames (.dylib on macOS, .so on Linux). */
+    const char *env = getenv("RUXEN_CANVAS_SKIA");
+    if (env && env[0]) {
+        /* An explicit override is a full path (no basename guessing). */
+        void *h = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    /* A SHIPPED app prefers the dylib it CARRIES (a known, SHA-verified version)
+     * over a dev ~/.cache, so the bundled-app probe comes before the cache. */
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        void *h = rx_dlopen_exe_relative(rx_skia_basenames[i]);
+        if (h) return h;
+    }
     const char *cache = getenv("RUXEN_CANVAS_CACHE");
     if (cache && cache[0]) {
-        snprintf(path, sizeof(path), "%s/libSkiaSharp.so", cache);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        void *h = rx_skia_dlopen_in_dir(cache);
         if (h) return h;
     }
     const char *home = getenv("HOME");
     if (home && home[0]) {
-        snprintf(path, sizeof(path), "%s/.cache/ruxen-canvas/libSkiaSharp.so", home);
-        void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s/.cache/ruxen-canvas", home);
+        void *h = rx_skia_dlopen_in_dir(dir);
         if (h) return h;
     }
-    return dlopen("libSkiaSharp.so", RTLD_NOW | RTLD_LOCAL);
+    /* Fall back to the system loader (LD_LIBRARY_PATH / DYLD path / ldconfig). */
+    for (int i = 0; i < RX_SKIA_NBASENAMES; i++) {
+        void *h = rx_dlopen(rx_skia_basenames[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
 }
 
 const RxSkia *rx_skia(void) {
@@ -107,11 +197,11 @@ const RxSkia *rx_skia(void) {
     int ok = 1;
 #define RX_SK_REQUIRED(field, sym)                                  \
     do {                                                            \
-        *(void **)(&skia.field) = dlsym(lib, sym);                  \
+        *(void **)(&skia.field) = rx_dlsym(lib, sym);                  \
         if (!skia.field) ok = 0;                                    \
     } while (0)
 #define RX_SK_OPTIONAL(field, sym)                                  \
-    do { *(void **)(&skia.field) = dlsym(lib, sym); } while (0)
+    do { *(void **)(&skia.field) = rx_dlsym(lib, sym); } while (0)
 
     RX_SK_REQUIRED(surface_new_raster_direct, "sk_surface_new_raster_direct");
     RX_SK_REQUIRED(surface_get_canvas,        "sk_surface_get_canvas");
@@ -135,19 +225,26 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(rrect_set_rect_radii,      "sk_rrect_set_rect_radii");
     RX_SK_OPTIONAL(paint_set_shader,          "sk_paint_set_shader");
     RX_SK_OPTIONAL(paint_set_maskfilter,      "sk_paint_set_maskfilter");
+    RX_SK_OPTIONAL(paint_set_blendmode,       "sk_paint_set_blendmode");
     RX_SK_OPTIONAL(shader_new_linear_gradient,"sk_shader_new_linear_gradient");
     RX_SK_OPTIONAL(shader_new_radial_gradient,"sk_shader_new_radial_gradient");
     RX_SK_OPTIONAL(shader_unref,              "sk_shader_unref");
     RX_SK_OPTIONAL(maskfilter_new_blur,       "sk_maskfilter_new_blur");
     RX_SK_OPTIONAL(maskfilter_unref,          "sk_maskfilter_unref");
+    RX_SK_OPTIONAL(imagefilter_new_blur,      "sk_imagefilter_new_blur");
+    RX_SK_OPTIONAL(imagefilter_unref,         "sk_imagefilter_unref");
+    RX_SK_OPTIONAL(paint_set_imagefilter,     "sk_paint_set_imagefilter");
     RX_SK_OPTIONAL(canvas_save,               "sk_canvas_save");
     RX_SK_OPTIONAL(canvas_restore,            "sk_canvas_restore");
+    RX_SK_OPTIONAL(canvas_save_layer,         "sk_canvas_save_layer");
     RX_SK_OPTIONAL(canvas_get_save_count,     "sk_canvas_get_save_count");
     RX_SK_OPTIONAL(canvas_restore_to_count,   "sk_canvas_restore_to_count");
     RX_SK_OPTIONAL(canvas_translate,          "sk_canvas_translate");
     RX_SK_OPTIONAL(canvas_scale,              "sk_canvas_scale");
     RX_SK_OPTIONAL(canvas_rotate_degrees,     "sk_canvas_rotate_degrees");
     RX_SK_OPTIONAL(canvas_reset_matrix,       "sk_canvas_reset_matrix");
+    RX_SK_OPTIONAL(canvas_skew,               "sk_canvas_skew");
+    RX_SK_OPTIONAL(canvas_concat,             "sk_canvas_concat");
     RX_SK_OPTIONAL(canvas_clip_rect,          "sk_canvas_clip_rect_with_operation");
     RX_SK_OPTIONAL(canvas_clip_rrect,         "sk_canvas_clip_rrect_with_operation");
     RX_SK_OPTIONAL(data_new_from_file,        "sk_data_new_from_file");
@@ -157,14 +254,146 @@ const RxSkia *rx_skia(void) {
     RX_SK_OPTIONAL(image_get_height,          "sk_image_get_height");
     RX_SK_OPTIONAL(image_unref,               "sk_image_unref");
     RX_SK_OPTIONAL(canvas_draw_image_rect,    "sk_canvas_draw_image_rect");
+    RX_SK_OPTIONAL(surface_new_image_snapshot, "sk_surface_new_image_snapshot");
     RX_SK_OPTIONAL(typeface_create_default,   "sk_typeface_create_default");
+    RX_SK_OPTIONAL(typeface_create_from_name, "sk_typeface_create_from_name");
+    RX_SK_OPTIONAL(typeface_unref,            "sk_typeface_unref");
+    RX_SK_OPTIONAL(fontstyle_new,             "sk_fontstyle_new");
+    RX_SK_OPTIONAL(fontstyle_delete,          "sk_fontstyle_delete");
     RX_SK_OPTIONAL(font_new_with_values,      "sk_font_new_with_values");
     RX_SK_OPTIONAL(font_set_size,             "sk_font_set_size");
     RX_SK_OPTIONAL(font_delete,               "sk_font_delete");
     RX_SK_OPTIONAL(font_measure_text,         "sk_font_measure_text");
     RX_SK_OPTIONAL(font_get_metrics,          "sk_font_get_metrics");
+    RX_SK_OPTIONAL(path_new,                  "sk_path_new");
+    RX_SK_OPTIONAL(path_delete,               "sk_path_delete");
+    RX_SK_OPTIONAL(path_move_to,              "sk_path_move_to");
+    RX_SK_OPTIONAL(path_line_to,              "sk_path_line_to");
+    RX_SK_OPTIONAL(path_quad_to,              "sk_path_quad_to");
+    RX_SK_OPTIONAL(path_cubic_to,             "sk_path_cubic_to");
+    RX_SK_OPTIONAL(path_arc_to,               "sk_path_arc_to");
+    RX_SK_OPTIONAL(path_close,                "sk_path_close");
+    RX_SK_OPTIONAL(path_set_filltype,         "sk_path_set_filltype");
+    RX_SK_OPTIONAL(canvas_draw_path,          "sk_canvas_draw_path");
+
+    /* Path effects (dashing). The symbols ARE present in the pinned 3.119.4
+     * libSkiaSharp — Phase-1 searched `sk_patheffect_*` (wrong) and missed the
+     * real `sk_path_effect_*` names (docs/ROADMAP.md Phase-1.5). OPTIONAL: a miss
+     * makes ruxen_canvas_draw_dashed_line return RXC_ERR_NO_SKIA (honest probe). */
+    RX_SK_OPTIONAL(path_effect_create_dash,   "sk_path_effect_create_dash");
+    RX_SK_OPTIONAL(path_effect_unref,         "sk_path_effect_unref");
+    RX_SK_OPTIONAL(paint_set_path_effect,     "sk_paint_set_path_effect");
+
+    /* Ganesh GL backend (docs/GPU.md). OPTIONAL: a miss leaves gpu_gl_ok = 0,
+     * disabling only the GPU rung — the raster backend is untouched. */
+    RX_SK_OPTIONAL(gr_glinterface_assemble_gl,    "gr_glinterface_assemble_gl_interface");
+    RX_SK_OPTIONAL(gr_glinterface_create_native,  "gr_glinterface_create_native_interface");
+    RX_SK_OPTIONAL(gr_glinterface_unref,          "gr_glinterface_unref");
+    RX_SK_OPTIONAL(gr_direct_context_make_gl,     "gr_direct_context_make_gl");
+    /* A GrDirectContext is-a GrRecordingContext; this build exports only the
+     * recording-context unref (there is no gr_direct_context_unref). */
+    RX_SK_OPTIONAL(gr_recording_context_unref,    "gr_recording_context_unref");
+    RX_SK_OPTIONAL(gr_direct_context_flush,       "gr_direct_context_flush");
+    RX_SK_OPTIONAL(gr_direct_context_flush_and_submit, "gr_direct_context_flush_and_submit");
+    RX_SK_OPTIONAL(gr_backendrendertarget_new_gl, "gr_backendrendertarget_new_gl");
+    RX_SK_OPTIONAL(gr_backendrendertarget_delete, "gr_backendrendertarget_delete");
+    RX_SK_OPTIONAL(surface_new_backend_render_target, "sk_surface_new_backend_render_target");
+
+    /* Ganesh Metal backend + offscreen GPU surface + readback (docs/GPU.md).
+     * OPTIONAL: a miss leaves gpu_metal_ok = 0, disabling only the Metal rung. */
+    RX_SK_OPTIONAL(gr_direct_context_make_metal,  "gr_direct_context_make_metal");
+    RX_SK_OPTIONAL(surface_new_render_target,     "sk_surface_new_render_target");
+    RX_SK_OPTIONAL(gr_backendrendertarget_new_metal, "gr_backendrendertarget_new_metal");
+    RX_SK_OPTIONAL(surface_read_pixels,           "sk_surface_read_pixels");
+
+    /* Positioned-glyph rendering for shaped text (docs/SHAPING.md). OPTIONAL:
+     * a miss leaves glyph_render_ok = 0, disabling only shaping. */
+    RX_SK_OPTIONAL(typeface_create_from_file,     "sk_typeface_create_from_file");
+    RX_SK_OPTIONAL(textblob_builder_new,          "sk_textblob_builder_new");
+    RX_SK_OPTIONAL(textblob_builder_delete,       "sk_textblob_builder_delete");
+    RX_SK_OPTIONAL(textblob_builder_alloc_run_pos,"sk_textblob_builder_alloc_run_pos");
+    RX_SK_OPTIONAL(textblob_builder_make,         "sk_textblob_builder_make");
+    RX_SK_OPTIONAL(textblob_unref,                "sk_textblob_unref");
+    RX_SK_OPTIONAL(canvas_draw_text_blob,         "sk_canvas_draw_text_blob");
+
+    /* Per-character font fallback (docs/decisions/text-fallback.md). OPTIONAL:
+     * a miss leaves fallback_ok = 0, disabling only the fallback path. */
+    RX_SK_OPTIONAL(fontmgr_ref_default,           "sk_fontmgr_ref_default");
+    RX_SK_OPTIONAL(fontmgr_unref,                 "sk_fontmgr_unref");
+    RX_SK_OPTIONAL(fontmgr_match_character,        "sk_fontmgr_match_family_style_character");
+    RX_SK_OPTIONAL(typeface_unichar_to_glyph,     "sk_typeface_unichar_to_glyph");
+    RX_SK_OPTIONAL(typeface_get_family_name,      "sk_typeface_get_family_name");
+    RX_SK_OPTIONAL(string_get_c_str,              "sk_string_get_c_str");
+    RX_SK_OPTIONAL(string_get_size,               "sk_string_get_size");
+    RX_SK_OPTIONAL(string_destructor,             "sk_string_destructor");
+    RX_SK_OPTIONAL(font_set_typeface,             "sk_font_set_typeface");
+    RX_SK_OPTIONAL(font_unichar_to_glyph,         "sk_font_unichar_to_glyph");
+    RX_SK_OPTIONAL(font_get_widths_bounds,        "sk_font_get_widths_bounds");
 #undef RX_SK_REQUIRED
 #undef RX_SK_OPTIONAL
+
+    /* The GPU-GL rung needs: a way to build the GL interface (assemble OR
+     * native), make a direct context, wrap the FBO, and create the surface.
+     * flush/unref are needed for correct teardown. If any is absent, the GPU
+     * path is unavailable and rx_host_canvas falls back to raster. */
+    skia.gpu_gl_ok =
+        (skia.gr_glinterface_assemble_gl || skia.gr_glinterface_create_native) &&
+        skia.gr_direct_context_make_gl &&
+        skia.gr_recording_context_unref &&
+        skia.gr_backendrendertarget_new_gl &&
+        skia.gr_backendrendertarget_delete &&
+        skia.surface_new_backend_render_target &&
+        skia.surface_unref ? 1 : 0;
+
+    /* The GPU-Metal rung needs: make a direct context from a device+queue,
+     * create the offscreen render-target surface, read it back, unref the
+     * context + surface. (The device/queue themselves come from Metal.framework
+     * via rx_metal(), resolved separately below.) */
+    skia.gpu_metal_ok =
+        skia.gr_direct_context_make_metal &&
+        skia.surface_new_render_target &&
+        skia.surface_read_pixels &&
+        skia.gr_recording_context_unref &&
+        skia.surface_unref ? 1 : 0;
+
+    /* On-screen Metal additionally needs: wrap a drawable's texture as a backend
+     * render target and create a surface over it. */
+    skia.gpu_metal_window_ok =
+        skia.gr_direct_context_make_metal &&
+        skia.gr_backendrendertarget_new_metal &&
+        skia.gr_backendrendertarget_delete &&
+        skia.surface_new_backend_render_target &&
+        skia.gr_recording_context_unref &&
+        skia.surface_unref ? 1 : 0;
+
+    /* Shaped-glyph rendering needs: load the font file as a typeface, build a
+     * positioned-glyph run, and draw the blob. (HarfBuzz does the shaping; see
+     * rx_hb().) If any is absent, shaping is unavailable and the non-shaped text
+     * path stays the fallback. */
+    skia.glyph_render_ok =
+        skia.typeface_create_from_file &&
+        skia.font_new_with_values &&
+        skia.textblob_builder_new &&
+        skia.textblob_builder_alloc_run_pos &&
+        skia.textblob_builder_make &&
+        skia.canvas_draw_text_blob &&
+        skia.textblob_unref ? 1 : 0;
+
+    /* Per-character font fallback needs: the default font manager, the
+     * per-character match, the coverage test (unichar_to_glyph), and the ability
+     * to build a sized font over a matched typeface. typeface_get_family_name is
+     * for the family-probe accessor (its absence only disables the probe, so it
+     * is NOT required here). If a core symbol is absent, draw_text_fallback Errs
+     * and the non-fallback shaped/text path is the fallback. */
+    skia.fallback_ok =
+        skia.fontmgr_ref_default &&
+        skia.fontmgr_match_character &&
+        skia.typeface_unichar_to_glyph &&
+        skia.font_unichar_to_glyph &&
+        skia.font_get_widths_bounds &&
+        skia.font_set_typeface &&
+        skia.font_new_with_values &&
+        skia.glyph_render_ok ? 1 : 0;
 
     /* Keep the handle open for the process lifetime (no dlclose): the resolved
      * pointers must stay valid. */
@@ -172,12 +401,337 @@ const RxSkia *rx_skia(void) {
     return &skia;
 }
 
+/* ---- HarfBuzz loader (text shaping, docs/SHAPING.md) ----
+ *
+ * libHarfBuzzSharp is fetched by runtime/fetch_skia.sh and rx_dlopen()'d here —
+ * never linked, exactly like Skia/SDL. rx_hb() resolves the hb_* table on first
+ * call; if the library or any required symbol is missing, ->available stays 0
+ * and the shaped-text ops report a clean Err (the non-shaped path is unaffected).
+ * Process-wide singleton. */
+/* HarfBuzz basenames in platform-preference order — same host-aware discipline as
+ * rx_skia_basenames. fetch_skia.sh installs the platform's convention into the
+ * cache (.dylib on macOS, .so on Linux, .dll on Windows); we try the native name
+ * first but always try the others, so a cross-named copy still resolves. The
+ * PRIOR loader hard-coded `.dylib` in every cache/HOME probe and only tried `.so`
+ * as the last system-loader fallback — so on Linux the fetched
+ * `~/.cache/ruxen-canvas/libHarfBuzzSharp.so` was NEVER found and shaping stayed
+ * silently unavailable. (Phase-4 Linux fix.) */
+#if defined(_WIN32)
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.dll", "libHarfBuzzSharp.so" };
+#elif defined(__APPLE__)
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.dylib", "libHarfBuzzSharp.so" };
+#else
+static const char *const rx_hb_basenames[] = { "libHarfBuzzSharp.so", "libHarfBuzzSharp.dylib" };
+#endif
+#define RX_HB_NBASENAMES (int)(sizeof(rx_hb_basenames) / sizeof(rx_hb_basenames[0]))
+
+/* rx_dlopen each basename inside `dir` (absolute), first that loads wins, or NULL. */
+static void *rx_hb_dlopen_in_dir(const char *dir) {
+    char path[4096];
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        snprintf(path, sizeof(path), "%s/%s", dir, rx_hb_basenames[i]);
+        void *h = rx_dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
+}
+
+static void *rx_hb_dlopen(void) {
+    const char *env = getenv("RUXEN_CANVAS_HARFBUZZ");
+    if (env && env[0]) {
+        void *h = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    /* Bundled-app probe (packaging.md): the carried lib wins over a dev cache. */
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        void *h = rx_dlopen_exe_relative(rx_hb_basenames[i]);
+        if (h) return h;
+    }
+    const char *cache = getenv("RUXEN_CANVAS_CACHE");
+    if (cache && cache[0]) {
+        void *h = rx_hb_dlopen_in_dir(cache);
+        if (h) return h;
+    }
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char dir[4096];
+        snprintf(dir, sizeof(dir), "%s/.cache/ruxen-canvas", home);
+        void *h = rx_hb_dlopen_in_dir(dir);
+        if (h) return h;
+    }
+    /* System loader (LD_LIBRARY_PATH / DYLD path / PATH on Windows). */
+    for (int i = 0; i < RX_HB_NBASENAMES; i++) {
+        void *h = rx_dlopen(rx_hb_basenames[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) return h;
+    }
+    return NULL;
+}
+
+const RxHB *rx_hb(void) {
+    static RxHB hb;
+    static int initialized = 0;
+    if (initialized) return &hb;
+    initialized = 1;
+
+    void *lib = rx_hb_dlopen();
+    if (!lib) return &hb;   /* not available; shaping reports Err */
+
+    int ok = 1;
+#define RX_HB_REQ(field, sym)                                  \
+    do {                                                       \
+        *(void **)(&hb.field) = rx_dlsym(lib, sym);               \
+        if (!hb.field) ok = 0;                                 \
+    } while (0)
+    RX_HB_REQ(blob_create_from_file,             "hb_blob_create_from_file_or_fail");
+    RX_HB_REQ(face_create,                       "hb_face_create");
+    RX_HB_REQ(font_create,                       "hb_font_create");
+    RX_HB_REQ(font_set_scale,                    "hb_font_set_scale");
+    RX_HB_REQ(buffer_create,                     "hb_buffer_create");
+    RX_HB_REQ(buffer_add_utf8,                   "hb_buffer_add_utf8");
+    RX_HB_REQ(buffer_set_direction,              "hb_buffer_set_direction");
+    RX_HB_REQ(buffer_guess_segment_properties,   "hb_buffer_guess_segment_properties");
+    RX_HB_REQ(shape,                             "hb_shape");
+    RX_HB_REQ(buffer_get_length,                 "hb_buffer_get_length");
+    RX_HB_REQ(buffer_get_glyph_infos,            "hb_buffer_get_glyph_infos");
+    RX_HB_REQ(buffer_get_glyph_positions,        "hb_buffer_get_glyph_positions");
+    RX_HB_REQ(buffer_destroy,                    "hb_buffer_destroy");
+    RX_HB_REQ(font_destroy,                      "hb_font_destroy");
+    RX_HB_REQ(face_destroy,                      "hb_face_destroy");
+    RX_HB_REQ(blob_destroy,                      "hb_blob_destroy");
+#undef RX_HB_REQ
+
+    hb.available = ok;
+    return &hb;
+}
+
+/* ---- ICU loader (segmentation, docs/decisions/text-fallback.md) ----
+ *
+ * TWO platforms, two symbol-naming regimes:
+ *
+ *  - macOS: /usr/lib/libicucore.A.dylib is already present (dyld-shared-cache
+ *    only — no on-disk file, so `nm` can't see it; the symbol check is THIS
+ *    runtime dlsym). Apple re-exports the BARE `ubrk_*` / `ubidi_*` names, so the
+ *    unsuffixed dlsym resolves and ALL of ICU lives in one library handle.
+ *
+ *  - Linux: the system ICU exports VERSION-SUFFIXED symbols (`ubrk_open_74`,
+ *    `ubidi_open_74`, …) from VERSIONED sonames (`libicuuc.so.74`). The
+ *    unversioned `.so` is a -dev symlink that a runtime-only image (Debian slim,
+ *    most CI/containers) does NOT ship, so we scan a range of majors. ICU is also
+ *    SPLIT across two libraries there: `ubrk_*` live in libicuuc, but `ubidi_*`
+ *    may live in libicuuc OR libicui18n depending on the build, so we open BOTH
+ *    and resolve each symbol against whichever has it (icu.lib_uc / icu.lib_i18n).
+ *
+ * The suffix and the soname must AGREE (you cannot dlsym `ubrk_open_72` from a
+ * `.so.74`), so on Linux we DISCOVER the major once by probing a sentinel symbol,
+ * then bind every symbol with that one major. A miss -> ->available 0 -> ICU
+ * features report unavailable and the greedy-whitespace wrap stays the fallback
+ * (never a wrong wrap). Process-wide singleton. */
+
+/* The ICU major-version range we scan on Linux (and for the macOS suffix hedge).
+ * 66 ≈ Ubuntu 20.04 / Debian 11; the upper bound stays ahead of current releases.
+ * The DISCOVERED major (Linux) is cached so every symbol uses the matching suffix. */
+#define RX_ICU_MAJOR_MIN 66
+#define RX_ICU_MAJOR_MAX 80
+static int s_icu_major = 0;   /* 0 = bare names (macOS); >0 = the Linux suffix */
+
+/* dlsym a symbol applying the discovered suffix regime: bare name when
+ * s_icu_major==0 (macOS), else `<base>_<major>` (Linux). Returns NULL on a miss. */
+static void *rx_icu_dlsym(void *lib, const char *base) {
+    if (!lib) return NULL;
+    if (s_icu_major == 0) return rx_dlsym(lib, base);   /* macOS: bare */
+    char name[80];
+    snprintf(name, sizeof(name), "%s_%d", base, s_icu_major);
+    return rx_dlsym(lib, name);
+}
+
+/* Open the macOS libicucore, or NULL. */
+static void *rx_icu_dlopen_macos(void) {
+    void *h = rx_dlopen("/usr/lib/libicucore.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (h) return h;
+    return rx_dlopen("libicucore.dylib", RTLD_NOW | RTLD_LOCAL);
+}
+
+/* Open a versioned Linux soname `<stem>.so.<major>` (e.g. libicuuc.so.74), or
+ * NULL. dlopen of a bare soname searches the loader's library path. */
+static void *rx_icu_dlopen_soname(const char *stem, int major) {
+    char name[64];
+    snprintf(name, sizeof(name), "%s.so.%d", stem, major);
+    return rx_dlopen(name, RTLD_NOW | RTLD_LOCAL);
+}
+
+const RxICU *rx_icu(void) {
+    static RxICU icu;
+    static int initialized = 0;
+    if (initialized) return &icu;
+    initialized = 1;
+
+    void *lib_uc = NULL;     /* ubrk_* / u_strFromUTF8 (and macOS: everything) */
+    void *lib_i18n = NULL;   /* Linux: ubidi_* may live here instead of lib_uc  */
+
+    /* 1. Explicit override (an absolute path to one ICU library; bare names). */
+    const char *env = getenv("RUXEN_CANVAS_ICU");
+    if (env && env[0]) {
+        lib_uc = rx_dlopen(env, RTLD_NOW | RTLD_LOCAL);
+        s_icu_major = 0;   /* an override is dlsym'd with bare names */
+    }
+
+    /* 2. macOS libicucore (bare symbols, one handle). */
+    if (!lib_uc) {
+        lib_uc = rx_icu_dlopen_macos();
+        if (lib_uc) s_icu_major = 0;
+    }
+
+    /* 3. Linux: discover the major by probing each `libicuuc.so.<N>` for the
+     *    suffixed sentinel `ubrk_open_<N>`. The first soname whose suffixed
+     *    sentinel resolves fixes BOTH the handle and the suffix; then open the
+     *    matching libicui18n.so.<N> for ubidi_* (best-effort — bidi is optional). */
+    if (!lib_uc) {
+        for (int v = RX_ICU_MAJOR_MAX; v >= RX_ICU_MAJOR_MIN; v--) {
+            void *cand = rx_icu_dlopen_soname("libicuuc", v);
+            if (!cand) continue;
+            char sentinel[64];
+            snprintf(sentinel, sizeof(sentinel), "ubrk_open_%d", v);
+            if (rx_dlsym(cand, sentinel)) { lib_uc = cand; s_icu_major = v; break; }
+            rx_dlclose(cand);   /* wrong major (no matching suffixed symbol) */
+        }
+        /* Last-ditch: the unversioned -dev symlink, if a dev image has it. The
+         * symbols there are STILL suffixed, so the suffix scan below needs a
+         * major — probe the same range against this one handle. */
+        if (!lib_uc) {
+            void *cand = rx_dlopen("libicuuc.so", RTLD_NOW | RTLD_LOCAL);
+            if (cand) {
+                for (int v = RX_ICU_MAJOR_MAX; v >= RX_ICU_MAJOR_MIN; v--) {
+                    char sentinel[64];
+                    snprintf(sentinel, sizeof(sentinel), "ubrk_open_%d", v);
+                    if (rx_dlsym(cand, sentinel)) { lib_uc = cand; s_icu_major = v; break; }
+                }
+                /* Some dev builds expose BARE names from the .so symlink. */
+                if (!lib_uc && rx_dlsym(cand, "ubrk_open")) { lib_uc = cand; s_icu_major = 0; }
+                if (!lib_uc) rx_dlclose(cand);
+            }
+        }
+        /* Open the companion i18n library at the discovered major for ubidi_*. */
+        if (lib_uc && s_icu_major > 0)
+            lib_i18n = rx_icu_dlopen_soname("libicui18n", s_icu_major);
+    }
+
+    if (!lib_uc) return &icu;   /* not available; ICU features report unavailable */
+    icu.lib_uc   = lib_uc;
+    icu.lib_i18n = lib_i18n;
+
+    int ok = 1;
+#define RX_ICU_REQ(field, sym)                                  \
+    do {                                                        \
+        *(void **)(&icu.field) = rx_icu_dlsym(lib_uc, sym);     \
+        if (!icu.field) ok = 0;                                 \
+    } while (0)
+    RX_ICU_REQ(ubrk_open,      "ubrk_open");
+    RX_ICU_REQ(ubrk_setText,   "ubrk_setText");
+    RX_ICU_REQ(ubrk_first,     "ubrk_first");
+    RX_ICU_REQ(ubrk_next,      "ubrk_next");
+    RX_ICU_REQ(ubrk_following, "ubrk_following");
+    RX_ICU_REQ(ubrk_close,     "ubrk_close");
+    RX_ICU_REQ(u_strFromUTF8,  "u_strFromUTF8");
+#undef RX_ICU_REQ
+
+    /* bidi — OPTIONAL: a miss only disables the run-reorder path, not all of ICU.
+     * Resolve from libicuuc first (macOS, and Linux builds that keep ubidi there),
+     * then fall back to libicui18n (Linux distros that split it out). */
+#define RX_ICU_BIDI(field, sym)                                              \
+    do {                                                                     \
+        void *p = rx_icu_dlsym(lib_uc, sym);                                 \
+        if (!p && lib_i18n) p = rx_icu_dlsym(lib_i18n, sym);                 \
+        *(void **)(&icu.field) = p;                                          \
+    } while (0)
+    RX_ICU_BIDI(ubidi_open,         "ubidi_open");
+    RX_ICU_BIDI(ubidi_setPara,      "ubidi_setPara");
+    RX_ICU_BIDI(ubidi_countRuns,    "ubidi_countRuns");
+    RX_ICU_BIDI(ubidi_getVisualRun, "ubidi_getVisualRun");
+    RX_ICU_BIDI(ubidi_close,        "ubidi_close");
+#undef RX_ICU_BIDI
+    icu.bidi_ok = (icu.ubidi_open && icu.ubidi_setPara && icu.ubidi_countRuns &&
+                   icu.ubidi_getVisualRun && icu.ubidi_close) ? 1 : 0;
+
+    icu.available = ok;
+    return &icu;
+}
+
+/* ---- Metal device + command queue (Apple GPU, docs/GPU.md) ----
+ *
+ * The GrDirectContext for Metal needs an id<MTLDevice> + id<MTLCommandQueue>.
+ * These come from Metal.framework + the Objective-C runtime, reached by dlopen
+ * (no link-time dependency — same discipline as Skia/SDL). The device + queue
+ * are a PROCESS-WIDE singleton: there is one GPU, and a device outlives any one
+ * surface (the same never-freed-singleton model as the default font). They are
+ * created on first use and cached; a host's GrDirectContext + surface are the
+ * per-host objects torn down in host_drop, NOT the device/queue.
+ *
+ * MTLCreateSystemDefaultDevice() returns the system GPU WITHOUT any window or
+ * display — this is what makes offscreen, headless Metal rendering possible. */
+typedef struct {
+    int   tried;
+    int   available;   /* 1 iff device + queue were created */
+    void *device;      /* id<MTLDevice> */
+    void *queue;       /* id<MTLCommandQueue> */
+} RxMetal;
+
+static const RxMetal *rx_metal(void) {
+    static RxMetal m;
+    if (m.tried) return &m;
+    m.tried = 1;
+
+    /* Metal.framework: MTLCreateSystemDefaultDevice is a plain C function (it
+     * does not appear in nm's exported list but dlsym resolves it). */
+    void *mtl = rx_dlopen("/System/Library/Frameworks/Metal.framework/Metal",
+                       RTLD_NOW | RTLD_GLOBAL);
+    if (!mtl) return &m;
+    void *(*create_device)(void) = (void *(*)(void))rx_dlsym(mtl, "MTLCreateSystemDefaultDevice");
+    if (!create_device) return &m;
+
+    /* Objective-C runtime: we need one no-arg message send ([device
+     * newCommandQueue]). On arm64/x86_64 a simple id-returning, no-struct
+     * objc_msgSend is called through a plain function-pointer cast. */
+    void *objc = rx_dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) objc = rx_dlopen("libobjc.A.dylib", RTLD_NOW | RTLD_GLOBAL);
+    if (!objc) return &m;
+    void *(*msg_send)(void *, void *) = (void *(*)(void *, void *))rx_dlsym(objc, "objc_msgSend");
+    void *(*sel_reg)(const char *)    = (void *(*)(const char *))rx_dlsym(objc, "sel_registerName");
+    if (!msg_send || !sel_reg) return &m;
+
+    void *device = create_device();
+    if (!device) return &m;                 /* no GPU available */
+    void *queue = msg_send(device, sel_reg("newCommandQueue"));
+    if (!queue) return &m;
+
+    m.device    = device;
+    m.queue     = queue;
+    m.available = 1;
+    return &m;
+}
+
 /* Lazily create (once per host) a raster-direct Skia surface that wraps the
  * host's own 0xAARRGGBB framebuffer, and return its canvas — or NULL when Skia
  * is unavailable / creation failed. The surface is cached on the host and torn
  * down in host_drop before the pixels are freed. */
+static sk_canvas_t *rx_host_gpu_canvas(RxHost *h);   /* fwd: GPU rung below */
+
 static sk_canvas_t *rx_host_canvas(RxHost *h) {
     if (!h) return NULL;
+    /* GPU rung (top of the ladder, docs/GPU.md): a host put into GPU mode draws
+     * into its GPU-backed surface. Every drawing wrapper funnels through here,
+     * so routing all draws to the GPU canvas is exactly this one line — the
+     * ruxen_canvas_* ABI above is unchanged. If GPU mode is requested but the
+     * surface could not be built, we have already torn GPU mode down in
+     * enable_gpu, so gpu_requested is 0 here and we fall through to raster. */
+    if (h->is_gpu) {
+        if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+        return NULL;   /* GPU active flag but no surface: refuse (no wrong CPU draw) */
+    }
+    if (h->gpu_requested) {
+        sk_canvas_t *g = rx_host_gpu_canvas(h);
+        if (g) return g;
+        /* GPU build failed mid-flight: fall through to raster below. */
+    }
     if (h->sk_canvas) return (sk_canvas_t *)h->sk_canvas;
     if (h->sk_tried) return NULL;
     h->sk_tried = 1;
@@ -201,6 +755,333 @@ static sk_canvas_t *rx_host_canvas(RxHost *h) {
     h->sk_surface = surf;
     h->sk_canvas  = canvas;
     return canvas;
+}
+
+
+/* ---- GPU (Ganesh GL) backend (docs/GPU.md) ----
+ *
+ * The GPU rung of the backend-selection ladder. It is attempted ONLY when the
+ * host was put into GPU mode (gpu_requested, set by ruxen_canvas_host_enable_gpu
+ * after a GL window + context exist). On ANY failure we leave the GPU fields
+ * NULL and the caller falls back to the raster path — a GPU op that can't run
+ * must fall back cleanly, never produce wrong pixels (the non-negotiable
+ * invariant).
+ *
+ * These prototypes are the GL-context seam in runtime/sdl_window.c (both TUs
+ * always compile together). The GL context must be current before any gr_*
+ * call; create_gl makes it current and it stays so for this single-thread,
+ * single-window host. */
+int64_t ruxen_canvas_window_create_gl(int64_t self, int64_t win_scale);
+int64_t ruxen_canvas_window_gl_get_proc(int64_t name);
+int64_t ruxen_canvas_window_gl_drawable_size(int64_t self);
+int64_t ruxen_canvas_window_gl_present(int64_t self);
+/* on-screen Metal seam (runtime/sdl_window.c) */
+int64_t ruxen_canvas_window_create_metal(int64_t self, int64_t device, int64_t queue, int64_t win_scale);
+int64_t ruxen_canvas_window_metal_next_drawable(int64_t self);
+int64_t ruxen_canvas_window_metal_drawable_size(int64_t self);
+int64_t ruxen_canvas_window_metal_present(int64_t self);
+
+/* The proc-loader trampoline Skia calls to resolve each GL entry point. It
+ * forwards to SDL_GL_GetProcAddress via the shim's window seam. ctx is unused
+ * (the current GL context is implicit in SDL). */
+static void *rx_gl_get_proc(void *ctx, const char *name) {
+    (void)ctx;
+    return (void *)(intptr_t)ruxen_canvas_window_gl_get_proc((int64_t)name);
+}
+
+/* Build the GrGLInterface for the current GL context: prefer the explicit
+ * proc-loader assembly, fall back to the native (current-context) interface.
+ * Returns an owned interface (gr_glinterface_unref) or NULL. */
+static gr_glinterface_t *rx_make_gl_interface(const RxSkia *sk) {
+    gr_glinterface_t *gi = NULL;
+    if (sk->gr_glinterface_assemble_gl) {
+        gi = sk->gr_glinterface_assemble_gl(NULL, rx_gl_get_proc);
+    }
+    if (!gi && sk->gr_glinterface_create_native) {
+        gi = sk->gr_glinterface_create_native();
+    }
+    return gi;
+}
+
+/* Lazily create (once per host) the GPU-backed Skia surface over this host's GL
+ * window, and return its canvas — or NULL on any failure (caller falls back to
+ * raster). Caches gr_context / gr_target / gpu_surface / gl_interface and sets
+ * is_gpu on success. Only ever called for a gpu_requested host. */
+static sk_canvas_t *rx_host_gpu_canvas(RxHost *h) {
+    if (!h || !h->gpu_requested) return NULL;
+    if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+    if (h->gpu_tried) return NULL;
+    h->gpu_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_gl_ok) return NULL;
+
+    /* The GL context must already be current (create_gl did that). Drawable
+     * size is the HiDPI-correct backbuffer size; 0 means no GL window. */
+    int64_t packed = ruxen_canvas_window_gl_drawable_size((int64_t)h);
+    if (packed == 0) return NULL;
+    int gw = (int)(uint32_t)(packed >> 32);
+    int gh = (int)(uint32_t)(packed & 0xFFFFFFFF);
+    if (gw <= 0 || gh <= 0) return NULL;
+
+    gr_glinterface_t *gi = rx_make_gl_interface(sk);
+    if (!gi) return NULL;
+
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_gl(gi);
+    if (!ctx) {
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    /* Wrap the window's default framebuffer (FBO 0 on desktop GL, RGBA8). The
+     * struct may have a trailing field in some SkiaSharp builds; we declare the
+     * two ABI-stable leading fields and zero the rest implicitly. */
+    gr_gl_framebufferinfo_t fbo;
+    fbo.fFBOID  = 0;                 /* window default framebuffer */
+    fbo.fFormat = RX_GR_GL_RGBA8;
+    gr_backendrendertarget_t *rt =
+        sk->gr_backendrendertarget_new_gl(gw, gh, /*samples*/0, /*stencils*/8, &fbo);
+    if (!rt) {
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    sk_surface_t *surf = sk->surface_new_backend_render_target(
+        (gr_recording_context_t *)ctx, rt,
+        RX_GR_SURFACE_ORIGIN_BOTTOM_LEFT, RX_SK_COLORTYPE_RGBA_8888, NULL, NULL);
+    if (!surf) {
+        sk->gr_backendrendertarget_delete(rt);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_backendrendertarget_delete(rt);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        if (sk->gr_glinterface_unref) sk->gr_glinterface_unref(gi);
+        return NULL;
+    }
+
+    h->gr_context       = ctx;
+    h->gr_target        = rt;
+    h->gpu_surface      = surf;
+    h->gl_interface     = gi;
+    h->sk_surface       = NULL;   /* GPU host has no raster-direct surface */
+    h->sk_canvas        = canvas;
+    h->is_gpu           = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_GL;
+    return canvas;
+}
+
+static void rx_host_gpu_teardown(RxHost *h);   /* fwd */
+
+/* Invalidate a windowed GL host's persistent GPU surface after a window resize,
+ * so the NEXT begin_frame rebuilds it at the new backing (drawable) size. The GL
+ * default framebuffer was resized by the driver; we drop the now-wrongly-sized
+ * GrBackendRenderTarget + surface (+ context/interface) and clear the gpu_tried
+ * guard, leaving the host gpu_requested so rx_host_canvas rebuilds. Metal does
+ * not need this (its surface is per-frame). Called from the SDL resize handler. */
+void ruxen_canvas_host_gl_invalidate_surface(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return;
+    if (!h->is_gpu || h->gpu_windowed || h->gpu_offscreen) return;  /* GL windowed only */
+    if (h->gpu_backend_kind != RX_GPU_KIND_GL) return;
+    rx_host_gpu_teardown(h);     /* drops surface->target->context->interface;
+                                  * sets is_gpu=0, gpu_backend_kind=NONE. */
+    /* gpu_requested stays 1, so rx_host_canvas's gpu_requested branch calls
+     * rx_host_gpu_canvas to REBUILD the surface at the new drawable size on the
+     * next frame. Clearing gpu_tried re-arms that builder. */
+    h->gpu_tried = 0;
+}
+
+/* ---- Metal offscreen GPU surface (the headless pixel-verified path) ----
+ *
+ * Create (once per host) a GrDirectContext over the process-wide Metal device +
+ * queue, and an OFFSCREEN BGRA_8888 GPU surface sized to the host. Skia
+ * allocates the backing MTLTexture — no window, no CAMetalLayer, no display.
+ * Returns the surface's canvas, or NULL on any failure (caller falls back to
+ * raster — a Metal op that can't run must fall back cleanly, never wrong pixels).
+ *
+ * BGRA_8888 is deliberate: end_frame reads this surface back into h->pixels with
+ * a BGRA dst info, so the bytes land in the host's 0xAARRGGBB order and the
+ * existing read_pixel oracle observes the real GPU output byte-identically.
+ *
+ * The GrDirectContext is cached in gr_context and unref'd in host_drop. The
+ * device + queue are NOT per-host (rx_metal singleton). */
+static sk_canvas_t *rx_host_metal_offscreen_canvas(RxHost *h) {
+    if (!h || !h->gpu_requested) return NULL;
+    if (h->gpu_surface) return (sk_canvas_t *)h->sk_canvas;
+    if (h->gpu_tried) return NULL;
+    h->gpu_tried = 1;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return NULL;
+    const RxMetal *mtl = rx_metal();
+    if (!mtl->available) return NULL;
+
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_metal(mtl->device, mtl->queue);
+    if (!ctx) return NULL;
+
+    sk_imageinfo_t info;
+    info.colorspace = NULL;
+    info.width      = h->width;
+    info.height     = h->height;
+    info.colorType  = RX_SK_COLORTYPE_BGRA_8888;   /* readback matches 0xAARRGGBB */
+    info.alphaType  = RX_SK_ALPHA_PREMUL;
+
+    sk_surface_t *surf = sk->surface_new_render_target(
+        (gr_recording_context_t *)ctx, /*budgeted*/1, &info, /*samples*/0,
+        RX_GR_SURFACE_ORIGIN_TOP_LEFT, NULL, /*mips*/0);
+    if (!surf) {
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_recording_context_unref((gr_recording_context_t *)ctx);
+        return NULL;
+    }
+
+    h->gr_context       = ctx;
+    h->gr_target        = NULL;   /* offscreen: Skia owns the texture */
+    h->gpu_surface      = surf;
+    h->gl_interface     = NULL;
+    h->sk_surface       = NULL;
+    h->sk_canvas        = canvas;
+    h->is_gpu           = 1;
+    h->gpu_offscreen    = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_METAL;
+    return canvas;
+}
+
+/* ---- on-screen Metal: per-frame drawable surface (docs/GPU.md) ----
+ *
+ * Unlike the offscreen path (one persistent surface), an on-screen Metal frame
+ * renders into the CAMetalLayer's NEXT drawable, which is fresh each frame and
+ * consumed by present. So the GrDirectContext is persistent (built once at
+ * enable, stored in gr_context), but the SkSurface + GrBackendRenderTarget are
+ * PER-FRAME: begin_frame acquires the drawable and builds them; end_frame
+ * flushes; present presents the drawable; then the per-frame surface + target
+ * are released. This matches Skia's documented Metal swapchain flow. */
+
+/* Build (or return) the persistent GrDirectContext for a windowed-Metal host. */
+static gr_direct_context_t *rx_metal_window_context(RxHost *h) {
+    if (h->gr_context) return (gr_direct_context_t *)h->gr_context;
+    const RxSkia *sk = rx_skia();
+    const RxMetal *mtl = rx_metal();
+    if (!sk->available || !sk->gpu_metal_window_ok || !mtl->available) return NULL;
+    gr_direct_context_t *ctx = sk->gr_direct_context_make_metal(mtl->device, mtl->queue);
+    if (!ctx) return NULL;
+    h->gr_context = ctx;
+    return ctx;
+}
+
+/* Acquire this frame's drawable and build a GPU surface over its texture; set it
+ * as the host's live canvas. Returns the canvas, or NULL when no drawable is
+ * available (headless / no display — the frame then draws nothing and present is
+ * a clean no-op, never wrong pixels). Per-frame: gr_target + gpu_surface are the
+ * frame's, released in rx_metal_window_end_frame. */
+static void rx_metal_window_end_frame(RxHost *h);   /* fwd */
+
+static sk_canvas_t *rx_metal_window_begin_frame(RxHost *h) {
+    const RxSkia *sk = rx_skia();
+    /* Release the PRIOR frame's drawable surface + target before acquiring the
+     * next (present consumed the drawable; the wrapping surface/RT are stale).
+     * Doing it here, not in shim end_frame, keeps the drawable alive through the
+     * Window#present that runs between end_frame and the next begin_frame. */
+    rx_metal_window_end_frame(h);
+
+    gr_direct_context_t *ctx = rx_metal_window_context(h);
+    if (!ctx) return NULL;
+
+    /* acquire the layer's next drawable -> its MTLTexture (0/NULL headless). */
+    int64_t tex = ruxen_canvas_window_metal_next_drawable((int64_t)h);
+    if (!tex) return NULL;
+
+    int64_t packed = ruxen_canvas_window_metal_drawable_size((int64_t)h);
+    int dw = packed ? (int)(uint32_t)(packed >> 32) : h->width;
+    int dh = packed ? (int)(uint32_t)(packed & 0xFFFFFFFF) : h->height;
+    if (dw <= 0 || dh <= 0) return NULL;
+
+    gr_mtl_textureinfo_t mtlinfo;
+    mtlinfo.fTexture = (const void *)(intptr_t)tex;
+    gr_backendrendertarget_t *rt = sk->gr_backendrendertarget_new_metal(dw, dh, &mtlinfo);
+    if (!rt) return NULL;
+
+    /* The drawable's texture is BGRA8 (we set the layer's pixelFormat), top-left
+     * origin for a Metal layer. */
+    sk_surface_t *surf = sk->surface_new_backend_render_target(
+        (gr_recording_context_t *)ctx, rt,
+        RX_GR_SURFACE_ORIGIN_TOP_LEFT, RX_SK_COLORTYPE_BGRA_8888, NULL, NULL);
+    if (!surf) {
+        sk->gr_backendrendertarget_delete(rt);
+        return NULL;
+    }
+    sk_canvas_t *canvas = sk->surface_get_canvas(surf);
+    if (!canvas) {
+        sk->surface_unref(surf);
+        sk->gr_backendrendertarget_delete(rt);
+        return NULL;
+    }
+    h->gr_target   = rt;
+    h->gpu_surface = surf;
+    h->sk_canvas   = canvas;
+    return canvas;
+}
+
+/* Release this frame's drawable surface + render target (after flush/present).
+ * The GrDirectContext (gr_context) persists across frames. */
+static void rx_metal_window_end_frame(RxHost *h) {
+    const RxSkia *sk = rx_skia();
+    if (h->gpu_surface) {
+        if (sk->surface_unref) sk->surface_unref((sk_surface_t *)h->gpu_surface);
+        h->gpu_surface = NULL;
+    }
+    if (h->gr_target) {
+        if (sk->gr_backendrendertarget_delete)
+            sk->gr_backendrendertarget_delete((gr_backendrendertarget_t *)h->gr_target);
+        h->gr_target = NULL;
+    }
+    h->sk_canvas = NULL;
+}
+
+/* Release the GPU objects in the correct order (surface -> target -> context ->
+ * interface), BEFORE the GL context/window are destroyed by sdl_window.c. Safe
+ * to call on a non-GPU host (all NULL). */
+static void rx_host_gpu_teardown(RxHost *h) {
+    if (!h) return;
+    const RxSkia *sk = rx_skia();
+    if (h->gpu_surface) {
+        if (sk->surface_unref) sk->surface_unref((sk_surface_t *)h->gpu_surface);
+        h->gpu_surface = NULL;
+    }
+    if (h->gr_target) {
+        if (sk->gr_backendrendertarget_delete)
+            sk->gr_backendrendertarget_delete((gr_backendrendertarget_t *)h->gr_target);
+        h->gr_target = NULL;
+    }
+    if (h->gr_context) {
+        if (sk->gr_recording_context_unref)
+            sk->gr_recording_context_unref((gr_recording_context_t *)h->gr_context);
+        h->gr_context = NULL;
+    }
+    if (h->gl_interface) {
+        if (sk->gr_glinterface_unref)
+            sk->gr_glinterface_unref((gr_glinterface_t *)h->gl_interface);
+        h->gl_interface = NULL;
+    }
+    /* The Metal device + command queue are a process-wide singleton (rx_metal),
+     * not per-host — a device outlives any one surface, so they are NOT released
+     * here (same lifetime as the default font). Only the per-host GrDirectContext
+     * + surface above are torn down. */
+    if (h->is_gpu) { h->sk_canvas = NULL; h->is_gpu = 0; }
+    h->gpu_backend_kind = RX_GPU_KIND_NONE;
+    h->gpu_offscreen = 0;
+    h->gpu_windowed = 0;
 }
 
 
@@ -232,6 +1113,12 @@ int64_t ruxen_canvas_host_is_null(int64_t self) {
     return self == 0 ? 1 : 0;
 }
 
+/* Identity accessor: a RawHost's handle IS its pointer. Lets the Ruxen side pass
+ * a host as a plain Int to a binding that takes the host by value (e.g.
+ * RawImage.snapshot_of, whose RawImage return type only resolves in its own file).
+ * Mirrors ruxen_canvas_image_ptr. */
+int64_t ruxen_canvas_host_ptr(int64_t self) { return self; }
+
 /* Tear the host down. Called from the Ruxen side's drop — deterministic,
  * no GC. */
 /* defined in runtime/sdl_window.c — tears the OS window down when its
@@ -241,6 +1128,11 @@ void ruxen_canvas_window_note_host_dropped(int64_t self);
 void ruxen_canvas_host_drop(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return;
+    /* GPU objects reference the GL context, so they MUST be released before the
+     * GL context/window are torn down. Order: GPU surface stack first, then the
+     * window (note_host_dropped deletes the GL context + window), then the
+     * raster surface + pixels. */
+    rx_host_gpu_teardown(h);
     ruxen_canvas_window_note_host_dropped(self);
     /* The Skia surface wraps h->pixels — unref it before freeing the buffer.
      * (sk_canvas is owned by the surface; no separate release.) */
@@ -249,6 +1141,13 @@ void ruxen_canvas_host_drop(int64_t self) {
         if (sk->available) sk->surface_unref((sk_surface_t *)h->sk_surface);
         h->sk_surface = NULL;
         h->sk_canvas  = NULL;
+    }
+    /* Free any owned dropped-file paths still held: the most-recently-polled one
+     * in `pending`, plus every UNPOLLED ring slot (a host dropped with file-drop
+     * events still queued). Without this a never-polled drop would leak its path. */
+    if (h->pending.drop_path) { free(h->pending.drop_path); h->pending.drop_path = NULL; }
+    for (int32_t i = 0; i < RXC_EVENT_CAP; i++) {
+        if (h->events[i].drop_path) { free(h->events[i].drop_path); h->events[i].drop_path = NULL; }
     }
     free(h->pixels);
     free(h);
@@ -274,6 +1173,205 @@ int64_t ruxen_canvas_skia_active(int64_t self) {
     return rx_host_canvas(h) != NULL ? 1 : 0;
 }
 
+/* True (1) when SOME GPU backend (Ganesh GL or Metal) COULD run in this process:
+ * Skia is loaded AND the required gr_* symbols for at least one backend resolved.
+ * A capability probe: it does NOT prove a context or surface exists for any host
+ * (use ruxen_canvas_gpu_active for that). Mirrors skia_available. */
+int64_t ruxen_canvas_gpu_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available) return 0;
+    return (sk->gpu_gl_ok || sk->gpu_metal_ok) ? 1 : 0;
+}
+
+/* True (1) when the Metal GPU backend specifically could run: the Metal Skia
+ * symbols resolved AND a Metal device + queue could be created (rx_metal). This
+ * is what gates the headless offscreen render+readback path. */
+int64_t ruxen_canvas_gpu_metal_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return 0;
+    return rx_metal()->available ? 1 : 0;
+}
+
+/* Put this host into GPU mode: create a GL window + current context for it,
+ * then build the GPU-backed Skia surface. Returns RXC_OK when the GPU surface
+ * is live (subsequent draws target it and present is a GL swap), or a clean
+ * RXC_ERR_* on ANY failure — in which case the host is left in its prior
+ * (raster/software) state, NOT half-GPU. The caller (Window) falls back to the
+ * raster show path on error. Idempotent once GPU is active. */
+int64_t ruxen_canvas_host_enable_gpu(int64_t self, int64_t win_scale) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;                 /* already on GPU */
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_gl_ok) return RXC_ERR_NO_SKIA;
+    /* A GPU host cannot have already created a raster-direct surface for this
+     * frame's pixels — that would mean draws already went to the CPU buffer.
+     * Require GPU to be enabled before any frame/draw. */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    /* Create the GL window (win_scale × design for on-screen size) + make its
+     * context current. Bounded + clean on a headless host (Err, never blocks). */
+    int64_t wc = ruxen_canvas_window_create_gl(self, win_scale);
+    if (wc != RXC_OK) return wc;
+
+    h->gpu_requested = 1;
+    h->gpu_tried     = 0;     /* allow the build attempt now */
+    sk_canvas_t *canvas = rx_host_gpu_canvas(h);
+    if (!canvas) {
+        /* GPU surface creation failed AFTER the GL window came up: tear the GL
+         * window back down so the host can fall back to the raster window path
+         * cleanly (no orphaned GL window). */
+        h->gpu_requested = 0;
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_NO_SKIA;
+    }
+    /* DESIGN size = the logical framebuffer size; begin_frame scales design->
+     * backing so logical-coord apps fill the native GL drawable at native
+     * density (crisp). Same as the Metal windowed path. */
+    h->design_w = h->width;
+    h->design_h = h->height;
+    return RXC_OK;
+}
+
+/* Put this host into OFFSCREEN Metal GPU mode (the headless, pixel-verified
+ * path — docs/GPU.md): build a GrDirectContext over the system Metal device and
+ * an offscreen BGRA GPU surface sized to the host. No window / display needed.
+ * Subsequent draws target the GPU surface; end_frame flushes + reads the pixels
+ * back into the host framebuffer so read_pixel observes real GPU output.
+ *
+ * Returns RXC_OK when the Metal surface is live, or a clean RXC_ERR_* on ANY
+ * failure — in which case the host is left in its prior (raster/software) state,
+ * NOT half-GPU (a Metal op that can't run falls back cleanly). Idempotent once
+ * a GPU surface is active. Unlike enable_gpu, this needs NO SDL/window. */
+int64_t ruxen_canvas_host_enable_gpu_offscreen(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;                 /* already on GPU */
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_ok) return RXC_ERR_NO_SKIA;
+    if (!rx_metal()->available) return RXC_ERR_NO_SKIA;   /* no GPU device */
+    /* Must be enabled before any frame/draw created a raster-direct surface. */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    h->gpu_requested = 1;
+    h->gpu_tried     = 0;     /* allow the build attempt now */
+    sk_canvas_t *canvas = rx_host_metal_offscreen_canvas(h);
+    if (!canvas) {
+        h->gpu_requested = 0;     /* fall back to raster cleanly */
+        return RXC_ERR_NO_SKIA;
+    }
+    return RXC_OK;
+}
+
+/* Put this host into ON-SCREEN Metal GPU mode (docs/GPU.md): open a
+ * SDL_WINDOW_METAL window with a CAMetalLayer configured for the system Metal
+ * device, and a persistent GrDirectContext over it. Per frame, begin_frame
+ * acquires the layer's next drawable + builds a GPU surface over it; end_frame
+ * flushes; Window#present presents the drawable. Returns RXC_OK when the window
+ * + layer + context + a first drawable are live, or a clean RXC_ERR_* on ANY
+ * failure — in which case the host is torn back down (NOT half-GPU) so the
+ * caller falls back to the GL-window / raster path. Needs SDL + a display.
+ *
+ * The "first drawable" check is the gate that distinguishes a real display from
+ * a headless host: nextDrawable is nil without a window-server-backed layer, so
+ * a headless host fails here and falls back cleanly. */
+int64_t ruxen_canvas_host_enable_gpu_windowed(int64_t self, int64_t win_scale) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (h->is_gpu) return RXC_OK;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->gpu_metal_window_ok) return RXC_ERR_NO_SKIA;
+    const RxMetal *mtl = rx_metal();
+    if (!mtl->available) return RXC_ERR_NO_SKIA;          /* no GPU device */
+    if (h->sk_surface || h->sk_canvas) return RXC_ERR_IN_FRAME;
+
+    /* Open the Metal window + layer (win_scale × design for on-screen size),
+     * configured with our device + queue. Bounded + clean on a headless host. */
+    int64_t wc = ruxen_canvas_window_create_metal(
+        self, (int64_t)(intptr_t)mtl->device, (int64_t)(intptr_t)mtl->queue, win_scale);
+    if (wc != RXC_OK) return wc;
+
+    /* Build the persistent GrDirectContext and prove a drawable can be acquired
+     * (real display). On failure, tear the window back down for a clean fallback. */
+    if (!rx_metal_window_context(h)) {
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_NO_SKIA;
+    }
+    int64_t tex = ruxen_canvas_window_metal_next_drawable(self);
+    if (!tex) {
+        /* no drawable -> headless / no display: fall back to GL/raster. */
+        rx_host_gpu_teardown(h);
+        ruxen_canvas_window_note_host_dropped(self);
+        return RXC_ERR_PRESENT;
+    }
+
+    h->gpu_requested    = 1;
+    h->gpu_windowed     = 1;
+    h->is_gpu           = 1;
+    h->gpu_backend_kind = RX_GPU_KIND_METAL;
+    /* DESIGN size = the logical framebuffer size (what Window.open allocated).
+     * begin_frame scales design->backing so a logical-coord app fills the native
+     * drawable at native density (crisp), no per-app wiring. */
+    h->design_w = h->width;
+    h->design_h = h->height;
+    /* The drawable we just acquired to gate is released when the first
+     * begin_frame acquires its own; nothing rendered into it. */
+    return RXC_OK;
+}
+
+/* True (1) only when THIS host has a live GPU-backed Skia surface — a
+ * GrDirectContext + GPU surface exist and draws genuinely go through the GPU
+ * (GL window backend OR offscreen Metal). The unambiguous "GPU is rendering into
+ * me" signal (mirrors skia_active for the raster surface). */
+int64_t ruxen_canvas_gpu_active(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    return (h->is_gpu && h->gpu_surface) ? 1 : 0;
+}
+
+static void rx_host_content_scale(RxHost *h, double *sx, double *sy);  /* fwd */
+
+/* Set the DESIGN size for this host — the logical coordinate space the app draws
+ * in. begin_frame then applies a base content-scale = surface(backing) size /
+ * design size, so design-coordinate draws fill the native backing surface at
+ * native resolution. Windowed hosts set this automatically at enable; this entry
+ * lets an OFFSCREEN surface opt into the same content-scale (e.g. a backing-sized
+ * framebuffer with a smaller design size — the headless content-scale test).
+ * Pass 0,0 to disable (back to scale 1). Returns RXC_OK. */
+int64_t ruxen_canvas_host_set_design_size(int64_t self, int64_t design_w, int64_t design_h) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (design_w < 0 || design_h < 0) return RXC_ERR_BAD_ARGS;
+    h->design_w = (int32_t)design_w;
+    h->design_h = (int32_t)design_h;
+    return RXC_OK;
+}
+
+/* The content scale applied to design coordinates this frame, packed as two
+ * 16.16 fixed-point ratios: (sx << 32) | sy, each = round(scale * 65536). 1.0 ==
+ * 0x10000. Lets L2/tests read the active design->backing scale (1.0 when none).
+ * Sized fields probe — not part of the draw ABI. */
+int64_t ruxen_canvas_content_scale(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return ((int64_t)0x10000 << 32) | 0x10000;
+    double sx = 1.0, sy = 1.0;
+    rx_host_content_scale(h, &sx, &sy);
+    int64_t fx = (int64_t)(sx * 65536.0 + 0.5);
+    int64_t fy = (int64_t)(sy * 65536.0 + 0.5);
+    return (fx << 32) | (fy & 0xFFFFFFFF);
+}
+
+/* Which GPU backend is live for this host: RX_GPU_KIND_NONE (0, raster),
+ * RX_GPU_KIND_GL (1), or RX_GPU_KIND_METAL (2). The gpu_backend_kind slot, so
+ * L2/tests can tell which rung selection landed on. */
+int64_t ruxen_canvas_gpu_backend_kind(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RX_GPU_KIND_NONE;
+    return (h->is_gpu && h->gpu_surface) ? h->gpu_backend_kind : RX_GPU_KIND_NONE;
+}
+
 int64_t ruxen_canvas_host_width(int64_t self) {
     RxHost *h = (RxHost *)self;
     return h ? h->width : 0;
@@ -296,36 +1394,130 @@ int64_t ruxen_canvas_read_pixel(int64_t self, int64_t x, int64_t y) {
 
 /* ---- frame discipline ---- */
 
+static sk_canvas_t *rx_metal_window_begin_frame(RxHost *h);   /* fwd */
+
+/* The PIXEL size of the host's active rendering surface. For an ON-SCREEN GPU
+ * host (windowed Metal OR windowed GL) this is the window's drawable (backing)
+ * size; otherwise it is the framebuffer size (h->width/height — which for the
+ * offscreen content-scale test IS the backing size). Used to derive the
+ * design->backing content scale. */
+static void rx_host_surface_size(RxHost *h, int *out_w, int *out_h) {
+    int sw = h->width, sh = h->height;
+    int64_t packed = 0;
+    if (h->gpu_windowed) {
+        /* windowed Metal: per-frame drawable */
+        packed = ruxen_canvas_window_metal_drawable_size((int64_t)h);
+    } else if (h->is_gpu && !h->gpu_offscreen && h->gpu_backend_kind == RX_GPU_KIND_GL) {
+        /* windowed GL: the GL default-framebuffer drawable */
+        packed = ruxen_canvas_window_gl_drawable_size((int64_t)h);
+    }
+    if (packed != 0) {
+        int dw = (int)(uint32_t)(packed >> 32);
+        int dh = (int)(uint32_t)(packed & 0xFFFFFFFF);
+        if (dw > 0 && dh > 0) { sw = dw; sh = dh; }
+    }
+    *out_w = sw;
+    *out_h = sh;
+}
+
+/* The HiDPI design->backing content scale for this host: surface(backing) size /
+ * design size. Returns 1.0/1.0 (no scale) when design_w/h is unset (offscreen /
+ * test surfaces draw at explicit pixel sizes). Applied as the base transform in
+ * begin_frame so DESIGN-coordinate draws fill the backing surface at native
+ * resolution (crisp glyphs/shapes). docs/GPU.md. */
+static void rx_host_content_scale(RxHost *h, double *sx, double *sy) {
+    *sx = 1.0; *sy = 1.0;
+    if (h->design_w <= 0 || h->design_h <= 0) return;   /* no content scale */
+    int sw = 0, sh = 0;
+    rx_host_surface_size(h, &sw, &sh);
+    if (sw > 0 && h->design_w > 0) *sx = (double)sw / (double)h->design_w;
+    if (sh > 0 && h->design_h > 0) *sy = (double)sh / (double)h->design_h;
+}
+
 int64_t ruxen_canvas_begin_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (h->in_frame) return RXC_ERR_IN_FRAME;
     h->in_frame = 1;
+    /* Reset paint state that must not leak across frames: blend mode back to the
+     * default SrcOver (the transform/clip reset is below, on the Skia canvas). */
+    h->blend_mode = RX_BLEND_SRC_OVER;
+    /* On-screen Metal: acquire this frame's drawable + build the per-frame GPU
+     * surface BEFORE any drawing. If no drawable (headless/no display), the
+     * frame has no GPU canvas and draws are skipped — a clean no-op, never wrong
+     * pixels (present is then also a no-op). */
+    if (h->gpu_windowed) {
+        rx_metal_window_begin_frame(h);   /* sets h->sk_canvas, or leaves NULL */
+    }
     /* Reset canvas state so NOTHING (transform or clip) leaks across frames.
      * restore_to_count(1) pops everything above the pristine base; reset_matrix
-     * clears any base-level matrix change. Then we push one save so the whole
-     * frame runs at depth >= 2 — this is what lets the NEXT begin_frame's
-     * restore_to_count(1) discard even a clip the caller applied WITHOUT a save
-     * (a base-level clip is not undone by restore_to_count alone, and there is
-     * no reset-clip call). Same approach Flutter uses (an outer per-frame save). */
+     * clears any base-level matrix change.
+     *
+     * Then apply the HiDPI content scale (design->backing) as the FIRST transform
+     * — so DESIGN-coordinate draws fill the native-pixel backing surface and Skia
+     * rasterizes at native density (crisp). This is a no-op (scale 1) for
+     * offscreen/test surfaces (design_w/h unset). Finally push one save so the
+     * whole frame runs at depth >= 2 — letting the NEXT begin_frame's
+     * restore_to_count(1) discard even a base-level clip the caller applied
+     * without a save. The content scale lives BELOW that save, so it is the
+     * pristine base every frame re-establishes (and save/restore can't lose it). */
     sk_canvas_t *canvas = rx_host_canvas(h);
     if (canvas) {
         const RxSkia *sk = rx_skia();
         if (sk->canvas_restore_to_count) sk->canvas_restore_to_count(canvas, 1);
         if (sk->canvas_reset_matrix) sk->canvas_reset_matrix(canvas);
+        double sx = 1.0, sy = 1.0;
+        rx_host_content_scale(h, &sx, &sy);
+        if ((sx != 1.0 || sy != 1.0) && sk->canvas_scale) {
+            sk->canvas_scale(canvas, (float)sx, (float)sy);
+        }
         if (sk->canvas_save) sk->canvas_save(canvas);
     }
     return RXC_OK;
 }
 
-/* End the frame. The software backend has nothing to flip; presenting to
+/* End the frame. The software/raster backend has nothing to flip; presenting to
  * a live window is the explicit ruxen_canvas_window_present call in
- * runtime/sdl_window.c (the Ruxen Window.end_frame does both). */
+ * runtime/sdl_window.c (the Ruxen Window.end_frame does both).
+ *
+ * GPU path (docs/GPU.md): Skia batches GPU draws, so the frame's commands must
+ * be flushed + submitted to the GL context here, BEFORE the GL buffer swap the
+ * Window present step issues. Without the flush the swap would present an empty
+ * or partial backbuffer. We prefer flush_and_submit (ensures the GL commands are
+ * handed to the driver), falling back to plain flush. */
 int64_t ruxen_canvas_end_frame(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     h->in_frame = 0;
+    if (h->is_gpu && h->gr_context) {
+        const RxSkia *sk = rx_skia();
+        /* Flush + submit the batched GPU draws to the device. flush_and_submit
+         * (sync=1 for the offscreen path) guarantees the work is done before we
+         * read it back; for the windowed path it precedes the buffer swap. */
+        int sync = h->gpu_offscreen ? 1 : 0;
+        if (sk->gr_direct_context_flush_and_submit) {
+            sk->gr_direct_context_flush_and_submit((gr_direct_context_t *)h->gr_context, sync);
+        } else if (sk->gr_direct_context_flush) {
+            sk->gr_direct_context_flush((gr_direct_context_t *)h->gr_context);
+        }
+        /* Offscreen Metal: copy the GPU pixels back into the host framebuffer so
+         * read_pixel observes the real GPU output. The surface is BGRA_8888, so
+         * a BGRA dst info lands the bytes in the host's 0xAARRGGBB order — the
+         * raster oracle is byte-identical to the GPU result. A failed readback
+         * is reported (never leaves a stale/garbage buffer silently). */
+        if (h->gpu_offscreen && h->gpu_surface && sk->surface_read_pixels) {
+            sk_imageinfo_t dst;
+            dst.colorspace = NULL;
+            dst.width      = h->width;
+            dst.height     = h->height;
+            dst.colorType  = RX_SK_COLORTYPE_BGRA_8888;
+            dst.alphaType  = RX_SK_ALPHA_PREMUL;
+            int ok = sk->surface_read_pixels((sk_surface_t *)h->gpu_surface, &dst,
+                                             h->pixels, (size_t)h->width * 4, 0, 0);
+            if (!ok) return RXC_ERR_PRESENT;
+        }
+    }
     return RXC_OK;
 }
 
@@ -358,6 +1550,97 @@ int64_t ruxen_canvas_restore(int64_t self) {
     const RxSkia *sk = rx_skia();
     if (canvas && sk->canvas_restore) sk->canvas_restore(canvas);
     return RXC_OK;
+}
+
+/* ---- offscreen layers (Skia-only) ----
+ *
+ * save_layer pushes an offscreen layer onto the same save stack as save();
+ * subsequent draws accumulate into it, and the matching restore() composites
+ * the whole layer down at once — the basis for group opacity and blended
+ * overlays (fade transitions, translucent panels). Unlike the matrix/clip
+ * save ops (which no-op on the software fallback to keep the stack balanced),
+ * a layer that silently failed to composite would yield WRONG pixels, not just
+ * unstyled ones — so these are strictly Skia-only and report the failure.
+ *
+ * Both return the layer's save count (>= 1) on success, to pair with restore /
+ * restore_to. Failure is signalled as a NEGATIVE value: -RXC_ERR_* (the Ruxen
+ * side maps any negative back to the matching Err, non-negative to Ok(count)).
+ * Skia save counts are always >= 1, so the sign is an unambiguous channel. */
+
+/* Push a whole-canvas offscreen layer (bounds = NULL). */
+int64_t ruxen_canvas_save_layer(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer) return -RXC_ERR_NO_SKIA;
+    return (int64_t)sk->canvas_save_layer(canvas, NULL, NULL);
+}
+
+/* Push a whole-canvas offscreen layer whose paint carries a Gaussian BLUR image
+ * filter (sigma px): everything drawn into the layer is blurred when the matching
+ * restore composites it down. The general blur primitive — it blurs arbitrary
+ * content (shapes, text, paths), generalizing the rrect-only drop shadow. Returns
+ * the layer's save count (>= 1) to pair with restore / restore_to, or a NEGATIVE
+ * -RXC_ERR_* on failure. sigma <= 0 is rejected (a non-blurring blur layer is a
+ * caller bug; use plain save_layer). The filter is unref'd after save_layer takes
+ * its own ref (the layer owns it for its lifetime). Skia-only. */
+int64_t ruxen_canvas_save_layer_blur(int64_t self, double sigma) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (rxc_is_nan(sigma) || !(sigma > 0.0) || !rxc_finite_pixels(sigma)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer || !sk->imagefilter_new_blur ||
+        !sk->paint_set_imagefilter || !sk->imagefilter_unref ||
+        !sk->paint_new || !sk->paint_delete) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    sk_paint_t *lp = sk->paint_new();
+    if (!lp) return -RXC_ERR_BAD_ARGS;
+    /* tile_mode 1 = clamp (decal edges to the source). NULL input = blur the
+     * layer's own content; NULL crop = no crop. */
+    sk_imagefilter_t *filt = sk->imagefilter_new_blur((float)sigma, (float)sigma, 1, NULL, NULL);
+    if (!filt) { sk->paint_delete(lp); return -RXC_ERR_NO_SKIA; }
+    sk->paint_set_imagefilter(lp, filt);
+    int count = sk->canvas_save_layer(canvas, NULL, lp);
+    sk->imagefilter_unref(filt);   /* the layer holds its own ref now */
+    sk->paint_delete(lp);
+    return (int64_t)count;
+}
+
+/* Push a whole-canvas offscreen layer composited with a uniform group opacity
+ * `alpha` (0..255). Out-of-range alpha is rejected.
+ *
+ * This build's libSkiaSharp does NOT export sk_canvas_save_layer_alpha (verified
+ * by nm — only sk_canvas_save_layer / _rec exist; the _alpha convenience wrapper
+ * was removed upstream). We implement group opacity the canonical way instead:
+ * sk_canvas_save_layer(bounds=NULL, paint) where the paint carries only the
+ * group alpha — SkCanvas applies the layer paint's alpha as the whole-layer
+ * opacity on restore, which is exactly what saveLayerAlpha did internally. The
+ * paint's RGB is irrelevant for this (alpha-only) use. */
+int64_t ruxen_canvas_save_layer_alpha(int64_t self, int64_t alpha) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (alpha < 0 || alpha > 255) return -RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (!canvas || !sk->canvas_save_layer || !sk->paint_new ||
+        !sk->paint_set_color || !sk->paint_delete) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    sk_paint_t *paint = sk->paint_new();
+    if (!paint) return -RXC_ERR_BAD_ARGS;
+    /* alpha in the high byte; RGB ignored for layer group opacity. */
+    sk->paint_set_color(paint, (sk_color_t)((uint32_t)alpha << 24));
+    int count = sk->canvas_save_layer(canvas, NULL, paint);
+    sk->paint_delete(paint);   /* saveLayer copies the paint; safe to free now */
+    return (int64_t)count;
 }
 
 /* Restore down to a save count from a prior save (unwinds nested saves). */
@@ -413,6 +1696,52 @@ int64_t ruxen_canvas_rotate(int64_t self, double degrees) {
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
     if (canvas && sk->canvas_rotate_degrees) sk->canvas_rotate_degrees(canvas, (float)degrees);
+    return RXC_OK;
+}
+
+/* Skew the coordinate system by (sx, sy): x' = x + sx*y, y' = y + sy*x. Composes
+ * with the current matrix, scoped by save/restore — like translate/scale/rotate.
+ * Skia-only (no software-fallback transform); a no-op when the backend is absent. */
+int64_t ruxen_canvas_skew(int64_t self, double sx, double sy) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(sx) || !rxc_finite_pixels(sy)) return RXC_ERR_BAD_ARGS;
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_skew) sk->canvas_skew(canvas, (float)sx, (float)sy);
+    return RXC_OK;
+}
+
+/* Concatenate a full 2D affine onto the current matrix. The six args are the top
+ * two rows of the 3x3 (row-major): a=scaleX b=skewX c=transX / d=skewY e=scaleY
+ * f=transY; the perspective row is fixed to identity (0,0,1). This is the general
+ * primitive translate/scale/rotate/skew are special cases of. Composes + is scoped
+ * by save/restore. Skia-only; a no-op when the backend is absent. */
+int64_t ruxen_canvas_concat(int64_t self, double a, double b, double c,
+                            double d, double e, double f) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(a) || !rxc_finite_pixels(b) || !rxc_finite_pixels(c) ||
+        !rxc_finite_pixels(d) || !rxc_finite_pixels(e) || !rxc_finite_pixels(f)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    if (canvas && sk->canvas_concat) {
+        /* a=scaleX b=skewX c=transX / d=skewY e=scaleY f=transY -> a 4x4 SkM44 in
+         * COLUMN-MAJOR order (this build's sk_canvas_concat ABI; see skia_capi.h).
+         * col0=(scaleX,skewY,0,0) col1=(skewX,scaleY,0,0) col2=(0,0,1,0)
+         * col3=(transX,transY,0,1). */
+        float m44[16] = {
+            (float)a, (float)d, 0.0f, 0.0f,   /* col0: scaleX, skewY */
+            (float)b, (float)e, 0.0f, 0.0f,   /* col1: skewX,  scaleY */
+            0.0f,     0.0f,     1.0f, 0.0f,   /* col2 */
+            (float)c, (float)f, 0.0f, 1.0f,   /* col3: transX, transY */
+        };
+        sk->canvas_concat(canvas, m44);
+    }
     return RXC_OK;
 }
 
@@ -472,6 +1801,43 @@ int64_t ruxen_canvas_clip_round_rect(int64_t self, double x, double y, double w,
 static int rxc_check_color(int64_t r, int64_t g, int64_t b, int64_t a) {
     return r >= 0 && r <= 255 && g >= 0 && g <= 255 &&
            b >= 0 && b <= 255 && a >= 0 && a <= 255;
+}
+
+/* Map the canvas-side RX_BLEND_* enum to this build's SkBlendMode int (pinned
+ * empirically: SrcOver=3, Clear=0, Src=1, Screen=14, Multiply=24). Unknown ->
+ * SrcOver, so a bad value degrades to the safe default rather than a wrong mode. */
+static int rxc_skblend(int32_t mode) {
+    switch (mode) {
+    case RX_BLEND_CLEAR:    return 0;   /* SkBlendMode::kClear */
+    case RX_BLEND_SRC:      return 1;   /* kSrc */
+    case RX_BLEND_SCREEN:   return 14;  /* kScreen */
+    case RX_BLEND_MULTIPLY: return 24;  /* kMultiply */
+    case RX_BLEND_SRC_OVER:
+    default:                return 3;   /* kSrcOver (default) */
+    }
+}
+
+/* Apply the host's current blend mode to a freshly-built paint. A no-op for the
+ * default SrcOver (Skia paints already default to SrcOver, so we skip the call)
+ * and when the symbol is absent (older lib) — the draw then uses SrcOver, which
+ * is the documented fallback. Every draw wrapper that builds a Skia paint calls
+ * this just before issuing the draw. */
+static void rx_apply_blend(const RxSkia *sk, sk_paint_t *paint, const RxHost *h) {
+    if (!h || h->blend_mode == RX_BLEND_SRC_OVER) return;
+    if (sk->paint_set_blendmode) sk->paint_set_blendmode(paint, rxc_skblend(h->blend_mode));
+}
+
+/* Set the current blend mode for subsequent draws (docs/ROADMAP.md Phase-1 E1).
+ * The mode is a small RX_BLEND_* int; out-of-range is rejected so a caller can't
+ * silently set a meaningless mode. State persists until changed or until the next
+ * begin_frame resets it to SrcOver. Does NOT require the Skia backend to STORE the
+ * mode (it just sets host state); a draw applies it only when Skia is active. */
+int64_t ruxen_canvas_set_blend_mode(int64_t self, int64_t mode) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return RXC_ERR_BAD_ARGS;
+    if (mode < 0 || mode > RX_BLEND_MAX) return RXC_ERR_BAD_ARGS;
+    h->blend_mode = (int32_t)mode;
+    return RXC_OK;
 }
 
 static uint32_t rxc_pack(int64_t r, int64_t g, int64_t b, int64_t a) {
@@ -545,6 +1911,7 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
         sk->paint_set_antialias(paint, 0);   /* crisp integer-aligned edges */
         sk->paint_set_style(paint, RX_SK_PAINT_FILL);
         sk->paint_set_color(paint, (sk_color_t)rxc_pack(r, g, b, a));
+        rx_apply_blend(sk, paint, h);
         sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
         sk->canvas_draw_rect(canvas, &rect, paint);   /* Skia clips to surface */
         sk->paint_delete(paint);
@@ -581,7 +1948,7 @@ int64_t ruxen_canvas_draw_rect(int64_t self, double x, double y, double w, doubl
 
 /* Build a paint for the given packed color and stroke width, or NULL on
  * allocation failure. Caller owns it (paint_delete). */
-static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w) {
+static sk_paint_t *rx_make_paint(const RxSkia *sk, const RxHost *h, int64_t argb, double stroke_w) {
     sk_paint_t *p = sk->paint_new();
     if (!p) return NULL;
     sk->paint_set_antialias(p, 1);
@@ -592,6 +1959,7 @@ static sk_paint_t *rx_make_paint(const RxSkia *sk, int64_t argb, double stroke_w
         sk->paint_set_style(p, RX_SK_PAINT_FILL);
     }
     sk->paint_set_color(p, (sk_color_t)(uint32_t)argb);
+    rx_apply_blend(sk, p, h);   /* honor the host's current blend mode */
     return p;
 }
 
@@ -622,7 +1990,7 @@ int64_t ruxen_canvas_draw_circle(int64_t self, double cx, double cy, double radi
         !rxc_finite_pixels(radius) || !rxc_finite_pixels(stroke_w)) {
         return RXC_ERR_BAD_ARGS;
     }
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rect_t bounds = { (float)(cx - radius), (float)(cy - radius),
                          (float)(cx + radius), (float)(cy + radius) };
@@ -648,7 +2016,7 @@ int64_t ruxen_canvas_draw_round_rect(int64_t self, double x, double y, double w,
         return RXC_ERR_BAD_ARGS;
     }
     double rad = radius > 0.0 ? radius : 0.0;
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rect_t rect = { (float)x, (float)y, (float)(x + w), (float)(y + hgt) };
     sk->canvas_draw_round_rect(canvas, &rect, (float)rad, (float)rad, paint);
@@ -685,7 +2053,7 @@ int64_t ruxen_canvas_draw_rrect_radii(int64_t self, double x, double y, double w
     if (br < 0.0) br = 0.0;
     if (bl < 0.0) bl = 0.0;
 
-    sk_paint_t *paint = rx_make_paint(sk, argb, stroke_w);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk_rrect_t *rr = sk->rrect_new();
     if (!rr) { sk->paint_delete(paint); return RXC_ERR_BAD_ARGS; }
@@ -717,9 +2085,194 @@ int64_t ruxen_canvas_draw_line(int64_t self, double x0, double y0, double x1, do
         return RXC_ERR_BAD_ARGS;
     }
     double width = stroke_w > 0.0 ? stroke_w : 1.0;
-    sk_paint_t *paint = rx_make_paint(sk, argb, width);
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, width);
     if (!paint) return RXC_ERR_BAD_ARGS;
     sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* Stroked DASHED line from (x0,y0) to (x1,y1): a 2-interval [on_len, off_len]
+ * dash pattern with a `phase` offset into it (Skia repeats the pattern along the
+ * stroke). `phase` shifts the start of the dash run (e.g. animate it for a
+ * marching-ants selection). Skia-only — RXC_ERR_NO_SKIA when the backend or the
+ * dash symbols are absent (the symbols ARE present in the pinned build, see the
+ * loader note; this is the honest fallback, never a NULL-stub lie). A
+ * non-positive on_len, a negative off_len, or a non-positive stroke_w is
+ * RXC_ERR_BAD_ARGS (a dash needs a real stroke + a real "on" run).
+ *
+ * Memory: the dash path-effect is OWNED — created, set on the paint (the paint
+ * takes its own reference), then unref'd here, then the paint is deleted. No
+ * leak on any exit path. */
+int64_t ruxen_canvas_draw_dashed_line(int64_t self, double x0, double y0,
+                                      double x1, double y1, double stroke_w,
+                                      double on_len, double off_len, double phase,
+                                      int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    /* gate on BOTH the line draw AND the dash creator so a build missing dash
+     * Errs cleanly rather than drawing a solid line that lies about being dashed. */
+    sk_canvas_t *canvas = rx_skia_draw_begin(
+        h, h ? (const void *)rx_skia()->canvas_draw_line : NULL, &sk, &err);
+    if (!canvas) return err;
+    if (!sk->path_effect_create_dash || !sk->path_effect_unref ||
+        !sk->paint_set_path_effect) {
+        return RXC_ERR_NO_SKIA;
+    }
+    if (!rxc_finite_pixels(x0) || !rxc_finite_pixels(y0) ||
+        !rxc_finite_pixels(x1) || !rxc_finite_pixels(y1) ||
+        !rxc_finite_pixels(stroke_w) || !rxc_finite_pixels(on_len) ||
+        !rxc_finite_pixels(off_len) || !rxc_finite_pixels(phase)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    if (!(stroke_w > 0.0) || !(on_len > 0.0) || off_len < 0.0) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    const float intervals[2] = { (float)on_len, (float)off_len };
+    sk_path_effect_t *dash = sk->path_effect_create_dash(intervals, 2, (float)phase);
+    if (!dash) { sk->paint_delete(paint); return RXC_ERR_NO_SKIA; }
+    sk->paint_set_path_effect(paint, dash);
+    sk->canvas_draw_line(canvas, (float)x0, (float)y0, (float)x1, (float)y1, paint);
+    sk->path_effect_unref(dash);   /* paint holds its own ref; safe to drop ours */
+    sk->paint_delete(paint);
+    return RXC_OK;
+}
+
+/* ---- paths (Skia-only) ----
+ *
+ * An sk_path is a mutable builder owned by the Ruxen `Path`: its raw pointer
+ * crosses the FFI as an int64 handle (path_new returns it, the builder ops and
+ * draw take it, path_drop frees it) — exactly the ownership shape `Image` uses.
+ *
+ * The builder ops (move_to/line_to/.../close) require the path symbols but NOT
+ * a live canvas, so a `Path` can be constructed before any frame; they no-op
+ * when a needed symbol is missing (the handle is then 0 and draw_path reports
+ * the clear Err). The Skia-only gate that surfaces RXC_ERR_NO_SKIA is the
+ * *draw*, mirroring the image flow (load returns 0 → draw is the failure
+ * point). Nothing structured crosses the ABI: only the int64 handle and scalar
+ * device-pixel coordinates. */
+
+/* Allocate an empty path; returns its sk_path pointer as an int64 handle, or 0
+ * when Skia / the path symbols are unavailable. */
+int64_t ruxen_canvas_path_new(void) {
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->path_new) return 0;
+    return (int64_t)sk->path_new();
+}
+
+int64_t ruxen_canvas_path_is_null(int64_t self) { return self == 0 ? 1 : 0; }
+
+/* Identity accessor: a RawPath's handle IS the pointer; lets the Ruxen side
+ * pass it to draw_path as a plain Int (mirrors ruxen_canvas_image_ptr). */
+int64_t ruxen_canvas_path_ptr(int64_t self) { return self; }
+
+void ruxen_canvas_path_drop(int64_t self) {
+    const RxSkia *sk = rx_skia();
+    if (self && sk->path_delete) sk->path_delete((sk_path_t *)self);
+}
+
+/* Begin a new sub-contour at (x, y). */
+int64_t ruxen_canvas_path_move_to(int64_t self, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_move_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
+    sk->path_move_to(p, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Straight segment from the current point to (x, y). */
+int64_t ruxen_canvas_path_line_to(int64_t self, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_line_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
+    sk->path_line_to(p, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Quadratic bézier through control (cx, cy) to (x, y). */
+int64_t ruxen_canvas_path_quad_to(int64_t self, double cx, double cy, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_quad_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(cx) || !rxc_finite_pixels(cy) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk->path_quad_to(p, (float)cx, (float)cy, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Cubic bézier through controls (c1x, c1y), (c2x, c2y) to (x, y). */
+int64_t ruxen_canvas_path_cubic_to(int64_t self, double c1x, double c1y,
+                                   double c2x, double c2y, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_cubic_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(c1x) || !rxc_finite_pixels(c1y) ||
+        !rxc_finite_pixels(c2x) || !rxc_finite_pixels(c2y) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    sk->path_cubic_to(p, (float)c1x, (float)c1y, (float)c2x, (float)c2y, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* SVG-style elliptical arc to (x, y): radii (rx, ry), x-axis rotation in
+ * degrees, large-arc flag (0/1), clockwise-sweep flag (0/1). */
+int64_t ruxen_canvas_path_arc_to(int64_t self, double rx, double ry, double x_axis_rotate,
+                                 int64_t large_arc, int64_t sweep, double x, double y) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_arc_to) return RXC_ERR_NO_SKIA;
+    if (!rxc_finite_pixels(rx) || !rxc_finite_pixels(ry) || !rxc_finite_pixels(x_axis_rotate) ||
+        !rxc_finite_pixels(x) || !rxc_finite_pixels(y)) {
+        return RXC_ERR_BAD_ARGS;
+    }
+    int la = large_arc ? RX_SK_PATH_ARC_LARGE : RX_SK_PATH_ARC_SMALL;
+    int sw = sweep ? RX_SK_PATH_ARC_CW : RX_SK_PATH_ARC_CCW;
+    sk->path_arc_to(p, (float)rx, (float)ry, (float)x_axis_rotate, la, sw, (float)x, (float)y);
+    return RXC_OK;
+}
+
+/* Close the current sub-contour (straight segment back to its start). */
+int64_t ruxen_canvas_path_close(int64_t self) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_close) return RXC_ERR_NO_SKIA;
+    sk->path_close(p);
+    return RXC_OK;
+}
+
+/* Set the fill rule: even_odd != 0 selects even-odd, else non-zero winding. */
+int64_t ruxen_canvas_path_set_fill_type(int64_t self, int64_t even_odd) {
+    sk_path_t *p = (sk_path_t *)self;
+    const RxSkia *sk = rx_skia();
+    if (!p || !sk->path_set_filltype) return RXC_ERR_NO_SKIA;
+    sk->path_set_filltype(p, even_odd ? RX_SK_PATH_FILL_EVENODD : RX_SK_PATH_FILL_WINDING);
+    return RXC_OK;
+}
+
+/* Fill (stroke_w <= 0) or stroke (stroke_w > 0) the path with a solid color.
+ * Antialiased; Skia-only — RXC_ERR_NO_SKIA when the backend or draw symbol is
+ * absent (never a silent no-op). Color packed 0xAARRGGBB in `argb`. */
+int64_t ruxen_canvas_draw_path(int64_t self, int64_t path, double stroke_w, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    sk_path_t *p = (sk_path_t *)path;
+    const RxSkia *sk = NULL;
+    int64_t err = RXC_OK;
+    sk_canvas_t *canvas = rx_skia_draw_begin(h, h ? (const void *)rx_skia()->canvas_draw_path : NULL,
+                                             &sk, &err);
+    if (!canvas) return err;
+    if (!p) return RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(stroke_w)) return RXC_ERR_BAD_ARGS;
+    sk_paint_t *paint = rx_make_paint(sk, h, argb, stroke_w);
+    if (!paint) return RXC_ERR_BAD_ARGS;
+    sk->canvas_draw_path(canvas, p, paint);
     sk->paint_delete(paint);
     return RXC_OK;
 }
@@ -935,6 +2488,41 @@ void ruxen_canvas_image_drop(int64_t self) {
     if (self && sk->image_unref) sk->image_unref((sk_image_t *)self);
 }
 
+/* ---- render-to-texture / raster cache (Skia-only) ----
+ *
+ * Snapshot THIS host's current rendering surface into an immutable sk_image,
+ * returned as an image handle the Ruxen side wraps in an `Image` (so it reuses
+ * the whole existing draw_image path — no new draw ABI). The decisive primitive
+ * for caching an expensive subtree: draw it once into an offscreen Canvas, snapshot
+ * it, then blit the snapshot cheaply every frame.
+ *
+ * The snapshot is a COPY of the surface contents at call time — it does not alias
+ * the surface's pixels, so further draws into the surface (or freeing the offscreen
+ * host) leave the image intact. The returned image is caller-owned: the Ruxen
+ * `Image` frees it via ruxen_canvas_image_drop (sk_image_unref), the SAME ownership
+ * as a loaded image, so there is exactly one free path and no double-free.
+ *
+ * Returns the sk_image pointer as an int64 handle, or 0 on failure (no Skia / no
+ * surface / snapshot symbol absent). Drawing offscreen never touches another
+ * canvas's framebuffer: each host owns its own pixels buffer; only an explicit
+ * draw_image of the snapshot moves content between them. */
+int64_t ruxen_canvas_host_snapshot(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    if (!h) return 0;
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->surface_new_image_snapshot) return 0;
+    /* Force the surface into existence (raster-direct, or the GPU surface for a
+     * GPU host) so we snapshot whatever the canvas draws into. rx_host_canvas
+     * leaves the surface handle in h->sk_surface (raster) or h->gpu_surface (GPU). */
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas) return 0;
+    sk_surface_t *surf = h->gpu_surface ? (sk_surface_t *)h->gpu_surface
+                                        : (sk_surface_t *)h->sk_surface;
+    if (!surf) return 0;
+    sk_image_t *img = sk->surface_new_image_snapshot(surf);
+    return (int64_t)img;   /* caller-owned; freed by ruxen_canvas_image_drop */
+}
+
 /* Shared blit: draw `image`'s `src` region into `dst` (linear sampling). */
 static int64_t rx_draw_image(RxHost *h, sk_image_t *image, sk_rect_t src, sk_rect_t dst) {
     if (!h || !image) return RXC_ERR_BAD_ARGS;
@@ -1055,9 +2643,92 @@ static sk_font_t *rx_font_at(double size) {
     return font;
 }
 
-/* Shared text impl at an explicit font size. `argb` is packed 0xAARRGGBB. */
-static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
-                                 int64_t argb, double size) {
+/* ---- font family cache ----
+ *
+ * Selecting a typeface by family name (sk_typeface_create_from_name) is the
+ * "configurable font family" capability. Each resolved family gets one cached
+ * sk_font_t (built once, resized in place per call like the default font),
+ * owned for the process lifetime — the same never-freed singleton model as
+ * rx_default_font (the surface/typeface tables outlive any one host). The cache
+ * is tiny and append-only; a full cache reuses the default font.
+ *
+ * GRACEFUL FALLBACK: an unknown / unavailable family is NOT an error. When
+ * sk_typeface_create_from_name returns NULL (or yields a zero-glyph face), we
+ * fall back to the default font so an uninstalled font never breaks rendering.
+ * We still cache that decision under the requested name, so the fallback is
+ * resolved once. (A missing Skia backend is the only Err case — handled by the
+ * callers, which use the bitmap path when rx_font_for_family returns NULL.) */
+#define RXC_FAMILY_CACHE_CAP 16
+#define RXC_FAMILY_NAME_MAX  63
+
+typedef struct {
+    char       name[RXC_FAMILY_NAME_MAX + 1];
+    sk_font_t *font;   /* the family's face, or the default face on fallback */
+} RxFamilyEntry;
+
+/* Build a font for `family` from a freshly matched typeface, or NULL if the
+ * family can't be resolved into a usable (positive-advance) face. Caller owns
+ * nothing extra: the font keeps a ref to the typeface, so we drop our ref. */
+static sk_font_t *rx_build_family_font(const RxSkia *sk, const char *family) {
+    if (!sk->typeface_create_from_name || !sk->font_new_with_values) return NULL;
+    sk_fontstyle_t *style = NULL;
+    if (sk->fontstyle_new) style = sk->fontstyle_new(400, 5, 0);  /* normal/normal/upright */
+    sk_typeface_t *tf = sk->typeface_create_from_name(family, style);
+    if (style && sk->fontstyle_delete) sk->fontstyle_delete(style);
+    if (!tf) return NULL;
+    sk_font_t *f = sk->font_new_with_values(tf, RXC_SKIA_FONT_PX, 1.0f, 0.0f);
+    if (sk->typeface_unref) sk->typeface_unref(tf);  /* the font holds its own ref */
+    if (!f) return NULL;
+    /* Reject a zero-glyph face (mirrors rx_default_font's probe) so it falls
+     * back to the default rather than drawing nothing. */
+    float probe = sk->font_measure_text(f, "M", 1, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(probe > 0.0f)) {
+        if (sk->font_delete) sk->font_delete(f);
+        return NULL;
+    }
+    return f;
+}
+
+/* The cached font for `family` at `size` px, resized in place. Falls back to
+ * the default font when the family is empty/unknown/unavailable. NULL only when
+ * no Skia font is available at all (Skia absent) — callers then use the bitmap
+ * path, exactly as for the default font. */
+static sk_font_t *rx_font_for_family(const char *family, double size) {
+    sk_font_t *fallback = rx_default_font();
+    if (!fallback) return NULL;                       /* no Skia text at all */
+    if (!family || !family[0]) return rx_font_at(size);
+
+    static RxFamilyEntry cache[RXC_FAMILY_CACHE_CAP];
+    static int count = 0;
+    const RxSkia *sk = rx_skia();
+
+    for (int i = 0; i < count; i++) {
+        if (strncmp(cache[i].name, family, RXC_FAMILY_NAME_MAX) == 0) {
+            sk_font_t *f = cache[i].font;
+            if (sk->font_set_size && size > 0.0) sk->font_set_size(f, (float)size);
+            return f;
+        }
+    }
+
+    /* Miss: resolve the family (or fall back to the default face) and cache it.
+     * If the cache is full, just use the default font without caching. */
+    sk_font_t *resolved = rx_build_family_font(sk, family);
+    if (!resolved) resolved = fallback;               /* graceful fallback */
+    if (count < RXC_FAMILY_CACHE_CAP) {
+        strncpy(cache[count].name, family, RXC_FAMILY_NAME_MAX);
+        cache[count].name[RXC_FAMILY_NAME_MAX] = '\0';
+        cache[count].font = resolved;
+        count++;
+    }
+    if (sk->font_set_size && size > 0.0) sk->font_set_size(resolved, (float)size);
+    return resolved;
+}
+
+/* Shared text impl at an explicit, already-resolved `font` (which already has
+ * its size set). `argb` is packed 0xAARRGGBB. A NULL font selects the bitmap
+ * fallback. */
+static int64_t rx_draw_text_with_font(RxHost *h, const char *s, double x, double y,
+                                      int64_t argb, sk_font_t *font) {
     if (!h || !s) return RXC_ERR_BAD_ARGS;
     if (!h->in_frame) return RXC_ERR_NO_FRAME;
     if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return RXC_ERR_BAD_ARGS;
@@ -1066,7 +2737,6 @@ static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
      * same convention as the bitmap path below. */
     sk_canvas_t *canvas = rx_host_canvas(h);
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (canvas && font && sk->canvas_draw_simple_text) {
         sk_paint_t *paint = sk->paint_new();
         if (!paint) return RXC_ERR_BAD_ARGS;
@@ -1108,10 +2778,16 @@ static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
     return RXC_OK;
 }
 
-static int64_t rx_measure_impl(const char *s, double size) {
+/* Draw text with the default font at `size` px (the family-less path). */
+static int64_t rx_draw_text_impl(RxHost *h, const char *s, double x, double y,
+                                 int64_t argb, double size) {
+    return rx_draw_text_with_font(h, s, x, y, argb, rx_font_at(size));
+}
+
+/* Measure with an already-resolved `font` (NULL = bitmap advance). */
+static int64_t rx_measure_with_font(const char *s, sk_font_t *font) {
     if (!s) return 0;
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (sk->available && font && sk->font_measure_text) {
         float w = sk->font_measure_text(font, s, strlen(s), RX_SK_TEXT_UTF8, NULL, NULL);
         if (!(w > 0.0f)) return 0;
@@ -1121,9 +2797,13 @@ static int64_t rx_measure_impl(const char *s, double size) {
     return n ? (int64_t)(n * RXC_ADVANCE - 1) : 0;
 }
 
-static int64_t rx_text_height_impl(double size) {
+static int64_t rx_measure_impl(const char *s, double size) {
+    return rx_measure_with_font(s, rx_font_at(size));
+}
+
+/* Line height of an already-resolved `font` (NULL = bitmap 7px). */
+static int64_t rx_text_height_with_font(sk_font_t *font) {
     const RxSkia *sk = rx_skia();
-    sk_font_t *font = rx_font_at(size);
     if (sk->available && font && sk->font_get_metrics) {
         sk_fontmetrics_t m;
         sk->font_get_metrics(font, &m);   /* ascent is negative (above baseline) */
@@ -1131,6 +2811,10 @@ static int64_t rx_text_height_impl(double size) {
         if (hgt >= 1.0f) return (int64_t)(hgt + 0.5f);
     }
     return RXC_GLYPH_H;
+}
+
+static int64_t rx_text_height_impl(double size) {
+    return rx_text_height_with_font(rx_font_at(size));
 }
 
 /* Width in pixels of `n` characters at the bitmap font's one size. The
@@ -1185,31 +2869,1777 @@ int64_t ruxen_canvas_draw_text_sized(int64_t self, int64_t text, double x, doubl
     return rx_draw_text_impl((RxHost *)self, (const char *)text, x, y, argb, size);
 }
 
+/* ---- configurable font family ----
+ *
+ * Pick a typeface by family name. The family resolves through the process-wide
+ * cache (rx_font_for_family), which falls back to the default face for an
+ * unknown/uninstalled family — a missing font never breaks rendering, and is
+ * NOT an error. `text` and `family` are C-string pointers (borrowed &Strings).
+ *
+ * draw_text_font is Skia-only: picking a family is meaningless for the 5x7
+ * bitmap, so it returns RXC_ERR_NO_SKIA when no Skia font is available (rather
+ * than silently drawing the bitmap face, which would ignore the family).
+ * measure_text_font / text_height_font always return a usable number, falling
+ * back to the bitmap metrics when Skia is absent. */
+
+int64_t ruxen_canvas_draw_text_font(int64_t self, int64_t text, double x, double y,
+                                    double size, int64_t family, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!h || !s) return RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return RXC_ERR_NO_FRAME;
+    sk_font_t *font = rx_font_for_family(fam, size);
+    if (!font) return RXC_ERR_NO_SKIA;   /* no Skia text face -> family unhonorable */
+    return rx_draw_text_with_font(h, s, x, y, argb, font);
+}
+
+/* Advance width of `text` in `family` at `size` px (bitmap advance when Skia
+ * is absent — so it always returns a usable number; an unknown family measures
+ * like the default face). */
+int64_t ruxen_canvas_measure_text_font(int64_t self, int64_t text, double size, int64_t family) {
+    (void)self;
+    return rx_measure_with_font((const char *)text, rx_font_for_family((const char *)family, size));
+}
+
+/* Line height of `family` at `size` px (bitmap 7px when Skia is absent). */
+int64_t ruxen_canvas_text_height_font(int64_t self, double size, int64_t family) {
+    (void)self;
+    return rx_text_height_with_font(rx_font_for_family((const char *)family, size));
+}
+
+/* ---- paragraphs: multi-line, word-wrapped, aligned text ----
+ *
+ * The fetched libSkiaSharp does NOT ship SkParagraph / SkShaper (verified by
+ * nm — that needs a separate HarfBuzzSharp+ICU build). So word-wrap is done
+ * HERE, in the shim, on top of the already-bound Skia font measure + draw:
+ * greedy line-breaking on ASCII whitespace to fit `max_width`, each wrapped
+ * line drawn at line-height spacing and aligned (left/center/right). This needs
+ * no new native library and covers the vast majority of UI text (wrapping
+ * labels, text blocks, multi-line content).
+ *
+ * SCOPE: Latin word-wrap. Proper international shaping — bidi, ligatures,
+ * complex scripts, grapheme/line-break tables — is deliberately deferred to a
+ * later HarfBuzz/ICU follow-up (docs/ROADMAP.md). Whitespace here is ASCII
+ * space/tab/newline; an explicit '\n' forces a line break.
+ *
+ * Skia-only: a wrapped paragraph cannot be faithfully reproduced on the 5x7
+ * bitmap fallback (no real advances), so these report RXC_ERR_NO_SKIA when no
+ * Skia font is available rather than mis-laying-out text.
+ *
+ * Alignment within the max_width column: 0 = left, 1 = center, 2 = right. */
+enum { RXC_ALIGN_LEFT = 0, RXC_ALIGN_CENTER = 1, RXC_ALIGN_RIGHT = 2 };
+
+/* True for the ASCII whitespace we break on. */
+static int rxc_is_space(unsigned char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* Measure a byte range [s, s+len) with an already-resolved Skia font, in whole
+ * device pixels. Empty range measures 0. */
+static int rxc_measure_run(const RxSkia *sk, sk_font_t *font, const char *s, size_t len) {
+    if (len == 0) return 0;
+    float w = sk->font_measure_text(font, s, len, RX_SK_TEXT_UTF8, NULL, NULL);
+    if (!(w > 0.0f)) return 0;
+    return (int)(w + 0.5f);
+}
+
+static int rxc_hb_direction(int64_t dir);   /* fwd: defined in the shaping section */
+
+/* ---- shaper context: shaped paragraph lines (docs/SHAPING.md) ----
+ *
+ * A paragraph-wide HarfBuzz + Skia handle set, built ONCE for the whole
+ * paragraph (not per line): the HarfBuzz font (for shaping a byte sub-range) and
+ * the matching Skia typeface+font (the SAME font file, so glyph ids agree, plus
+ * a measured line height). rx_paragraph_layout consults this when shaping is
+ * requested, so its greedy word-wrap measures + draws each line through the
+ * shaped glyph path; with a NULL context the layout uses the non-shaped
+ * measure+draw exactly as before. */
+typedef struct {
+    const RxSkia *sk;
+    const RxHB   *hb;
+    hb_blob_t    *blob;
+    hb_face_t    *face;
+    hb_font_t    *hfont;     /* HarfBuzz font, scaled to size*64 (26.6 fixed) */
+    sk_typeface_t *tf;
+    sk_font_t    *skf;       /* Skia font over the same file, size set */
+    int           hbdir;     /* RX_HB_DIR_* or INVALID for auto */
+    int           line_height;
+    int           ok;        /* 1 iff every handle was created */
+    uint64_t      font_key;  /* FNV-1a of (font_path, size_q, dir) — the measure
+                              * cache key prefix, so two shapers over the same font
+                              * + size + direction share cached run widths */
+} RxShaper;
+
+/* FNV-1a 64-bit over a byte range. Used for the shaped-run measure cache key. */
+static uint64_t rx_fnv1a(const void *data, size_t n, uint64_t seed) {
+    const unsigned char *p = (const unsigned char *)data;
+    uint64_t h = seed;
+    for (size_t i = 0; i < n; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+/* ---- shaped-run measure cache (docs/decisions/text-fallback.md) ----
+ *
+ * Repeatedly measuring the SAME label across frames (the common L2 case — a static
+ * button caption shaped every frame for centering) re-runs HarfBuzz each time.
+ * This bounded, process-wide cache memoizes the measured width keyed by
+ * (font+size+dir hash) combined with the run's byte hash. A hit returns the cached
+ * width without touching HarfBuzz. The cache is a fixed open-addressed table with
+ * simple replace-on-collision (good enough — a repeated label always re-hashes to
+ * the same slot and hits). A global hit counter is exposed via
+ * ruxen_canvas_shape_cache_hits so a pin can ASSERT the cache hits (not a wall-clock
+ * number, which is not a stable test). */
+#define RXC_SHAPE_CACHE_CAP 128
+
+typedef struct {
+    uint64_t key;    /* 0 = empty */
+    int      width;
+} RxShapeCacheEntry;
+
+static RxShapeCacheEntry rxc_shape_cache[RXC_SHAPE_CACHE_CAP];
+static uint64_t          rxc_shape_cache_hits = 0;
+
+/* Look up (or -1 miss) the cached width for `key`. */
+static int rx_shape_cache_get(uint64_t key) {
+    if (key == 0) return -1;
+    RxShapeCacheEntry *e = &rxc_shape_cache[key % RXC_SHAPE_CACHE_CAP];
+    if (e->key == key) { rxc_shape_cache_hits++; return e->width; }
+    return -1;
+}
+
+/* Store `width` for `key` (replace on collision). */
+static void rx_shape_cache_put(uint64_t key, int width) {
+    if (key == 0) return;
+    RxShapeCacheEntry *e = &rxc_shape_cache[key % RXC_SHAPE_CACHE_CAP];
+    e->key = key; e->width = width;
+}
+
+/* Build the paragraph shaper for `font_path` at `size` px and `dir`. Returns ok=0
+ * (and releases anything partial) when shaping is unavailable or the font file
+ * can't be opened — the caller then reports a clean Err. */
+static void rx_shaper_init(RxShaper *s, const char *font_path, double size, int64_t dir) {
+    memset(s, 0, sizeof(*s));
+    s->sk = rx_skia();
+    s->hb = rx_hb();
+    if (!s->sk->available || !s->sk->glyph_render_ok || !s->hb->available) return;
+    if (!font_path || !font_path[0]) return;
+
+    int scale = (int)(size * 64.0 + 0.5);
+    s->blob = s->hb->blob_create_from_file(font_path);
+    if (!s->blob) return;
+    s->face = s->hb->face_create(s->blob, 0);
+    s->hfont = s->face ? s->hb->font_create(s->face) : NULL;
+    if (!s->hfont) return;
+    s->hb->font_set_scale(s->hfont, scale, scale);
+    s->hbdir = rxc_hb_direction(dir);
+
+    /* The measure-cache key prefix: font path + quantized scale + direction, so
+     * two shapers over the same font/size/dir share cached run widths. */
+    uint64_t k = rx_fnv1a(font_path, strlen(font_path), 1469598103934665603ULL);
+    k = rx_fnv1a(&scale, sizeof(scale), k);
+    k = rx_fnv1a(&s->hbdir, sizeof(s->hbdir), k);
+    s->font_key = k ? k : 1;   /* never 0 (0 = empty cache slot) */
+
+    s->tf = s->sk->typeface_create_from_file(font_path, 0);
+    s->skf = s->sk->font_new_with_values(s->tf, (float)size, 1.0f, 0.0f);
+    if (!s->skf) return;
+    int lh = (int)rx_text_height_with_font(s->skf);
+    s->line_height = lh < 1 ? 1 : lh;
+    s->ok = 1;
+}
+
+static void rx_shaper_drop(RxShaper *s) {
+    if (s->skf && s->sk->font_delete) s->sk->font_delete(s->skf);
+    if (s->tf && s->sk->typeface_unref) s->sk->typeface_unref(s->tf);
+    if (s->hfont) s->hb->font_destroy(s->hfont);
+    if (s->face) s->hb->face_destroy(s->face);
+    if (s->blob) s->hb->blob_destroy(s->blob);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Shape the byte sub-range [start, start+len) of `text` and return its total
+ * advance width in whole device pixels (kerning + ligatures applied). Uses
+ * hb_buffer_add_utf8's item_offset/item_length to shape the sub-range with the
+ * surrounding text as context. Empty range = 0. */
+static int rx_shaper_measure(RxShaper *s, const char *text, size_t start, size_t len) {
+    if (len == 0 || !s->ok) return 0;
+    /* Cache: key = font/size prefix + the LIVE direction + this run's byte hash. A
+     * hit skips HarfBuzz entirely (the repeated-label case). Including hbdir live
+     * keeps a per-run direction override (bidi) from colliding with the same bytes
+     * shaped in the other direction. */
+    uint64_t key = rx_fnv1a(&s->hbdir, sizeof(s->hbdir), s->font_key);
+    key = rx_fnv1a(text + start, len, key);
+    int cached = rx_shape_cache_get(key);
+    if (cached >= 0) return cached;
+
+    hb_buffer_t *buf = s->hb->buffer_create();
+    if (!buf) return 0;
+    s->hb->buffer_add_utf8(buf, text, -1, (unsigned int)start, (int)len);
+    if (s->hbdir != RX_HB_DIR_INVALID) s->hb->buffer_set_direction(buf, s->hbdir);
+    s->hb->buffer_guess_segment_properties(buf);
+    s->hb->shape(s->hfont, buf, NULL, 0);
+    unsigned int n = s->hb->buffer_get_length(buf);
+    hb_glyph_position_t *gp = s->hb->buffer_get_glyph_positions(buf, NULL);
+    double adv = 0.0;
+    for (unsigned int i = 0; i < n; i++) adv += gp[i].x_advance / 64.0;
+    s->hb->buffer_destroy(buf);
+    int width = (int)(adv + 0.5);
+    rx_shape_cache_put(key, width);
+    return width;
+}
+
+/* Draw the shaped byte sub-range [start, start+len) at baseline (x, y) with
+ * packed color argb, onto `canvas`. Builds a positioned-glyph textblob from the
+ * HarfBuzz shaping and draws it (the same render path as draw_text_shaped). */
+static void rx_shaper_draw(RxShaper *s, sk_canvas_t *canvas, const char *text,
+                           size_t start, size_t len, double x, double y, int64_t argb) {
+    if (len == 0 || !s->ok || !canvas) return;
+    hb_buffer_t *buf = s->hb->buffer_create();
+    if (!buf) return;
+    s->hb->buffer_add_utf8(buf, text, -1, (unsigned int)start, (int)len);
+    if (s->hbdir != RX_HB_DIR_INVALID) s->hb->buffer_set_direction(buf, s->hbdir);
+    s->hb->buffer_guess_segment_properties(buf);
+    s->hb->shape(s->hfont, buf, NULL, 0);
+    unsigned int n = s->hb->buffer_get_length(buf);
+    if (n == 0) { s->hb->buffer_destroy(buf); return; }
+    hb_glyph_info_t *gi = s->hb->buffer_get_glyph_infos(buf, NULL);
+    hb_glyph_position_t *gp = s->hb->buffer_get_glyph_positions(buf, NULL);
+
+    sk_textblob_builder_t *b = s->sk->textblob_builder_new();
+    if (b) {
+        sk_textblob_runbuffer_t rb;
+        s->sk->textblob_builder_alloc_run_pos(b, s->skf, (int)n, NULL, &rb);
+        uint16_t *gout = (uint16_t *)rb.glyphs;
+        float    *pout = (float *)rb.pos;
+        double penx = 0.0;
+        for (unsigned int i = 0; i < n; i++) {
+            gout[i] = (uint16_t)gi[i].codepoint;
+            pout[2 * i + 0] = (float)(penx + gp[i].x_offset / 64.0);
+            pout[2 * i + 1] = (float)(-(gp[i].y_offset / 64.0));
+            penx += gp[i].x_advance / 64.0;
+        }
+        sk_textblob_t *blobt = s->sk->textblob_builder_make(b);
+        s->sk->textblob_builder_delete(b);
+        if (blobt) {
+            sk_paint_t *paint = s->sk->paint_new();
+            if (paint) {
+                s->sk->paint_set_antialias(paint, 1);
+                s->sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                s->sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                s->sk->canvas_draw_text_blob(canvas, blobt, (float)x, (float)y, paint);
+                s->sk->paint_delete(paint);
+            }
+            s->sk->textblob_unref(blobt);
+        }
+    }
+    s->hb->buffer_destroy(buf);
+}
+
+/* Greedy word-wrap + (optionally) draw of `text` into a `max_width` column at
+ * font `font`, with the first baseline at (x, y0 + ascent...) — actually y0 is
+ * the FIRST line's baseline, and each subsequent line is one line_height below.
+ *
+ * If `draw` is nonzero, each line is rendered via canvas_draw_simple_text at its
+ * aligned x; otherwise nothing is drawn (measure-only). Returns the number of
+ * lines laid out, and writes the widest line's width to *out_max_w. The caller
+ * derives total height = n_lines * line_height.
+ *
+ * Breaking rules (greedy):
+ *   - words are maximal non-whitespace runs; an explicit '\n' forces a break.
+ *   - a word is appended to the current line if (current line width + space +
+ *     word) still fits max_width; otherwise the current line is flushed and the
+ *     word starts a new line.
+ *   - a single word WIDER than max_width that is alone on its line is placed
+ *     anyway (it overflows the column rather than looping forever) — correctness
+ *     over fitting; we never split inside a word this round.
+ *
+ * Each line is drawn from the ORIGINAL text buffer by [start,end) offsets, so no
+ * copying/NUL-termination is needed and draw uses the exact source bytes. */
+static int rx_paragraph_layout(RxHost *h, const RxSkia *sk, sk_font_t *font,
+                               const char *text, double x, double y0,
+                               double max_width, int line_height, int align,
+                               int64_t argb, int draw, int *out_max_w,
+                               RxShaper *shaper) {
+    int max_col = (max_width > 0.0) ? (int)(max_width + 0.5) : 0;
+    int n_lines = 0;
+    int widest = 0;
+
+    sk_paint_t *paint = NULL;
+    if (draw) {
+        paint = sk->paint_new();
+        if (!paint) return -1;           /* signal allocation failure */
+        sk->paint_set_antialias(paint, 1);
+        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+        sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+    }
+
+    size_t i = 0;
+    /* Current pending line is the byte range [line_start, line_end); line_w is
+     * its measured width. -1 line_start means "no line started yet". */
+    size_t line_start = 0, line_end = 0;
+    int    line_w = 0;
+    int    have_line = 0;
+
+    /* Flush the current line: align + (optionally) draw it, advance the row.
+     * When `shaper` is set, the line is drawn through the HarfBuzz-shaped glyph
+     * path (kerning/ligatures); otherwise the plain canvas_draw_simple_text. */
+    #define RXC_FLUSH_LINE()                                                      \
+        do {                                                                      \
+            int lw = line_w;                                                      \
+            if (lw > widest) widest = lw;                                         \
+            if (draw) {                                                           \
+                double off = 0.0;                                                 \
+                if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lw) / 2.0;\
+                else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lw;    \
+                if (off < 0.0) off = 0.0;                                         \
+                double by = y0 + (double)n_lines * line_height;                   \
+                size_t llen = line_end - line_start;                             \
+                if (llen > 0) {                                                   \
+                    if (shaper)                                                   \
+                        rx_shaper_draw(shaper, rx_host_canvas(h), text,           \
+                            line_start, llen, x + off, by, argb);                 \
+                    else                                                          \
+                        sk->canvas_draw_simple_text(rx_host_canvas(h),            \
+                            text + line_start, llen, RX_SK_TEXT_UTF8,             \
+                            (float)(x + off), (float)by, font, paint);           \
+                }                                                                 \
+            }                                                                     \
+            n_lines++;                                                            \
+            have_line = 0; line_w = 0;                                            \
+        } while (0)
+
+    while (text[i]) {
+        /* skip run of whitespace; an explicit newline forces a break of any
+         * pending line (and produces an empty line only via blank input runs we
+         * collapse — a lone '\n' between words just ends the current line). */
+        if (rxc_is_space((unsigned char)text[i])) {
+            int had_newline = 0;
+            while (text[i] && rxc_is_space((unsigned char)text[i])) {
+                if (text[i] == '\n') had_newline = 1;
+                i++;
+            }
+            if (had_newline && have_line) RXC_FLUSH_LINE();
+            continue;
+        }
+        /* a word: maximal non-whitespace run [w_start, w_end) */
+        size_t w_start = i;
+        while (text[i] && !rxc_is_space((unsigned char)text[i])) i++;
+        size_t w_end = i;
+        int word_w = shaper ? rx_shaper_measure(shaper, text, w_start, w_end - w_start)
+                            : rxc_measure_run(sk, font, text + w_start, w_end - w_start);
+
+        if (!have_line) {
+            /* start a fresh line with this word (even if it overflows alone) */
+            line_start = w_start; line_end = w_end; line_w = word_w;
+            have_line = 1;
+        } else {
+            /* candidate width if we append " word": measure the joined range so
+             * the inter-word space advance is exact for the font. Shaped when a
+             * shaper is set, so wrap + alignment use kerned/ligature widths. */
+            int joined = shaper ? rx_shaper_measure(shaper, text, line_start, w_end - line_start)
+                                : rxc_measure_run(sk, font, text + line_start, w_end - line_start);
+            if (max_col > 0 && joined > max_col) {
+                /* would overflow: flush the current line, word starts the next */
+                RXC_FLUSH_LINE();
+                line_start = w_start; line_end = w_end; line_w = word_w;
+                have_line = 1;
+            } else {
+                /* extend the current line to include the space + word */
+                line_end = w_end;
+                line_w = joined;
+            }
+        }
+    }
+    if (have_line) RXC_FLUSH_LINE();
+
+    #undef RXC_FLUSH_LINE
+
+    if (draw && paint) sk->paint_delete(paint);
+    if (out_max_w) *out_max_w = widest;
+    return n_lines;
+}
+
+/* Resolve the paragraph font + line height; shared by draw/measure. Returns the
+ * font (size set) or NULL when no Skia font is available; writes the line height
+ * to *out_lh. */
+static sk_font_t *rx_paragraph_font(const char *family, double size, int *out_lh) {
+    sk_font_t *font = rx_font_for_family(family, size);
+    if (!font) { *out_lh = 0; return NULL; }
+    int lh = (int)rx_text_height_with_font(font);
+    if (lh < 1) lh = 1;
+    *out_lh = lh;
+    return font;
+}
+
+/* Draw a word-wrapped, aligned paragraph of `text` into a `max_width` column.
+ * (x, y) is the origin: x is the column's left edge, y is the FIRST line's
+ * baseline. Subsequent lines stack one line-height below. Returns the laid-out
+ * TOTAL HEIGHT in pixels (n_lines * line_height) so L2 can size a text block,
+ * or a NEGATIVE -RXC_ERR_* on failure (Skia-only — no bitmap word-wrap). */
+int64_t ruxen_canvas_draw_paragraph(int64_t self, int64_t text, double x, double y,
+                                    double max_width, double size, int64_t family,
+                                    int64_t align, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    const RxSkia *sk = rx_skia();
+    int lh = 0;
+    sk_font_t *font = rx_paragraph_font(fam, size, &lh);
+    if (!canvas || !font || !sk->canvas_draw_simple_text || !sk->font_measure_text) {
+        return -RXC_ERR_NO_SKIA;
+    }
+    int n = rx_paragraph_layout(h, sk, font, s, x, y, max_width, lh,
+                                (int)align, argb, /*draw*/1, NULL, /*shaper*/NULL);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;   /* paint alloc failed */
+    return (int64_t)n * lh;
+}
+
+/* Measure a word-wrapped paragraph WITHOUT drawing: returns the laid-out size
+ * packed as (max_line_width << 32) | total_height — both in pixels — so L2 gets
+ * the wrapped block's width and height in one call for layout. NEGATIVE
+ * -RXC_ERR_* on failure (Skia-only). */
+int64_t ruxen_canvas_measure_paragraph(int64_t self, int64_t text, double max_width,
+                                       double size, int64_t family) {
+    (void)self;
+    const char *s = (const char *)text;
+    const char *fam = (const char *)family;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    const RxSkia *sk = rx_skia();
+    int lh = 0;
+    sk_font_t *font = rx_paragraph_font(fam, size, &lh);
+    if (!font || !sk->font_measure_text) return -RXC_ERR_NO_SKIA;
+    int max_w = 0;
+    int n = rx_paragraph_layout(NULL, sk, font, s, 0.0, 0.0, max_width, lh,
+                                RXC_ALIGN_LEFT, 0, /*draw*/0, &max_w, /*shaper*/NULL);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    int64_t height = (int64_t)n * lh;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- shaped text: HarfBuzz shape + Skia glyph render (docs/SHAPING.md) ----
+ *
+ * The fetched libSkiaSharp has no SkShaper, so a single run is shaped with
+ * HarfBuzz (kerning, ligatures; RTL/complex with an explicit direction) and the
+ * resulting positioned glyphs are rendered with Skia's textblob API. HarfBuzz
+ * and Skia are fed the SAME font FILE (sk_typeface_create_from_file +
+ * hb_blob_create_from_file_or_fail), so glyph ids match.
+ *
+ * SCOPE (bounded first increment): ONE run, ONE font (by file path), with
+ * left-to-right / right-to-left / auto direction. Proper bidi + line-break +
+ * grapheme segmentation (ICU) and multi-run paragraph integration are a later
+ * follow-up. This is Skia+HarfBuzz-only — a clean Err when either is absent; the
+ * non-shaped draw_text / draw_paragraph path is the fallback.
+ *
+ * hb advances are 26.6 fixed because we set hb scale = size*64; divide by 64 for
+ * device pixels. */
+
+/* Map the FFI direction arg (0 auto / 1 LTR / 2 RTL) to an hb_direction_t, or 0
+ * for "auto" (then guess_segment_properties picks it from the script). */
+static int rxc_hb_direction(int64_t dir) {
+    if (dir == 1) return RX_HB_DIR_LTR;
+    if (dir == 2) return RX_HB_DIR_RTL;
+    return RX_HB_DIR_INVALID;   /* auto */
+}
+
+/* Shape `text` with `font_path` at `size` px and `dir`, then either draw the
+ * positioned glyph run at baseline (x, y) with color `argb` (draw != 0) or just
+ * measure it. Returns the run's total advance width in pixels, or a NEGATIVE
+ * -RXC_ERR_* on failure. All HarfBuzz + Skia objects are created and released
+ * within the call (bounded first increment — no font cache yet). */
+static int64_t rx_shape_run(RxHost *h, const char *text, double x, double y,
+                            double size, const char *font_path, int64_t dir,
+                            int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    const RxHB *hb = rx_hb();
+    if (!sk->available || !sk->glyph_render_ok || !hb->available) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+
+    int scale = (int)(size * 64.0 + 0.5);
+
+    /* HarfBuzz: blob -> face -> font, shape the buffer. */
+    hb_blob_t *blob = hb->blob_create_from_file(font_path);
+    if (!blob) return -RXC_ERR_BAD_ARGS;        /* unreadable / not a font file */
+    hb_face_t *face = hb->face_create(blob, 0);
+    hb_font_t *hfont = face ? hb->font_create(face) : NULL;
+    if (!hfont) {
+        if (face) hb->face_destroy(face);
+        hb->blob_destroy(blob);
+        return -RXC_ERR_BAD_ARGS;
+    }
+    hb->font_set_scale(hfont, scale, scale);
+
+    hb_buffer_t *buf = hb->buffer_create();
+    if (!buf) {
+        hb->font_destroy(hfont); hb->face_destroy(face); hb->blob_destroy(blob);
+        return -RXC_ERR_BAD_ARGS;
+    }
+    hb->buffer_add_utf8(buf, text, -1, 0, -1);
+    int hbdir = rxc_hb_direction(dir);
+    if (hbdir != RX_HB_DIR_INVALID) hb->buffer_set_direction(buf, hbdir);
+    hb->buffer_guess_segment_properties(buf);   /* fills script/lang (+ dir if auto) */
+    hb->shape(hfont, buf, NULL, 0);
+
+    unsigned int n = hb->buffer_get_length(buf);
+    hb_glyph_info_t *gi = hb->buffer_get_glyph_infos(buf, NULL);
+    hb_glyph_position_t *gp = hb->buffer_get_glyph_positions(buf, NULL);
+
+    /* total advance in pixels (the shaped run width). */
+    double total_adv = 0.0;
+    for (unsigned int i = 0; i < n; i++) total_adv += gp[i].x_advance / 64.0;
+    int64_t width_px = (int64_t)(total_adv + 0.5);
+
+    int64_t result = width_px;
+
+    if (draw && n > 0) {
+        /* Skia: the SAME font file as a typeface + a size-set font. */
+        sk_typeface_t *tf = sk->typeface_create_from_file(font_path, 0);
+        sk_font_t *skf = sk->font_new_with_values(tf, (float)size, 1.0f, 0.0f);
+        if (skf && sk->textblob_builder_new) {
+            sk_textblob_builder_t *b = sk->textblob_builder_new();
+            if (b) {
+                sk_textblob_runbuffer_t rb;
+                sk->textblob_builder_alloc_run_pos(b, skf, (int)n, NULL, &rb);
+                uint16_t *gout = (uint16_t *)rb.glyphs;
+                float    *pout = (float *)rb.pos;
+                double penx = 0.0;
+                for (unsigned int i = 0; i < n; i++) {
+                    gout[i] = (uint16_t)gi[i].codepoint;     /* glyph id from HB */
+                    pout[2 * i + 0] = (float)(penx + gp[i].x_offset / 64.0);
+                    pout[2 * i + 1] = (float)(-(gp[i].y_offset / 64.0));
+                    penx += gp[i].x_advance / 64.0;
+                }
+                sk_textblob_t *blobt = sk->textblob_builder_make(b);
+                sk->textblob_builder_delete(b);
+                if (blobt) {
+                    sk_paint_t *paint = sk->paint_new();
+                    if (paint) {
+                        sk->paint_set_antialias(paint, 1);
+                        sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                        sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                        sk->canvas_draw_text_blob(canvas, blobt, (float)x, (float)y, paint);
+                        sk->paint_delete(paint);
+                    }
+                    sk->textblob_unref(blobt);
+                } else {
+                    result = -RXC_ERR_NO_SKIA;
+                }
+            }
+        } else {
+            result = -RXC_ERR_NO_SKIA;
+        }
+        if (skf && sk->font_delete) sk->font_delete(skf);
+        if (tf && sk->typeface_unref) sk->typeface_unref(tf);
+    }
+
+    hb->buffer_destroy(buf);
+    hb->font_destroy(hfont);
+    hb->face_destroy(face);
+    hb->blob_destroy(blob);
+    return result;
+}
+
+/* True (1) when text shaping can run: Skia's glyph-render API resolved AND the
+ * HarfBuzz shaper loaded. A capability probe (mirrors skia_available). */
+int64_t ruxen_canvas_shaping_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    return (sk->available && sk->glyph_render_ok && rx_hb()->available) ? 1 : 0;
+}
+
+/* The cumulative number of shaped-run measure-cache HITS this process (a hit =
+ * re-measuring a run already shaped, skipping HarfBuzz). Lets a pin assert the
+ * cache actually hits on a repeated label — a stable test (the count), not a
+ * wall-clock perf number. docs/decisions/text-fallback.md. */
+int64_t ruxen_canvas_shape_cache_hits(int64_t self) {
+    (void)self;
+    return (int64_t)rxc_shape_cache_hits;
+}
+
+/* Draw one HarfBuzz-shaped run of `text` in the font FILE `font_path` at `size`
+ * px, baseline origin (x, y), color packed 0xAARRGGBB in `argb`. `direction`:
+ * 0 auto / 1 LTR / 2 RTL. Returns the shaped run's advance WIDTH in pixels
+ * (>= 0), or a NEGATIVE -RXC_ERR_* on failure (Skia+HarfBuzz-only). */
+int64_t ruxen_canvas_draw_text_shaped(int64_t self, int64_t text, double x, double y,
+                                      double size, int64_t font_path, int64_t direction,
+                                      int64_t argb) {
+    return rx_shape_run((RxHost *)self, (const char *)text, x, y, size,
+                        (const char *)font_path, direction, argb, /*draw*/1);
+}
+
+/* Advance WIDTH in pixels of a HarfBuzz-shaped run (kerning/ligatures applied),
+ * without drawing — for layout/centering. `direction`: 0 auto / 1 LTR / 2 RTL.
+ * Negative -RXC_ERR_* on failure (Skia+HarfBuzz-only). */
+int64_t ruxen_canvas_measure_text_shaped(int64_t self, int64_t text, double size,
+                                         int64_t font_path, int64_t direction) {
+    return rx_shape_run((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                        (const char *)font_path, direction, 0, /*draw*/0);
+}
+
+/* ---- per-line MULTI-RUN shaping + font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * draw_text_shaped above shapes a line as ONE HarfBuzz run in ONE font (by file),
+ * so any codepoint that font lacks comes out tofu. This itemizes a line into runs
+ * by FONT COVERAGE and shapes each run with the typeface that covers it:
+ *   - a run the BASE font (font_path) covers is shaped with HarfBuzz on that file
+ *     (kerning + ligatures preserved — the existing shaped path), then drawn;
+ *   - a run it does NOT cover (CJK / emoji) is rendered with the system-matched
+ *     fallback typeface via Skia's direct glyph mapping (rx_fallback_line).
+ * So a mixed Latin+CJK line shapes the Latin (with kerning) AND renders the CJK,
+ * and measures wider than either script alone. Forward declarations for the
+ * fallback line renderer (defined later) — it shares the fallback machinery. */
+static double rx_fallback_line(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *base, double size, const char *text, size_t start,
+        size_t sublen, double x0, double y, int64_t argb, int draw);
+static sk_typeface_t *rx_default_typeface(void);
+static int32_t rxc_utf8_next(const char *text, size_t *i, size_t len);
+/* Stack cap + UTF-8<->UTF-16 offset map; the macro/helper are defined in the
+ * segmentation section below but used here (bidi) and in the ICU paragraph. */
+#define RXC_SEG_MAX 2048
+static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
+                                int *b2u, int u16cap);
+
+/* Shape/measure `text` with per-codepoint coverage routing. Covered runs go
+ * through the shaper (HarfBuzz on font_path); uncovered runs go through the
+ * fallback line renderer. Returns the total advance width in pixels, or a NEGATIVE
+ * -RXC_ERR_* on failure. When draw != 0, renders at baseline (x, y). */
+static int64_t rx_shape_run_multi(RxHost *h, const char *text, double x, double y,
+        double size, const char *font_path, int64_t dir, int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->glyph_render_ok || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, font_path, size, dir);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+    }
+    sk_typeface_t *fb_base = rx_default_typeface();
+
+    size_t len = strlen(text);
+    size_t i = 0;
+    double penx = x;
+    int64_t err = 0;
+
+    /* Walk codepoints; a run is a maximal byte range whose coverage state is the
+     * same (all covered by the base file, or all not). Flush a run by routing it. */
+    size_t run_start = 0;
+    int    run_covered = -1;   /* -1 = no run yet */
+
+    #define RXC_FLUSH_SHAPE_RUN(end_byte)                                        \
+        do {                                                                     \
+            size_t rlen = (end_byte) - run_start;                                \
+            if (rlen > 0 && run_covered == 1) {                                  \
+                int w = rx_shaper_measure(&shaper, text, run_start, rlen);        \
+                if (draw) rx_shaper_draw(&shaper, canvas, text, run_start, rlen,  \
+                                         penx, y, argb);                          \
+                penx += w;                                                       \
+            } else if (rlen > 0) {                                               \
+                double w = rx_fallback_line(sk, draw ? canvas : NULL, fb_base,    \
+                        size, text, run_start, rlen, penx, y, argb, draw);        \
+                if (w < 0.0) { err = -RXC_ERR_NO_SKIA; }                          \
+                else penx += w;                                                  \
+            }                                                                    \
+        } while (0)
+
+    while (i < len && !err) {
+        size_t cp_start = i;
+        int32_t cp = rxc_utf8_next(text, &i, len);
+        int covered = (shaper.tf && sk->typeface_unichar_to_glyph(shaper.tf, cp) != 0) ? 1 : 0;
+        if (run_covered == -1) {
+            run_start = cp_start; run_covered = covered;
+        } else if (covered != run_covered) {
+            RXC_FLUSH_SHAPE_RUN(cp_start);
+            run_start = cp_start; run_covered = covered;
+        }
+    }
+    if (!err && run_covered != -1) RXC_FLUSH_SHAPE_RUN(len);
+    #undef RXC_FLUSH_SHAPE_RUN
+
+    rx_shaper_drop(&shaper);
+    if (err) return err;
+    return (int64_t)(penx - x + 0.5);
+}
+
+/* Draw a mixed-script line with per-run shaping + font fallback: the base-font
+ * runs are HarfBuzz-shaped (kerning/ligatures), the uncovered runs (CJK/emoji)
+ * use the system fallback. Returns Ok(total advance width) or a NEGATIVE
+ * -RXC_ERR_*. direction 0 auto / 1 LTR / 2 RTL applies to the shaped runs. */
+int64_t ruxen_canvas_draw_text_shaped_multi(int64_t self, int64_t text, double x, double y,
+        double size, int64_t font_path, int64_t direction, int64_t argb) {
+    return rx_shape_run_multi((RxHost *)self, (const char *)text, x, y, size,
+                              (const char *)font_path, direction, argb, /*draw*/1);
+}
+
+/* Total advance width of a per-run-shaped + fallback line, without drawing.
+ * NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_shaped_multi(int64_t self, int64_t text, double size,
+        int64_t font_path, int64_t direction) {
+    return rx_shape_run_multi((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                              (const char *)font_path, direction, 0, /*draw*/0);
+}
+
+/* ---- bidi: visual-run reordering + per-run shaping (docs/decisions/text-fallback.md) ----
+ *
+ * Mixed-direction text (LTR with embedded RTL, e.g. Latin + Hebrew/Arabic) must be
+ * laid out in VISUAL order, not logical order. ICU's ubidi resolves the line into
+ * directional runs and returns them in visual left-to-right order
+ * (ubidi_setPara -> ubidi_countRuns -> ubidi_getVisualRun). We shape each run with
+ * its resolved direction (covered runs through the shaper, uncovered through the
+ * fallback) and lay them out left-to-right in visual order. ICU works in UTF-16,
+ * so each run's logical UTF-16 range is mapped back to a UTF-8 byte range via the
+ * b2u map. ICU(bidi) + shaping + fallback only — a clean Err otherwise.
+ *
+ * SCOPE (the sound, bounded landing): single-LINE visual reordering of directional
+ * runs with an LTR (auto) base level. Per-line reordering of a WRAPPED bidi
+ * paragraph, and explicit RTL base direction, are the documented remainder. We do
+ * NOT render visually-wrong RTL — when bidi is unavailable this Errs and callers
+ * use the single-direction shaped path. */
+static int64_t rx_text_bidi(RxHost *h, const char *text, double x, double y,
+        double size, const char *font_path, int64_t argb, int draw) {
+    if (!text || !font_path || !font_path[0]) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->glyph_render_ok || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+    const RxICU *icu = rx_icu();
+    if (!icu->available || !icu->bidi_ok) return -RXC_ERR_NO_SKIA;
+
+    size_t len = strlen(text);
+    if (len == 0 || len > RXC_SEG_MAX) return -RXC_ERR_BAD_ARGS;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(text, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return -RXC_ERR_BAD_ARGS;
+
+    int32_t status = 0;
+    UBiDi *bidi = icu->ubidi_open();
+    if (!bidi) return -RXC_ERR_NO_SKIA;
+    icu->ubidi_setPara(bidi, u16, u16n, RX_UBIDI_DEFAULT_LTR, NULL, &status);
+    if (status > 0) { icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+    int32_t nruns = icu->ubidi_countRuns(bidi, &status);
+    if (status > 0 || nruns <= 0) { icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, font_path, size, 0);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) { rx_shaper_drop(&shaper); icu->ubidi_close(bidi); return -RXC_ERR_NO_SKIA; }
+    }
+    sk_typeface_t *fb_base = rx_default_typeface();
+
+    double penx = x;
+    int64_t err = 0;
+    /* Walk runs in VISUAL order; each run is a logical UTF-16 range [ls, ls+rl). */
+    for (int32_t r = 0; r < nruns && !err; r++) {
+        int32_t ls = 0, rl = 0;
+        int is_rtl = icu->ubidi_getVisualRun(bidi, r, &ls, &rl);
+        if (rl <= 0 || ls < 0 || ls + rl > u16n) continue;
+        /* Map the logical UTF-16 range to a UTF-8 byte range via b2u. */
+        size_t bstart = (size_t)b2u[ls];
+        size_t bend   = (ls + rl >= u16n) ? len : (size_t)b2u[ls + rl];
+        if (bend <= bstart) continue;
+        size_t rlen = bend - bstart;
+
+        /* Coverage: does the base font cover the run's first codepoint? (A run is
+         * single-script per bidi + we route the whole run together; mixed coverage
+         * within a run is rare and falls back if the first cp is uncovered.) */
+        size_t probe_i = bstart;
+        int32_t first_cp = rxc_utf8_next(text, &probe_i, bend);
+        int covered = (shaper.tf && sk->typeface_unichar_to_glyph(shaper.tf, first_cp) != 0) ? 1 : 0;
+
+        if (covered) {
+            shaper.hbdir = is_rtl ? RX_HB_DIR_RTL : RX_HB_DIR_LTR;
+            int w = rx_shaper_measure(&shaper, text, bstart, rlen);
+            if (draw) rx_shaper_draw(&shaper, canvas, text, bstart, rlen, penx, y, argb);
+            penx += w;
+        } else {
+            double w = rx_fallback_line(sk, draw ? canvas : NULL, fb_base, size,
+                                        text, bstart, rlen, penx, y, argb, draw);
+            if (w < 0.0) err = -RXC_ERR_NO_SKIA; else penx += w;
+        }
+    }
+
+    rx_shaper_drop(&shaper);
+    icu->ubidi_close(bidi);
+    if (err) return err;
+    return (int64_t)(penx - x + 0.5);
+}
+
+/* True (1) when bidi reordering is available (ICU ubidi + shaping + fallback). */
+int64_t ruxen_canvas_bidi_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    const RxICU *icu = rx_icu();
+    return (sk->available && sk->glyph_render_ok && sk->fallback_ok &&
+            icu->available && icu->bidi_ok) ? 1 : 0;
+}
+
+/* Draw a mixed-direction line with ICU bidi visual reordering + per-run shaping +
+ * font fallback. Returns Ok(total advance width) or a NEGATIVE -RXC_ERR_*. */
+int64_t ruxen_canvas_draw_text_bidi(int64_t self, int64_t text, double x, double y,
+        double size, int64_t font_path, int64_t argb) {
+    return rx_text_bidi((RxHost *)self, (const char *)text, x, y, size,
+                        (const char *)font_path, argb, /*draw*/1);
+}
+
+/* Total advance width of a bidi-reordered line, without drawing. NEGATIVE
+ * -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_bidi(int64_t self, int64_t text, double size,
+        int64_t font_path) {
+    return rx_text_bidi((RxHost *)self, (const char *)text, 0.0, 0.0, size,
+                        (const char *)font_path, 0, /*draw*/0);
+}
+
+/* ---- shaped paragraphs: word-wrap with SHAPED line widths + glyph render ----
+ *
+ * The same greedy whitespace word-wrap as ruxen_canvas_draw_paragraph, but each
+ * line's width (for the wrap decision + alignment) is the HarfBuzz-SHAPED advance
+ * (kerning/ligatures), and each wrapped line is rendered through the shaped glyph
+ * path. So wrapping and alignment of e.g. a line with "ffi"/"AV" differ from the
+ * naive per-char path. ONE font (by file path), greedy whitespace wrap (no ICU
+ * line-break this round); Skia+HarfBuzz-only (clean Err when absent — callers
+ * fall back to the non-shaped draw_paragraph). The non-shaped path is untouched.
+ *
+ * Direction (0 auto / 1 LTR / 2 RTL) applies to each shaped line. */
+
+/* Draw a word-wrapped paragraph with SHAPED lines (kerning/ligatures) at the
+ * given alignment (0 left / 1 center / 2 right). (x, y) is the column left edge
+ * + first baseline; lines stack one line-height below. Returns the laid-out
+ * TOTAL HEIGHT in pixels, or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_draw_paragraph_shaped(int64_t self, int64_t text, double x, double y,
+        double max_width, double size, int64_t font_path, int64_t align, int64_t direction,
+        int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    const char *fp = (const char *)font_path;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width)) {
+        return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+
+    sk_canvas_t *canvas = rx_host_canvas(h);
+    if (!canvas) return -RXC_ERR_NO_SKIA;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, fp, size, direction);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    int n = rx_paragraph_layout(h, shaper.sk, shaper.skf, s, x, y, max_width,
+                                shaper.line_height, (int)align, argb,
+                                /*draw*/1, NULL, &shaper);
+    int lh = shaper.line_height;
+    rx_shaper_drop(&shaper);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    return (int64_t)n * lh;
+}
+
+/* Measure a shaped word-wrapped paragraph WITHOUT drawing: returns
+ * (max_shaped_line_width << 32) | total_height. NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_paragraph_shaped(int64_t self, int64_t text, double max_width,
+        double size, int64_t font_path, int64_t direction) {
+    (void)self;
+    const char *s = (const char *)text;
+    const char *fp = (const char *)font_path;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    RxShaper shaper;
+    rx_shaper_init(&shaper, fp, size, direction);
+    if (!shaper.ok) { rx_shaper_drop(&shaper); return -RXC_ERR_NO_SKIA; }
+
+    int max_w = 0;
+    int n = rx_paragraph_layout(NULL, shaper.sk, shaper.skf, s, 0.0, 0.0, max_width,
+                                shaper.line_height, RXC_ALIGN_LEFT, 0,
+                                /*draw*/0, &max_w, &shaper);
+    int lh = shaper.line_height;
+    rx_shaper_drop(&shaper);
+    if (n < 0) return -RXC_ERR_BAD_ARGS;
+    int64_t height = (int64_t)n * lh;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- per-character font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * The shaped/draw_text paths above render ONE font: any codepoint that font
+ * lacks comes out as TOFU (a .notdef box) — all CJK and emoji under a Latin face.
+ * This section itemizes a string into runs by FONT COVERAGE and renders each run
+ * with a typeface that covers it (the base font when it covers the codepoint,
+ * else the system font manager's per-character match — Core Text on macOS, so CJK
+ * resolves to PingFang/Hiragino and emoji to Apple Color Emoji without us naming
+ * any font). Each run is rendered through Skia's DIRECT glyph mapping
+ * (sk_font_unichar_to_glyph + sk_font_get_widths_bounds) into a positioned
+ * textblob — no font FILE is needed (fontmgr returns an sk_typeface_t, not a
+ * path), so HarfBuzz is not involved on the fallback runs. SCOPE: this renders
+ * CJK + emoji correctly (1:1 codepoint->glyph + advance); complex-script SHAPING
+ * (Indic/Arabic ligature+reorder) inside a fallback font would need the font file
+ * for HarfBuzz and is the documented remainder. Skia+fallback-only — clean Err
+ * when the fontmgr surface is absent. */
+
+/* Decode the next UTF-8 codepoint at text[*i]; advance *i past it. Returns the
+ * codepoint, or 0xFFFD (replacement) on a malformed byte (advancing 1 so we never
+ * loop). Stops are the caller's job (*i < len). */
+static int32_t rxc_utf8_next(const char *text, size_t *i, size_t len) {
+    unsigned char c = (unsigned char)text[*i];
+    if (c < 0x80) { (*i)++; return c; }
+    if ((c & 0xE0) == 0xC0 && *i + 1 < len) {
+        int32_t cp = ((c & 0x1F) << 6) | ((unsigned char)text[*i + 1] & 0x3F);
+        *i += 2; return cp;
+    }
+    if ((c & 0xF0) == 0xE0 && *i + 2 < len) {
+        int32_t cp = ((c & 0x0F) << 12) | (((unsigned char)text[*i + 1] & 0x3F) << 6)
+                   | ((unsigned char)text[*i + 2] & 0x3F);
+        *i += 3; return cp;
+    }
+    if ((c & 0xF8) == 0xF0 && *i + 3 < len) {
+        int32_t cp = ((c & 0x07) << 18) | (((unsigned char)text[*i + 1] & 0x3F) << 12)
+                   | (((unsigned char)text[*i + 2] & 0x3F) << 6)
+                   | ((unsigned char)text[*i + 3] & 0x3F);
+        *i += 4; return cp;
+    }
+    (*i)++; return 0xFFFD;   /* malformed: skip one byte */
+}
+
+/* Fallback typeface cache, keyed by (Unicode block = codepoint>>8, style-bits).
+ * A run of Han / emoji shares a block and one slot, so a CJK paragraph does not
+ * call the (Core-Text-backed) fontmgr per character. Process-wide singletons,
+ * never freed (the same model as the family cache). A full cache resolves
+ * uncached (correct, just unmemoized). */
+#define RXC_FALLBACK_CACHE_CAP 32
+
+typedef struct {
+    int32_t        block;   /* codepoint >> 8 */
+    sk_typeface_t *tf;      /* the typeface covering that block, or NULL if none */
+    int            used;
+} RxFallbackEntry;
+
+/* The last family name a fallback resolved to (for Canvas#last_fallback_family).
+ * Updated whenever a fallback typeface is matched, so a test/L2 can document what
+ * the fallback picked. "" until the first fallback. */
+static char rxc_last_fallback_family[64] = {0};
+
+/* The default base typeface (system default), reused as the run's primary font.
+ * Built once; NULL when Skia is absent. */
+static sk_typeface_t *rx_default_typeface(void) {
+    static sk_typeface_t *tf = NULL;
+    static int tried = 0;
+    if (tried) return tf;
+    tried = 1;
+    const RxSkia *sk = rx_skia();
+    if (sk->typeface_create_default) tf = sk->typeface_create_default();
+    return tf;   /* may be NULL: caller handles */
+}
+
+/* Resolve a typeface that covers `cp`, cached by Unicode block. NULL when the
+ * fontmgr finds none (the caller then renders .notdef for that run — honest, not
+ * a crash). Records the picked family in rxc_last_fallback_family. */
+static sk_typeface_t *rx_fallback_typeface(const RxSkia *sk, int32_t cp) {
+    static RxFallbackEntry cache[RXC_FALLBACK_CACHE_CAP];
+    static int count = 0;
+    int32_t block = cp >> 8;
+    for (int i = 0; i < count; i++) {
+        if (cache[i].used && cache[i].block == block) return cache[i].tf;
+    }
+    /* The match REQUIRES a non-NULL style (NULL segfaults — see the binding
+     * gotcha in skia_capi.h). Build a normal style once. */
+    sk_fontstyle_t *style = sk->fontstyle_new ? sk->fontstyle_new(400, 5, 0) : NULL;
+    sk_fontmgr_t *mgr = sk->fontmgr_ref_default();
+    sk_typeface_t *tf = (mgr && style)
+        ? sk->fontmgr_match_character(mgr, NULL, style, NULL, 0, cp) : NULL;
+    if (mgr && sk->fontmgr_unref) sk->fontmgr_unref(mgr);
+    if (style && sk->fontstyle_delete) sk->fontstyle_delete(style);
+    /* Record the picked family. get_family_name RETURNS an owned sk_string_t*
+     * (the buf-fill form returns empty on this build). */
+    if (tf && sk->typeface_get_family_name && sk->string_get_c_str) {
+        sk_string_t *nm = sk->typeface_get_family_name(tf);
+        if (nm) {
+            const char *cstr = sk->string_get_c_str(nm);
+            if (cstr) {
+                strncpy(rxc_last_fallback_family, cstr,
+                        sizeof(rxc_last_fallback_family) - 1);
+                rxc_last_fallback_family[sizeof(rxc_last_fallback_family) - 1] = '\0';
+            }
+            if (sk->string_destructor) sk->string_destructor(nm);
+        }
+    }
+    if (count < RXC_FALLBACK_CACHE_CAP) {
+        cache[count].block = block;
+        cache[count].tf = tf;
+        cache[count].used = 1;
+        count++;
+    }
+    return tf;
+}
+
+/* A scratch sk_font we re-point at each run's typeface (font_set_typeface), so we
+ * do not build a new sk_font per run. Process-wide, size set per call. NULL when
+ * the symbols are absent. */
+static sk_font_t *rx_fallback_scratch_font(const RxSkia *sk, double size) {
+    static sk_font_t *f = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        if (sk->font_new_with_values)
+            f = sk->font_new_with_values(NULL, (float)size, 1.0f, 0.0f);
+    }
+    if (f && sk->font_set_size && size > 0.0) sk->font_set_size(f, (float)size);
+    return f;
+}
+
+/* Render (draw != 0) or measure ONE coverage run: codepoints cp[0..n) that all
+ * resolve to typeface `tf`, at pen origin (penx, y), color argb, onto `canvas`.
+ * Maps each codepoint to a glyph via sk_font_unichar_to_glyph and lays them out
+ * with sk_font_get_widths_bounds advances into a positioned textblob. Returns the
+ * run's advance width in pixels (>= 0), or -1 on an allocation failure. */
+static double rx_fallback_render_run(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *tf, double size, const int32_t *cp, int n,
+        double penx, double y, int64_t argb, int draw) {
+    if (n <= 0) return 0.0;
+    sk_font_t *font = rx_fallback_scratch_font(sk, size);
+    if (!font) return -1.0;
+    sk->font_set_typeface(font, tf);            /* tf may be NULL -> .notdef glyphs */
+
+    uint16_t glyphs_stack[128];
+    float    widths_stack[128];
+    uint16_t *glyphs = glyphs_stack;
+    float    *widths = widths_stack;
+    if (n > 128) {
+        glyphs = (uint16_t *)malloc((size_t)n * sizeof(uint16_t));
+        widths = (float *)malloc((size_t)n * sizeof(float));
+        if (!glyphs || !widths) { free(glyphs); free(widths); return -1.0; }
+    }
+    for (int i = 0; i < n; i++) glyphs[i] = sk->font_unichar_to_glyph(font, cp[i]);
+    sk->font_get_widths_bounds(font, glyphs, n, widths, NULL, NULL);
+
+    double run_w = 0.0;
+    for (int i = 0; i < n; i++) run_w += widths[i];
+
+    if (draw && canvas && sk->textblob_builder_new) {
+        sk_textblob_builder_t *b = sk->textblob_builder_new();
+        if (b) {
+            sk_textblob_runbuffer_t rb;
+            sk->textblob_builder_alloc_run_pos(b, font, n, NULL, &rb);
+            uint16_t *gout = (uint16_t *)rb.glyphs;
+            float    *pout = (float *)rb.pos;
+            double x = penx;
+            for (int i = 0; i < n; i++) {
+                gout[i] = glyphs[i];
+                pout[2 * i + 0] = (float)x;
+                pout[2 * i + 1] = 0.0f;
+                x += widths[i];
+            }
+            sk_textblob_t *blobt = sk->textblob_builder_make(b);
+            sk->textblob_builder_delete(b);
+            if (blobt) {
+                sk_paint_t *paint = sk->paint_new();
+                if (paint) {
+                    sk->paint_set_antialias(paint, 1);
+                    sk->paint_set_style(paint, RX_SK_PAINT_FILL);
+                    sk->paint_set_color(paint, (sk_color_t)(uint32_t)argb);
+                    /* y is the baseline; positions are run-relative, so draw at
+                     * (0, y) and the per-glyph x carries the layout. */
+                    sk->canvas_draw_text_blob(canvas, blobt, 0.0f, (float)y, paint);
+                    sk->paint_delete(paint);
+                }
+                sk->textblob_unref(blobt);
+            }
+        }
+    }
+    if (glyphs != glyphs_stack) free(glyphs);
+    if (widths != widths_stack) free(widths);
+    return run_w;
+}
+
+/* Itemize the byte sub-range [start, start+sublen) of `text` into coverage runs
+ * (base typeface where it covers the codepoint, else the fontmgr fallback;
+ * consecutive same-typeface codepoints coalesce) and render (draw != 0) or measure
+ * them at pen origin (x0, y). Returns the laid-out advance width in pixels (>= 0),
+ * or a NEGATIVE -RXC_ERR_* on an allocation failure. This is the per-LINE engine
+ * shared by single-line fallback text and the ICU-wrapped fallback paragraph. */
+static double rx_fallback_line(const RxSkia *sk, sk_canvas_t *canvas,
+        sk_typeface_t *base, double size, const char *text, size_t start,
+        size_t sublen, double x0, double y, int64_t argb, int draw) {
+    size_t end = start + sublen;
+    size_t i = start;
+    double penx = x0;
+
+    int32_t  run_cp[256];
+    int      run_n = 0;
+    sk_typeface_t *run_tf = NULL;
+    int      have_run = 0;
+
+    sk_font_t *probe = rx_fallback_scratch_font(sk, size);
+    if (!probe) return -1.0;
+
+    #define RXC_FLUSH_FB_RUN()                                                  \
+        do {                                                                    \
+            if (have_run && run_n > 0) {                                        \
+                double w = rx_fallback_render_run(sk, canvas, run_tf, size,     \
+                        run_cp, run_n, penx, y, argb, draw);                    \
+                if (w < 0.0) return -1.0;                                       \
+                penx += w;                                                      \
+            }                                                                   \
+            run_n = 0; have_run = 0;                                            \
+        } while (0)
+
+    while (i < end) {
+        int32_t cp = rxc_utf8_next(text, &i, end);
+        sk_typeface_t *tf = base;
+        sk->font_set_typeface(probe, base);
+        if (sk->font_unichar_to_glyph(probe, cp) == 0) {
+            tf = rx_fallback_typeface(sk, cp);
+        }
+        if (have_run && tf == run_tf && run_n < 256) {
+            run_cp[run_n++] = cp;
+        } else {
+            RXC_FLUSH_FB_RUN();
+            run_tf = tf; run_cp[run_n++] = cp; have_run = 1;
+        }
+    }
+    RXC_FLUSH_FB_RUN();
+    #undef RXC_FLUSH_FB_RUN
+    return penx - x0;
+}
+
+/* Itemize `text` into coverage runs and render (draw != 0) or measure them. Each
+ * codepoint uses the base typeface when it covers it (glyph != 0), else the
+ * fontmgr fallback for that codepoint; consecutive codepoints on the SAME
+ * typeface coalesce into one run. Returns the total advance width in pixels, or a
+ * NEGATIVE -RXC_ERR_* on failure. */
+static int64_t rx_text_fallback(RxHost *h, const char *text, double x, double y,
+                                double size, int64_t argb, int draw) {
+    if (!text) return -RXC_ERR_BAD_ARGS;
+    if (draw) {
+        if (!h) return -RXC_ERR_BAD_ARGS;
+        if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+        if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y)) return -RXC_ERR_BAD_ARGS;
+    }
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+
+    sk_typeface_t *base = rx_default_typeface();
+    /* base may be NULL; unichar_to_glyph on a NULL-typeface font returns 0, so
+     * every codepoint then takes the fallback path — still correct. */
+    double w = rx_fallback_line(sk, canvas, base, size, text, 0, strlen(text),
+                                x, y, argb, draw);
+    if (w < 0.0) return -RXC_ERR_NO_SKIA;
+    return (int64_t)(w + 0.5);
+}
+
+/* True (1) when per-character font fallback can run: the fontmgr + direct-glyph
+ * surface resolved. A capability probe. */
+int64_t ruxen_canvas_fallback_available(int64_t self) {
+    (void)self;
+    const RxSkia *sk = rx_skia();
+    return (sk->available && sk->fallback_ok) ? 1 : 0;
+}
+
+/* Draw `text` at baseline (x, y) with per-character font fallback: each codepoint
+ * the base font lacks (CJK, emoji) is rendered with a system-matched font so it
+ * is real glyphs, not tofu. color packed 0xAARRGGBB. Returns the total advance
+ * width in pixels (>= 0), or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_draw_text_fallback(int64_t self, int64_t text, double x, double y,
+                                        double size, int64_t argb) {
+    return rx_text_fallback((RxHost *)self, (const char *)text, x, y, size, argb, /*draw*/1);
+}
+
+/* Total advance width in pixels of `text` rendered with font fallback, without
+ * drawing — for layout/centering. NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_text_fallback(int64_t self, int64_t text, double size) {
+    return rx_text_fallback((RxHost *)self, (const char *)text, 0.0, 0.0, size, 0, /*draw*/0);
+}
+
+/* The family name the most recent fallback resolved to (e.g. "PingFang SC",
+ * "Apple Color Emoji"), as a Ruxen-owned String. "" when no fallback has run yet.
+ * Lets a test/L2 document what the fallback picked. */
+int64_t ruxen_canvas_last_fallback_family(int64_t self) {
+    (void)self;
+    return (int64_t)ruxen_string_from(rxc_last_fallback_family);
+}
+
+/* ---- ICU line-break + font-fallback paragraph (docs/decisions/text-fallback.md) ----
+ *
+ * A word-wrapped paragraph that wraps at ICU LINE-BREAK opportunities (not just
+ * whitespace) and renders each line through the font-fallback path. So it handles
+ * CJK — which has NO spaces, and which greedy-whitespace wrap would overflow — by
+ * breaking between characters per Unicode rules, AND renders mixed CJK/Latin/emoji
+ * (each line itemized by font coverage). ICU + fallback only: a clean Err when ICU
+ * or the fallback surface is absent (callers use the greedy draw_paragraph_shaped
+ * / draw_paragraph fallback). (x, y) = column left edge + first baseline; lines
+ * stack one line-height below; align 0 left / 1 center / 2 right. */
+
+#define RXC_ICU_BREAKS_MAX 1024
+
+/* Collect ICU line-break opportunities of `text` as UTF-8 BYTE offsets into
+ * brk[0..*nbrk) (each > 0 and <= len; the final entry is len). Returns 1 on
+ * success, 0 if ICU is unavailable or the text is too long. Uses the same
+ * UTF-8<->UTF-16 offset map as the grapheme path. */
+static int rx_icu_line_breaks(const char *text, size_t len, int *brk, int *nbrk) {
+    const RxICU *icu = rx_icu();
+    if (!icu->available || len == 0 || len > RXC_SEG_MAX) return 0;
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(text, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return 0;
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_LINE, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return 0; }
+    int n = 0;
+    int32_t p = icu->ubrk_first(bi);   /* 0 */
+    while ((p = icu->ubrk_next(bi)) != RX_UBRK_DONE && n < RXC_ICU_BREAKS_MAX) {
+        brk[n++] = (p >= u16n) ? (int)len : b2u[p];
+    }
+    icu->ubrk_close(bi);
+    *nbrk = n;
+    return n > 0 ? 1 : 0;
+}
+
+/* Wrap + (optionally) draw `text` into a `max_width` column, breaking at ICU
+ * line-break opportunities and rendering each line with font fallback. Returns the
+ * laid-out total height in pixels, or a NEGATIVE -RXC_ERR_* on failure. Writes the
+ * widest line width to *out_w when non-NULL. */
+static int64_t rx_paragraph_icu(RxHost *h, const char *text, double x, double y,
+        double max_width, double size, int align, int64_t argb, int draw, int *out_w) {
+    const RxSkia *sk = rx_skia();
+    if (!sk->available || !sk->fallback_ok) return -RXC_ERR_NO_SKIA;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return -RXC_ERR_NO_SKIA;
+
+    sk_canvas_t *canvas = NULL;
+    if (draw) {
+        canvas = rx_host_canvas(h);
+        if (!canvas) return -RXC_ERR_NO_SKIA;
+    }
+    sk_typeface_t *base = rx_default_typeface();
+    sk_font_t *mf = rx_fallback_scratch_font(sk, size);
+    if (!mf) return -RXC_ERR_NO_SKIA;
+    int line_height = (int)rx_text_height_with_font(mf);
+    if (line_height < 1) line_height = 1;
+
+    size_t len = strlen(text);
+    int brk[RXC_ICU_BREAKS_MAX];
+    int nbrk = 0;
+    if (!rx_icu_line_breaks(text, len, brk, &nbrk)) return -RXC_ERR_NO_SKIA;
+
+    int max_col = (max_width > 0.0) ? (int)(max_width + 0.5) : 0;
+    int n_lines = 0;
+    int widest = 0;
+
+    /* Greedy pack break-delimited segments into lines. line_start is a byte
+     * offset; we extend the line to the next break while it fits, else flush. A
+     * single segment wider than the column is placed alone (overflow, never loop).
+     * Trailing spaces at a break are kept in the measured range (harmless). */
+    size_t line_start = 0;
+    int    prev = 0;       /* byte offset of the last accepted break (>= line_start) */
+    int    have = 0;
+
+    for (int bi = 0; bi < nbrk; bi++) {
+        int seg_end = brk[bi];
+        if (seg_end <= (int)line_start) continue;
+        double cand_w = rx_fallback_line(sk, NULL, base, size, text, line_start,
+                                         (size_t)seg_end - line_start, 0, 0, argb, 0);
+        if (cand_w < 0.0) return -RXC_ERR_NO_SKIA;
+        if (max_col > 0 && (int)(cand_w + 0.5) > max_col && have) {
+            /* flush [line_start, prev) as a line, start the new line at prev */
+            double lw = rx_fallback_line(sk, draw ? canvas : NULL, base, size, text,
+                    line_start, (size_t)prev - line_start, 0, 0, argb, 0);
+            int lwi = (int)(lw + 0.5);
+            if (lwi > widest) widest = lwi;
+            if (draw) {
+                double off = 0.0;
+                if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lwi) / 2.0;
+                else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lwi;
+                if (off < 0.0) off = 0.0;
+                double by = y + (double)n_lines * line_height;
+                rx_fallback_line(sk, canvas, base, size, text, line_start,
+                                 (size_t)prev - line_start, x + off, by, argb, 1);
+            }
+            n_lines++;
+            line_start = (size_t)prev;
+            /* re-measure the current segment from the new line start */
+            cand_w = rx_fallback_line(sk, NULL, base, size, text, line_start,
+                                      (size_t)seg_end - line_start, 0, 0, argb, 0);
+            if (cand_w < 0.0) return -RXC_ERR_NO_SKIA;
+        }
+        prev = seg_end;
+        have = 1;
+    }
+    /* flush the final pending line [line_start, prev) */
+    if (have && prev > (int)line_start) {
+        double lw = rx_fallback_line(sk, draw ? canvas : NULL, base, size, text,
+                line_start, (size_t)prev - line_start, 0, 0, argb, 0);
+        int lwi = (int)(lw + 0.5);
+        if (lwi > widest) widest = lwi;
+        if (draw) {
+            double off = 0.0;
+            if (align == RXC_ALIGN_CENTER) off = ((double)max_col - lwi) / 2.0;
+            else if (align == RXC_ALIGN_RIGHT) off = (double)max_col - lwi;
+            if (off < 0.0) off = 0.0;
+            double by = y + (double)n_lines * line_height;
+            rx_fallback_line(sk, canvas, base, size, text, line_start,
+                             (size_t)prev - line_start, x + off, by, argb, 1);
+        }
+        n_lines++;
+    }
+
+    if (out_w) *out_w = widest;
+    return (int64_t)n_lines * line_height;
+}
+
+/* Draw an ICU-line-broken, font-fallback paragraph; returns Ok(total_height) or a
+ * NEGATIVE -RXC_ERR_* (ICU + fallback only — callers fall back to the greedy
+ * draw_paragraph_shaped / draw_paragraph). align 0 left / 1 center / 2 right. */
+int64_t ruxen_canvas_draw_paragraph_icu(int64_t self, int64_t text, double x, double y,
+        double max_width, double size, int64_t align, int64_t argb) {
+    RxHost *h = (RxHost *)self;
+    const char *s = (const char *)text;
+    if (!h || !s) return -RXC_ERR_BAD_ARGS;
+    if (!h->in_frame) return -RXC_ERR_NO_FRAME;
+    if (!rxc_finite_pixels(x) || !rxc_finite_pixels(y) || !rxc_finite_pixels(max_width))
+        return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    if (align < 0 || align > RXC_ALIGN_RIGHT) return -RXC_ERR_BAD_ARGS;
+    return rx_paragraph_icu(h, s, x, y, max_width, size, (int)align, argb, 1, NULL);
+}
+
+/* Measure an ICU-line-broken, font-fallback paragraph WITHOUT drawing: returns
+ * (max_line_width << 32) | total_height, or a NEGATIVE -RXC_ERR_* on failure. */
+int64_t ruxen_canvas_measure_paragraph_icu(int64_t self, int64_t text, double max_width,
+        double size) {
+    const char *s = (const char *)text;
+    if (!s) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(max_width)) return -RXC_ERR_BAD_ARGS;
+    if (!rxc_finite_pixels(size) || !(size > 0.0)) return -RXC_ERR_BAD_ARGS;
+    int max_w = 0;
+    int64_t height = rx_paragraph_icu((RxHost *)self, s, 0.0, 0.0, max_width, size,
+                                      RXC_ALIGN_LEFT, 0, 0, &max_w);
+    if (height < 0) return height;
+    return ((int64_t)(uint32_t)max_w << 32) | (int64_t)(uint32_t)height;
+}
+
+/* ---- ICU segmentation: grapheme + line-break (docs/decisions/text-fallback.md) ----
+ *
+ * Grapheme boundaries (UBRK_CHARACTER) for L2's caret/selection — an emoji+ZWJ
+ * sequence is ONE grapheme, a combining mark stays with its base. ICU works in
+ * UTF-16; the input is a Ruxen String (UTF-8 char*), so we convert UTF-8 -> UTF-16
+ * AND record a UTF-16-unit -> UTF-8-byte offset map during our own decode, so the
+ * boundaries we hand back to L2 are UTF-8 BYTE offsets (what L2 indexes the String
+ * by). The non-ICU fallback (icu unavailable) is a clean 0 / unavailable. */
+
+/* Convert `text` (UTF-8, `len` bytes) to UTF-16 in `u16` (cap `u16cap` units),
+ * filling `b2u`[unit] with the UTF-8 BYTE offset each UTF-16 unit starts at (so a
+ * boundary at unit k maps to byte b2u[k]); b2u[count] = len (the end). Returns the
+ * number of UTF-16 units, or -1 if it would overflow. A surrogate pair (cp >
+ * 0xFFFF) is two units, both mapping to the codepoint's starting byte. */
+static int rx_utf8_to_utf16_map(const char *text, size_t len, rx_uchar *u16,
+                                int *b2u, int u16cap) {
+    int n = 0;
+    size_t i = 0;
+    while (i < len) {
+        size_t start = i;
+        int32_t cp = rxc_utf8_next(text, &i, len);
+        if (cp > 0xFFFF) {
+            if (n + 2 > u16cap) return -1;
+            cp -= 0x10000;
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)(0xD800 + (cp >> 10));
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)(0xDC00 + (cp & 0x3FF));
+        } else {
+            if (n + 1 > u16cap) return -1;
+            b2u[n] = (int)start; u16[n++] = (rx_uchar)cp;
+        }
+    }
+    if (n < u16cap) b2u[n] = (int)len;   /* the end boundary */
+    return n;
+}
+
+/* Count grapheme clusters in `text` (UTF-8). 0 when ICU is unavailable or the
+ * string is empty / too long. An emoji+ZWJ sequence counts as ONE. */
+int64_t ruxen_canvas_grapheme_count(int64_t self, int64_t text) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s) return 0;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return 0;
+    size_t len = strlen(s);
+    if (len == 0) return 0;
+    if (len > RXC_SEG_MAX) return 0;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(s, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return 0;
+
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_CHARACTER, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return 0; }
+    int count = 0;
+    int32_t p = icu->ubrk_first(bi);
+    while ((p = icu->ubrk_next(bi)) != RX_UBRK_DONE) count++;
+    icu->ubrk_close(bi);
+    return count;
+}
+
+/* The UTF-8 BYTE offset of the `n`-th grapheme boundary in `text` (0-based: n=0
+ * is the start = byte 0, n=grapheme_count is the end = byte length). -1 when ICU
+ * is unavailable, n is out of range, or the string is too long. Lets L2 map a
+ * caret index to a byte offset for selection/editing. */
+int64_t ruxen_canvas_grapheme_boundary_at(int64_t self, int64_t text, int64_t n) {
+    (void)self;
+    const char *s = (const char *)text;
+    if (!s || n < 0) return -1;
+    const RxICU *icu = rx_icu();
+    if (!icu->available) return -1;
+    size_t len = strlen(s);
+    if (len > RXC_SEG_MAX) return -1;
+    if (len == 0) return (n == 0) ? 0 : -1;
+
+    rx_uchar u16[RXC_SEG_MAX + 1];
+    int b2u[RXC_SEG_MAX + 2];
+    int u16n = rx_utf8_to_utf16_map(s, len, u16, b2u, RXC_SEG_MAX + 1);
+    if (u16n < 0) return -1;
+
+    int32_t status = 0;
+    UBreakIterator *bi = icu->ubrk_open(RX_UBRK_CHARACTER, "", u16, u16n, &status);
+    if (status > 0 || !bi) { if (bi) icu->ubrk_close(bi); return -1; }
+
+    int64_t result = -1;
+    int idx = 0;
+    int32_t p = icu->ubrk_first(bi);   /* always 0 */
+    if (n == 0) { result = (int64_t)b2u[0]; }
+    while (result < 0 && (p = icu->ubrk_next(bi)) != RX_UBRK_DONE) {
+        idx++;
+        if (idx == (int)n) {
+            /* p is a UTF-16 unit offset in [0, u16n]; map to a UTF-8 byte offset.
+             * p == u16n is the end -> byte length. */
+            result = (p >= u16n) ? (int64_t)len : (int64_t)b2u[p];
+        }
+    }
+    icu->ubrk_close(bi);
+    return result;
+}
+
+/* True (1) when ICU segmentation is available (libicucore loaded + break-iterator
+ * symbols resolved). A capability probe for the grapheme / ICU-wrap features. */
+int64_t ruxen_canvas_icu_available(int64_t self) {
+    (void)self;
+    return rx_icu()->available ? 1 : 0;
+}
+
+/* ---- accessibility tree intake (docs/decisions/accessibility.md) ----
+ *
+ * L2 (quiver) describes its a11y tree to L1 as a FLAT list of nodes, each a fixed
+ * tuple of primitives keyed by a node id — the same flat-array/arena idiom quiver
+ * uses for retained data (no objc, no Ruxen objects cross the FFI). This is the
+ * ENGINE-SIDE store: pure C, NO Cocoa, so it is fully headless-testable in the
+ * forked harness (unlike the live NSAccessibility exposure, which is window-only
+ * and gated in sdl_window.c). Updates are WHOLESALE re-push (Tier-1): L2 clears +
+ * re-pushes on a tree change. The store is a process-wide fixed-capacity table,
+ * each slot owning its label string copy (the never-freed-singleton model). The
+ * macOS exposure of these nodes as NSAccessibility CHILD elements is the staged
+ * remainder (see the ADR); this intake is the contract L2 codes against today. */
+#define RXC_A11Y_CAP 256
+#define RXC_A11Y_LABEL_MAX 127
+
+typedef struct {
+    int64_t id;
+    int32_t role;
+    char    label[RXC_A11Y_LABEL_MAX + 1];
+    float   x, y, w, h;
+    int     used;
+} RxA11yNode;
+
+static RxA11yNode rxc_a11y_nodes[RXC_A11Y_CAP];
+static int        rxc_a11y_count = 0;
+
+/* Append or replace (by id) one a11y node. Returns RXC_OK, or RXC_ERR_QUEUE_FULL
+ * when the table is full (a new id with no free slot). role is a small stable int
+ * enum (0 group / 1 button / 2 static-text / 3 image / 4 heading / 5 link). The
+ * label is COPIED into engine-owned storage (truncated at RXC_A11Y_LABEL_MAX). */
+int64_t ruxen_canvas_push_a11y_node(int64_t id, int64_t role,
+        int64_t label, double x, double y, double w, double h) {
+    const char *lbl = (const char *)label;
+    /* replace if the id already exists (wholesale re-push reuses ids) */
+    RxA11yNode *slot = NULL;
+    for (int i = 0; i < rxc_a11y_count; i++) {
+        if (rxc_a11y_nodes[i].used && rxc_a11y_nodes[i].id == id) { slot = &rxc_a11y_nodes[i]; break; }
+    }
+    if (!slot) {
+        if (rxc_a11y_count >= RXC_A11Y_CAP) return RXC_ERR_QUEUE_FULL;
+        slot = &rxc_a11y_nodes[rxc_a11y_count++];
+    }
+    slot->id = id;
+    slot->role = (int32_t)role;
+    slot->x = (float)x; slot->y = (float)y; slot->w = (float)w; slot->h = (float)h;
+    slot->used = 1;
+    if (lbl) {
+        strncpy(slot->label, lbl, RXC_A11Y_LABEL_MAX);
+        slot->label[RXC_A11Y_LABEL_MAX] = '\0';
+    } else {
+        slot->label[0] = '\0';
+    }
+    return RXC_OK;
+}
+
+/* Drop all a11y nodes (the start of a wholesale re-push). */
+int64_t ruxen_canvas_clear_a11y_tree(void) {
+    rxc_a11y_count = 0;
+    /* zero so a stale label can't be read; cheap, bounded. */
+    memset(rxc_a11y_nodes, 0, sizeof(rxc_a11y_nodes));
+    return RXC_OK;
+}
+
+/* The number of stored a11y nodes — the headless pin reads this to prove the
+ * intake round-trips with no live window. */
+int64_t ruxen_canvas_a11y_node_count(void) {
+    return (int64_t)rxc_a11y_count;
+}
+
+/* The role of the n-th stored a11y node (0-based), or -1 if out of range — lets a
+ * pin verify the stored tuple, and (later) the macOS exposure read the store. */
+int64_t ruxen_canvas_a11y_node_role(int64_t n) {
+    if (n < 0 || n >= rxc_a11y_count) return -1;
+    return (int64_t)rxc_a11y_nodes[n].role;
+}
+
+/* The label of the n-th stored a11y node as a Ruxen-owned String, or "" if out of
+ * range. Lets a pin verify the label round-tripped. */
+int64_t ruxen_canvas_a11y_node_label(int64_t n) {
+    if (n < 0 || n >= rxc_a11y_count) return (int64_t)ruxen_string_from("");
+    return (int64_t)ruxen_string_from(rxc_a11y_nodes[n].label);
+}
+
+/* ---- internal a11y store accessors (for sdl_window.c's macOS exposure) ----
+ *
+ * The store above is a static table private to this translation unit. The live
+ * NSAccessibility exposure (building NSAccessibilityElement children) lives in
+ * sdl_window.c (it is the only file allowed to touch Cocoa), so it needs a
+ * read-only window into this store WITHOUT widening the table to a shared header.
+ * These flat-primitive accessors are it: count + per-index field reads returning
+ * BORROWED data (the label is a pointer INTO the store, valid until the next
+ * clear/re-push — the caller copies it into an NSString immediately, no aliasing
+ * past the call). They are deliberately NOT `ruxen_canvas_*` ABI (no Ruxen binding);
+ * they are an internal C contract between the two shim files, prefixed rx_. */
+int rx_a11y_internal_count(void) { return rxc_a11y_count; }
+
+/* Borrowed read of node n. Writes role/frame through out-params and returns the
+ * label pointer (into the store, never NULL — "" when out of range). The caller
+ * (sdl_window.c) copies the label into an NSString synchronously. */
+const char *rx_a11y_internal_node(int n, int *role, double *x, double *y,
+                                  double *w, double *h, int64_t *id) {
+    if (n < 0 || n >= rxc_a11y_count) {
+        if (role) *role = -1;
+        if (x) *x = 0;
+        if (y) *y = 0;
+        if (w) *w = 0;
+        if (h) *h = 0;
+        if (id) *id = -1;
+        return "";
+    }
+    const RxA11yNode *nd = &rxc_a11y_nodes[n];
+    if (role) *role = nd->role;
+    if (x) *x = (double)nd->x;
+    if (y) *y = (double)nd->y;
+    if (w) *w = (double)nd->w;
+    if (h) *h = (double)nd->h;
+    if (id) *id = nd->id;
+    return nd->label;
+}
+
+/* The store index of the node whose L2 id == `id`, or -1 if none. Used by the
+ * focus setter to map an L2 node id to a built NSAccessibilityElement. */
+int rx_a11y_internal_index_of(int64_t id) {
+    for (int i = 0; i < rxc_a11y_count; i++) {
+        if (rxc_a11y_nodes[i].used && rxc_a11y_nodes[i].id == id) return i;
+    }
+    return -1;
+}
+
 /* ---- event queue ---- */
 /* The platform pump (sdl_window.c) and the tests push events in; the Ruxen
  * side polls them out one at a time. poll pops the next event into the
  * `pending` slot and returns its kind (-1 when the queue is empty); the
  * payload accessors then read from `pending`. */
 
+/* FileDrop event-kind tag — must match RX_EV_FILE_DROP in sdl_window.c and the
+ * FileDrop variant's tag in src/event.rx (the highest tag, RXC_EVENT_KIND_MAX). */
+#define RX_EV_FILE_DROP 9
+
 int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b) {
     RxHost *h = (RxHost *)self;
     if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
     if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
     int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    /* a previously-polled slot may still alias a drop_path it no longer owns
+     * (poll moves ownership to `pending` and NULLs the slot, so this is normally
+     * already NULL — but free defensively to never leak on an unexpected path). */
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
     h->events[tail].kind = (int32_t)kind;
     h->events[tail].a = a;
     h->events[tail].b = b;
+    h->events[tail].text[0] = '\0';   /* no marked text (clear stale slot content) */
+    h->events[tail].mods = 0;         /* no key modifiers (clear stale slot content) */
     h->ev_count++;
     return RXC_OK;
+}
+
+/* Push a KeyDown carrying its keyboard MODIFIER bitfield (RX_MOD_*). The live
+ * pump (sdl_window.c) reads SDL_GetModState() and the keydown test seam passes a
+ * synthetic mask; both funnel here so the mods side-channel rides the SAME ring
+ * slot as the keycode. Identical to push_event except it also stamps `mods`. */
+int64_t ruxen_canvas_push_event_mods(int64_t self, int64_t kind, double a, double b,
+                                     int64_t mods) {
+    RxHost *h = (RxHost *)self;
+    if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
+    if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
+    int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
+    h->events[tail].kind = (int32_t)kind;
+    h->events[tail].a = a;
+    h->events[tail].b = b;
+    h->events[tail].text[0] = '\0';
+    h->events[tail].mods = (int32_t)mods;
+    h->ev_count++;
+    return RXC_OK;
+}
+
+/* Push an IME composition (TextEditing) event carrying the marked composition
+ * TEXT alongside the (start, length) cursor/selection. The text is a
+ * NUL-terminated UTF-8 C string (an SDL marked-text chunk, or a Ruxen &String in
+ * the test seam); it is COPIED into the ring slot (truncated to RXC_EVENT_TEXT_CAP-1
+ * bytes — SDL caps composition chunks at 32 bytes anyway), so no pointer outlives
+ * the call (never a dangling SDL buffer). kind must be the TextEditing tag. */
+int64_t ruxen_canvas_push_event_text(int64_t self, int64_t kind, int64_t start,
+                                     int64_t length, int64_t text_ptr) {
+    RxHost *h = (RxHost *)self;
+    const char *t = (const char *)text_ptr;
+    if (!h || kind < 0 || kind > RXC_EVENT_KIND_MAX) return RXC_ERR_BAD_ARGS;
+    if (h->ev_count >= RXC_EVENT_CAP) return RXC_ERR_QUEUE_FULL;
+    int32_t tail = (h->ev_head + h->ev_count) % RXC_EVENT_CAP;
+    /* free any stale drop_path this slot still aliases (see push_event). */
+    if (h->events[tail].drop_path) { free(h->events[tail].drop_path); h->events[tail].drop_path = NULL; }
+    h->events[tail].kind = (int32_t)kind;
+    h->events[tail].a = (double)start;
+    h->events[tail].b = (double)length;
+    if (kind == RX_EV_FILE_DROP) {
+        /* A FILE PATH — routinely longer than the inline cap, so it gets its own
+         * owned heap copy (drop_path). The inline `text` stays empty so the IME
+         * accessor never returns a path. strdup may fail (OOM) → store NULL, the
+         * accessor then returns "" (a dropped-but-pathless event, never a crash). */
+        h->events[tail].text[0] = '\0';
+        h->events[tail].drop_path = (t && t[0]) ? strdup(t) : NULL;
+    } else if (t) {
+        /* IME marked text: copied inline, capped at 32 bytes (SDL's composition
+         * cap), exactly as before. */
+        size_t n = strlen(t);
+        if (n >= RXC_EVENT_TEXT_CAP) n = RXC_EVENT_TEXT_CAP - 1;
+        memcpy(h->events[tail].text, t, n);
+        h->events[tail].text[n] = '\0';
+    } else {
+        h->events[tail].text[0] = '\0';
+    }
+    h->events[tail].mods = 0;   /* text events carry no key modifiers */
+    h->ev_count++;
+    return RXC_OK;
+}
+
+/* The marked composition TEXT of the most-recently-polled event (a Ruxen-owned
+ * String via ruxen_string_from). Empty string for non-TextEditing events. The
+ * text was copied into `pending` at poll time, so this never dereferences a
+ * foreign/stale pointer. */
+int64_t ruxen_canvas_event_text(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return (int64_t)ruxen_string_from(h ? h->pending.text : "");
 }
 
 int64_t ruxen_canvas_poll_event(int64_t self) {
     RxHost *h = (RxHost *)self;
     if (!h || h->ev_count == 0) return -1;
-    h->pending = h->events[h->ev_head];
+    /* MOVE the dropped-path ownership from the ring slot into `pending`: free the
+     * path the PREVIOUS poll left in `pending`, struct-copy the slot (which aliases
+     * its drop_path into pending), then NULL the slot so only `pending` owns it.
+     * Result: exactly one owner at all times, freed on the next poll or host_drop. */
+    if (h->pending.drop_path) { free(h->pending.drop_path); h->pending.drop_path = NULL; }
+    int32_t head = h->ev_head;
+    h->pending = h->events[head];
+    h->events[head].drop_path = NULL;   /* ownership moved to pending */
     h->ev_head = (h->ev_head + 1) % RXC_EVENT_CAP;
     h->ev_count--;
     return h->pending.kind;
+}
+
+/* The dropped FILE PATH of the most-recently-polled event (a Ruxen-owned String
+ * via ruxen_string_from). Empty string for any non-FileDrop event (or a drop with
+ * no path). The path was MOVED into `pending` at poll time (owned heap copy), so
+ * this never dereferences a foreign/stale SDL pointer. Read it immediately after
+ * polling an Event.FileDrop, before the next poll frees it. */
+int64_t ruxen_canvas_event_drop_path(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    const char *p = (h && h->pending.drop_path) ? h->pending.drop_path : "";
+    return (int64_t)ruxen_string_from(p);
+}
+
+/* The keyboard MODIFIER bitfield (RX_MOD_*) of the most-recently-polled event.
+ * Non-zero only for a KeyDown whose modifiers were set (shift/ctrl/alt/gui); 0
+ * for every other event kind and for a plain unmodified key. Read it right after
+ * polling an Event.KeyDown, the same side-channel discipline as event_drop_path /
+ * event_text. */
+int64_t ruxen_canvas_event_mods(int64_t self) {
+    RxHost *h = (RxHost *)self;
+    return h ? (int64_t)h->pending.mods : 0;
 }
 
 double ruxen_canvas_event_a(int64_t self) {
@@ -1252,5 +4682,39 @@ void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
     struct timespec ts;
     ts.tv_sec  = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
+}
+
+/* Monotonic nanosecond clock for the engine timebase (docs/decisions/
+ * frame-pacing.md). CLOCK_MONOTONIC never jumps backward (NTP/DST-immune), so a
+ * frame delta is always >= 0. The epoch is unspecified-but-fixed for the process;
+ * only differences are meaningful — which is all an animation/frame clock needs.
+ * int64 nanoseconds does not overflow for ~292 years. The handle is accepted-and-
+ * ignored (the clock is process-wide, like sleep_ms). */
+int64_t ruxen_canvas_ticks_ns(int64_t self) {
+    (void)self;
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+/* Paced-present wait to an ABSOLUTE monotonic target tick (docs/decisions/
+ * frame-pacing.md). Sleeps remaining = target_ns - now; returns immediately when
+ * the frame already overran (remaining <= 0) — pacing fills the slack of an early
+ * frame, it never ADDS latency to a late one. The absolute target makes the
+ * cadence self-correcting (the caller advances target += interval each frame, so
+ * early/late frames converge back onto the grid with no drift). nanosleep
+ * guarantees a MINIMUM sleep; a few hundred µs of scheduler over-sleep is correct
+ * for a 2D UI (we never want to present BEFORE the boundary). On the Metal/GL
+ * on-screen paths the present already blocks on vsync, so remaining is <= 0 and
+ * this is a no-op-by-design there; it is the software clock for raster/headless. */
+void ruxen_canvas_wait_until_ns(int64_t self, int64_t target_ns) {
+    (void)self;
+    int64_t now = ruxen_canvas_ticks_ns(0);
+    int64_t remaining = target_ns - now;
+    if (remaining <= 0) return;
+    struct timespec ts;
+    ts.tv_sec  = (time_t)(remaining / 1000000000LL);
+    ts.tv_nsec = (long)(remaining % 1000000000LL);
     nanosleep(&ts, NULL);
 }

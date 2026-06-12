@@ -1,0 +1,96 @@
+# Pin tests for the accessibility bridge (Phase 3, docs/decisions/accessibility.md).
+#
+# Two layers:
+#   - ENGINE-SIDE intake (push_a11y_node / clear_a11y_tree / a11y_node_count /
+#     a11y_node_role / a11y_node_label) — pure C, NO Cocoa, so it round-trips
+#     HEADLESS in the forked harness. This is the contract L2 codes against.
+#   - LIVE macOS touches (a11y_available? / set_a11y_title) — NSAccessibility via
+#     objc, fork-gated. Under the forked harness Cocoa is unsafe, so a11y_available?
+#     is false and set_a11y_title Errs (the file-dialog discipline). We pin that
+#     clean contract, not a live VoiceOver path (that is the staged remainder,
+#     examples/a11y_verify.c).
+
+Tester.describe("a11y intake round-trips headless") do |t: &var Tester|
+  t.it("push then count reflects the pushed nodes; clear empties them") do
+    let _ = Window.clear_a11y_tree
+    t.expect(Window.a11y_node_count).to_eq(0)
+
+    match Window.push_a11y_node(1, Window.a11y_role_button, "Save", 10.0f32, 20.0f32, 80.0f32, 24.0f32)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push failed: #{e}")
+    end
+    match Window.push_a11y_node(2, Window.a11y_role_static_text, "Hello", 10.0f32, 60.0f32, 120.0f32, 18.0f32)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push failed: #{e}")
+    end
+    t.expect(Window.a11y_node_count).to_eq(2)
+
+    let _2 = Window.clear_a11y_tree
+    t.expect(Window.a11y_node_count).to_eq(0)
+  end
+
+  t.it("stores each node's role and label") do
+    let _ = Window.clear_a11y_tree
+    match Window.push_a11y_node(7, Window.a11y_role_heading, "Title", 0.0f32, 0.0f32, 200.0f32, 30.0f32)
+      Ok(_)  -> nil
+      Err(_) -> panic!("push failed")
+    end
+    t.expect(Window.a11y_node_role(0)).to_eq(Window.a11y_role_heading)
+    t.expect(Window.a11y_node_label(0)).to_eq("Title")
+    # out-of-range is total: -1 role, "" label.
+    t.expect(Window.a11y_node_role(5)).to_eq(-1)
+    t.expect(Window.a11y_node_label(5)).to_eq("")
+    let _2 = Window.clear_a11y_tree
+  end
+
+  t.it("re-pushing the same id replaces, not duplicates (wholesale re-push)") do
+    let _ = Window.clear_a11y_tree
+    let _1 = Window.push_a11y_node(3, Window.a11y_role_button, "Old", 0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    let _2 = Window.push_a11y_node(3, Window.a11y_role_link, "New", 0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    t.expect(Window.a11y_node_count).to_eq(1)
+    t.expect(Window.a11y_node_role(0)).to_eq(Window.a11y_role_link)
+    t.expect(Window.a11y_node_label(0)).to_eq("New")
+    let _3 = Window.clear_a11y_tree
+  end
+end
+
+Tester.describe("a11y live macOS contract under the forked harness") do |t: &var Tester|
+  t.it("a11y_available? is total and set_a11y_title agrees with it") do
+    let avail = Window.a11y_available?
+    t.expect(avail == true || avail == false).to_eq(true)
+
+    let res = Window.set_a11y_title("My App")
+    var ok = false
+    match res
+      Ok(_)  -> ok = true
+      Err(_) -> ok = false
+    end
+    # Under the forked harness Cocoa is gated off, so a11y_available? is false and
+    # set_a11y_title Errs — the contract: set succeeds iff available.
+    t.expect(ok).to_eq(avail)
+  end
+
+  t.it("sync_a11y_children + set_a11y_focus Err cleanly with no live window") do
+    # The child-element exposure is live-window-only (Metal NSView path). Under the
+    # forked harness there is no live window, so both Err — never a crash, never a
+    # silent no-op. The live VoiceOver-verified path is examples/a11y_verify.c.
+    var w = match Window.open("a11y", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+
+    var sync_failed = false
+    match w.sync_a11y_children
+      Ok(_)  -> nil
+      Err(_) -> sync_failed = true
+    end
+    t.expect(sync_failed).to_eq(true)
+
+    var focus_failed = false
+    match w.set_a11y_focus(1)
+      Ok(_)  -> nil
+      Err(_) -> focus_failed = true
+    end
+    t.expect(focus_failed).to_eq(true)
+  end
+end

@@ -1,0 +1,143 @@
+# Pin tests for drag-and-drop (docs/ROADMAP.md Phase-1.5): Event.FileDrop carrying
+# a dropped file PATH, the side-channel the real SDL_DROPFILE path delivers. The
+# ring carries an OWNED heap copy of the path (copied at pump time, so SDL's own
+# string is freed immediately and never dangles, and a LONG path is NOT truncated
+# to the 32-byte IME cap). Read back via Window#dropped_file_path right after
+# polling. A multi-file drop arrives as several FileDrop events.
+#
+# Driven through Window#push_file_drop (and the window_pump_test_dropfile seam it
+# mirrors), since the live SDL pump can't run in the forked harness.
+
+Tester.describe("Event.FileDrop drag-and-drop") do |t: &var Tester|
+  t.it("round-trips a dropped path through the ring side-channel") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_file_drop("/tmp/a.png")
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_file_drop failed: #{e}")
+    end
+    match w.poll_event
+      Some(Event.FileDrop) -> t.expect(true).to_eq(true)
+      _ -> panic!("expected Event.FileDrop")
+    end
+    t.expect(w.dropped_file_path).to_eq("/tmp/a.png")
+  end
+
+  t.it("delivers a LONG path intact (no 32-byte truncation)") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # A real-world path well over the 32-byte inline cap — the decisive proof that
+    # FileDrop uses the owned heap copy, not the IME inline buffer.
+    let long = "/Users/someone/Documents/projects/canvas/screenshots/render-2026-06-11.png"
+    match w.push_file_drop(long.clone)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_file_drop failed: #{e}")
+    end
+    match w.poll_event
+      Some(Event.FileDrop) -> nil
+      _ -> panic!("expected Event.FileDrop")
+    end
+    t.expect(w.dropped_file_path).to_eq(long)
+  end
+
+  t.it("a multi-file drop arrives as several FileDrop events, each with its path") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # SDL delivers one SDL_DROPFILE per file; we push three in order.
+    match w.push_file_drop("/tmp/one.txt")
+      Ok(_)  -> nil
+      Err(e) -> panic!("push 1 failed: #{e}")
+    end
+    match w.push_file_drop("/tmp/two.txt")
+      Ok(_)  -> nil
+      Err(e) -> panic!("push 2 failed: #{e}")
+    end
+    match w.push_file_drop("/tmp/three.txt")
+      Ok(_)  -> nil
+      Err(e) -> panic!("push 3 failed: #{e}")
+    end
+    # FIFO: each poll yields the next file's path. The path is replaced on the next
+    # poll, so it must be read before polling again.
+    match w.poll_event
+      Some(Event.FileDrop) -> t.expect(w.dropped_file_path).to_eq("/tmp/one.txt")
+      _ -> panic!("expected FileDrop 1")
+    end
+    match w.poll_event
+      Some(Event.FileDrop) -> t.expect(w.dropped_file_path).to_eq("/tmp/two.txt")
+      _ -> panic!("expected FileDrop 2")
+    end
+    match w.poll_event
+      Some(Event.FileDrop) -> t.expect(w.dropped_file_path).to_eq("/tmp/three.txt")
+      _ -> panic!("expected FileDrop 3")
+    end
+    # Queue drained.
+    match w.poll_event
+      nil -> t.expect(true).to_eq(true)
+      _   -> panic!("queue should be empty")
+    end
+  end
+
+  t.it("the pump seam emits the same FileDrop the live SDL_DROPFILE handler would") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let code = w.canvas.raw.window_pump_test_dropfile(&"/var/data/image.jpg")
+    t.expect(code).to_eq(0)
+    match w.poll_event
+      Some(Event.FileDrop) -> t.expect(w.dropped_file_path).to_eq("/var/data/image.jpg")
+      _ -> panic!("expected Event.FileDrop from the seam")
+    end
+  end
+
+  t.it("dropped_file_path is empty for a non-FileDrop event") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let _ = w.push_event(Event.TextInput(65))   # 'A'
+    match w.poll_event
+      Some(Event.TextInput(cp)) -> t.expect(cp).to_eq(65)
+      _ -> panic!("expected Event.TextInput")
+    end
+    t.expect(w.dropped_file_path).to_eq("")
+  end
+
+  t.it("a FileDrop then a TextEditing keep their side-channels separate") do
+    var w = match Window.open("drop", 64, 64)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # The path side-channel (drop_path) and the marked-text side-channel (text[32])
+    # are distinct: polling the drop reads the path; polling the IME reads the text,
+    # and the path is then empty.
+    match w.push_file_drop("/tmp/pic.png")
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_file_drop failed: #{e}")
+    end
+    match w.push_composition("ni", 2, 0)
+      Ok(_)  -> nil
+      Err(e) -> panic!("push_composition failed: #{e}")
+    end
+    match w.poll_event
+      Some(Event.FileDrop) ->
+        t.expect(w.dropped_file_path).to_eq("/tmp/pic.png")
+        t.expect(w.composition_text).to_eq("")
+      _ -> panic!("expected FileDrop first")
+    end
+    match w.poll_event
+      Some(Event.TextEditing(s, l)) ->
+        t.expect(s).to_eq(2)
+        t.expect(l).to_eq(0)
+        t.expect(w.composition_text).to_eq("ni")
+        t.expect(w.dropped_file_path).to_eq("")
+      _ -> panic!("expected TextEditing second")
+    end
+  end
+end

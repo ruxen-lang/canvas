@@ -1,0 +1,98 @@
+# Pin tests for KeyDown MODIFIERS (docs/ROADMAP.md Phase 2): the shift/ctrl/alt/
+# gui state carried alongside an Event.KeyDown, the side-channel quiver's selection
+# API (Shift+Arrow, Ctrl/Cmd+A) waits on. The Event.KeyDown payload is UNCHANGED (a
+# bare keycode Int); the modifier mask rides the ring slot and is read back via
+# Window#key_modifiers right after polling — exactly the dropped_file_path /
+# composition_text discipline.
+#
+# Driven through the window_pump_test_keydown seam (extended to take the folded
+# RX_MOD_* mask), since the live SDL pump (which folds SDL_GetModState) can't run in
+# the forked harness. The seam passes the final mask the live pump would compute.
+
+Tester.describe("Event.KeyDown modifiers") do |t: &var Tester|
+  t.it("a plain arrow carries 0 modifiers") do
+    var w = match Window.open("km", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # Left arrow (1073741904), no modifiers held.
+    let emitted = w.canvas.raw.window_pump_test_keydown(1073741904, 0, 0)
+    t.expect(emitted).to_eq(1)
+    match w.poll_event
+      Some(Event.KeyDown(k)) ->
+        t.expect(k).to_eq(1073741904)
+        t.expect(w.key_modifiers).to_eq(0)
+      _ -> panic!("expected Event.KeyDown")
+    end
+  end
+
+  t.it("Shift+Right carries the shift bit (keycode unchanged)") do
+    var w = match Window.open("km", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # Right arrow (1073741903) with Shift held — quiver's "extend selection".
+    let emitted = w.canvas.raw.window_pump_test_keydown(1073741903, 0, Window.mod_shift)
+    t.expect(emitted).to_eq(1)
+    match w.poll_event
+      Some(Event.KeyDown(k)) ->
+        t.expect(k).to_eq(1073741903)             # payload is still the bare keycode
+        let mods = w.key_modifiers
+        t.expect((mods & Window.mod_shift) != 0).to_eq(true)
+        t.expect((mods & Window.mod_ctrl) != 0).to_eq(false)
+      _ -> panic!("expected Event.KeyDown")
+    end
+  end
+
+  t.it("a combined Ctrl+Alt mask sets both bits and nothing else") do
+    var w = match Window.open("km", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let combo = Window.mod_ctrl | Window.mod_alt
+    # Home (1073741898) with Ctrl+Alt held.
+    let _ = w.canvas.raw.window_pump_test_keydown(1073741898, 0, combo)
+    match w.poll_event
+      Some(Event.KeyDown(_)) ->
+        let mods = w.key_modifiers
+        t.expect((mods & Window.mod_ctrl) != 0).to_eq(true)
+        t.expect((mods & Window.mod_alt) != 0).to_eq(true)
+        t.expect((mods & Window.mod_shift) != 0).to_eq(false)
+        t.expect((mods & Window.mod_gui) != 0).to_eq(false)
+      _ -> panic!("expected Event.KeyDown")
+    end
+  end
+
+  t.it("key_modifiers is 0 for a non-KeyDown event (side-channel stays clean)") do
+    var w = match Window.open("km", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # Push a modified KeyDown, then a TextInput; polling the TextInput must read 0
+    # modifiers — the mask does not leak across events (push clears the slot).
+    let _ = w.canvas.raw.window_pump_test_keydown(8, 0, Window.mod_gui)  # Cmd+Backspace
+    let _ = w.push_event(Event.TextInput(65))                            # 'A'
+    match w.poll_event
+      Some(Event.KeyDown(_)) ->
+        t.expect((w.key_modifiers & Window.mod_gui) != 0).to_eq(true)
+      _ -> panic!("expected KeyDown first")
+    end
+    match w.poll_event
+      Some(Event.TextInput(cp)) ->
+        t.expect(cp).to_eq(65)
+        t.expect(w.key_modifiers).to_eq(0)
+      _ -> panic!("expected TextInput second")
+    end
+  end
+
+  t.it("auto-repeat is still filtered (modifiers don't change that)") do
+    var w = match Window.open("km", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let first = w.canvas.raw.window_pump_test_keydown(13, 0, Window.mod_shift)  # Shift+Enter
+    t.expect(first).to_eq(1)
+    let rep = w.canvas.raw.window_pump_test_keydown(13, 1, Window.mod_shift)    # held: filtered
+    t.expect(rep).to_eq(0)
+  end
+end

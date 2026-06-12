@@ -202,3 +202,36 @@ Tester.describe("Canvas.draw_rect geometry edge cases") do |t: &var Tester|
     t.expect(c.read_pixel(1, 3)).to_eq(black)
   end
 end
+
+Tester.describe("Canvas.fill_rect alias") do |t: &var Tester|
+  t.it("fill_rect is an alias for draw_rect (same fill, both names)") do
+    var c = match Canvas.create(8, 6)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    # Drawn through the frame bracket + the alias name in one shot.
+    let r = c.frame do |cv: &var Canvas|
+      match cv.clear(Color.rgb(0u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+      match cv.fill_rect(Rect.new(1.0f32, 1.0f32, 2.0f32, 2.0f32), Color.rgb(255u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("fill_rect failed")
+      end
+    end
+    match r
+      Ok(_)  -> nil
+      Err(_) -> panic!("frame returned Err")
+    end
+    let red_c: Color = Color.rgb(255u8, 0u8, 0u8)
+    let black_c: Color = Color.rgb(0u8, 0u8, 0u8)
+    let red = red_c.to_argb as Int
+    let black = black_c.to_argb as Int
+    # Identical result to draw_rect: same half-open box, same exclusions.
+    t.expect(c.read_pixel(1, 1)).to_eq(red)
+    t.expect(c.read_pixel(2, 2)).to_eq(red)
+    t.expect(c.read_pixel(3, 1)).to_eq(black)
+    t.expect(c.read_pixel(0, 0)).to_eq(black)
+  end
+end

@@ -1,0 +1,98 @@
+# Pin tests for the frame-pacing timebase (docs/decisions/frame-pacing.md):
+# Window#ticks_ns / #ticks_ms (monotonic clock), #wait_frame (paced wait to an
+# absolute target tick), and Window.refresh_rate (the Err contract headless).
+#
+# These pin the ARITHMETIC of the pacing contract, headless — no display, no
+# real vblank: monotonicity, the early/late wait_frame branches, and the
+# ms = ns/1e6 relationship. The hardware-vsync block (Metal/GL present) is
+# documented in the ADR and verified by the windowed examples, not the harness.
+
+Tester.describe("Window.ticks_ns") do |t: &var Tester|
+  t.it("is monotonic non-decreasing across reads") do
+    var w = match Window.open("clock", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let a = w.ticks_ns
+    let b = w.ticks_ns
+    let c = w.ticks_ns
+    t.expect(a > 0).to_eq(true)        # a real monotonic count, not the 0 error sentinel
+    t.expect(b >= a).to_eq(true)
+    t.expect(c >= b).to_eq(true)
+  end
+
+  t.it("ticks_ms equals ticks_ns divided by 1_000_000") do
+    var w = match Window.open("clock", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let ns = w.ticks_ns
+    let ms = w.ticks_ms
+    # ms is ns/1e6; the reads are a hair apart, so ms is within 1 of ns/1e6.
+    let expected = ns / 1000000
+    let diff = if ms > expected
+      ms - expected
+    else
+      expected - ms
+    end
+    t.expect(diff <= 1).to_eq(true)
+  end
+end
+
+Tester.describe("Window.wait_frame") do |t: &var Tester|
+  t.it("returns immediately for a target already in the past (no hang, no added latency)") do
+    var w = match Window.open("pace", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let start = w.ticks_ns
+    # A target 10ms in the PAST: a late frame must not sleep at all.
+    w.wait_frame(start - 10000000)
+    let elapsed = w.ticks_ns - start
+    # No sleep happened — elapsed is just call overhead, well under 5ms.
+    t.expect(elapsed < 5000000).to_eq(true)
+  end
+
+  t.it("sleeps to fill the slack of an early frame (at least the requested span)") do
+    var w = match Window.open("pace", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    let start = w.ticks_ns
+    # Pace to 8ms ahead: wait_frame must consume AT LEAST ~8ms (nanosleep is a
+    # minimum). Assert >= 6ms to leave headroom for clock granularity/rounding.
+    w.wait_frame(start + 8000000)
+    let elapsed = w.ticks_ns - start
+    t.expect(elapsed >= 6000000).to_eq(true)
+  end
+end
+
+Tester.describe("Window.refresh_rate") do |t: &var Tester|
+  t.it("either reports a positive Hz or a clean Err (never a bogus 0)") do
+    # Headless (the forked harness): SDL real-window paths are gated off, so this
+    # is Err. On a live display it is Ok(hz>0). Both are valid; what must NEVER
+    # happen is an Ok(0) that a caller would divide by. Assert that invariant.
+    match Window.refresh_rate
+      Ok(hz) -> t.expect(hz > 0).to_eq(true)
+      Err(_) -> t.expect(true).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Window#refresh_rate (per-window / multi-monitor)") do |t: &var Tester|
+  t.it("Errs cleanly for a window that is not on screen (never a bogus 0)") do
+    # The per-window rate queries the display THE WINDOW sits on, so with no live
+    # window there is nothing to query. The forked harness opens no real window, so
+    # this is Err — the contract a caller relies on to pick a fallback rather than
+    # dividing by 0. On a live display the same call returns Ok(hz>0) for the
+    # window's own monitor (the multi-monitor upgrade of the static display-0 hint).
+    var w = match Window.open("rr", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.refresh_rate
+      Ok(hz) -> t.expect(hz > 0).to_eq(true)   # live display path (real window forced on)
+      Err(_) -> t.expect(true).to_eq(true)     # headless harness: clean Err, the pinned case
+    end
+  end
+end

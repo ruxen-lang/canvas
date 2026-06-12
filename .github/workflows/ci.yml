@@ -1,0 +1,172 @@
+# CI — the canvas platform matrix (Phase 4).
+#
+# Three jobs, one per desktop OS, sharing the verification logic that was proven
+# locally before this file was written:
+#
+#   * macos-latest   — the HOME platform: the full pin suite + the pre-commit gate
+#                      (scripts/check.sh: shim warnings-clean, ruxen test, leak soak).
+#                      This is the canonical green bar (234+ tests).
+#   * ubuntu-latest  — the Linux verification, run NATIVELY (no Docker needed: the
+#                      runner IS Linux). It invokes scripts/linux_verify.sh — THE
+#                      SAME script the local Dockerfile.linux-verify container runs,
+#                      so CI and the local container exercise one code path, not two.
+#                      arm64 is proven locally in the container; CI covers x64 here.
+#   * windows-latest — EXPERIMENTAL, allowed-failure, compile-only first. The shim
+#                      has a LoadLibrary/GetProcAddress seam (runtime/rx_dlopen.h) and
+#                      Windows blob pins, but no Windows host has run the suite. This
+#                      job proves the shim COMPILES on MSVC/clang-cl; it does not yet
+#                      claim the suite passes. Promote past compile-only once green.
+#
+# ruxen is built FROM SOURCE in every job (a sibling checkout), then staged via
+# install.sh --from-source — the stdlib is embedded into the binary, so the install
+# is self-contained. The toolchain is NEVER `ruxen upgrade`d from a release here;
+# canvas is tested against the ruxen working tree it ships beside.
+#
+# HONEST SCOPE: this workflow is PUSH-TIME-PROVEN. It cannot be run from the dev
+# host that authored it (no CI runners locally); the Linux job's logic IS verified
+# locally via the container, and the macOS job mirrors the local `scripts/check.sh`,
+# but the Windows job and the exact GitHub-runner environment are proven only when
+# this lands on a branch and the runners execute it.
+
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# The ruxen source lives in a sibling repo; each job checks it out alongside canvas.
+# Override RUXEN_REPO / RUXEN_REF via repo variables if the org/branch differs.
+env:
+  RUXEN_REPO: ruxen-lang/ruxen
+  RUXEN_REF: master
+
+jobs:
+  # ───────────────────────── macOS — the home platform ─────────────────────────
+  macos:
+    name: macOS (full suite + pre-commit gate)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout canvas
+        uses: actions/checkout@v4
+        with:
+          path: canvas
+
+      - name: Checkout ruxen (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RUXEN_REPO }}
+          ref: ${{ env.RUXEN_REF }}
+          path: ruxen
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (ruxen build)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ruxen/target
+          key: cargo-macos-${{ hashFiles('ruxen/Cargo.lock') }}
+          restore-keys: cargo-macos-
+
+      - name: Build + stage ruxen from source
+        run: |
+          RUXEN_NO_MODIFY_PATH=1 bash ruxen/install.sh \
+            --from-source "$PWD/ruxen" --prefix "$HOME/.ruxen" --no-modify-path
+          echo "$HOME/.ruxen/bin" >> "$GITHUB_PATH"
+
+      - name: Fetch Skia + HarfBuzz (macOS universal, SHA-pinned)
+        run: bash canvas/runtime/fetch_skia.sh
+
+      - name: Pre-commit gate (shim warnings-clean + ruxen test + leak soak)
+        working-directory: canvas
+        # check.sh runs the full suite (stage 2) AND the leak soak (stage 3); the
+        # perf bench (stage 4) is report-only. This is the same gate run locally.
+        run: SKIP_BENCH=1 scripts/check.sh
+
+  # ───────────────────────── Linux — native, container-proven path ─────────────
+  linux:
+    name: Linux (native ubuntu — scripts/linux_verify.sh)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout canvas
+        uses: actions/checkout@v4
+        with:
+          path: canvas
+
+      - name: Checkout ruxen (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.RUXEN_REPO }}
+          ref: ${{ env.RUXEN_REF }}
+          path: ruxen
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo (ruxen build)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ruxen/target
+          key: cargo-linux-${{ hashFiles('ruxen/Cargo.lock') }}
+          restore-keys: cargo-linux-
+
+      - name: System deps (ICU + SDL2 + fontconfig + CJK, like Dockerfile.linux-verify)
+        # libfontconfig1 is a REQUIRED transitive dep of the Linux libSkiaSharp.so
+        # (without it dlopen fails and Skia is inactive). fonts-noto-cjk gives the
+        # font-fallback pin real Han glyphs (the shaping/bidi pins use a committed
+        # fixture font and need no system font). See the ROADMAP Phase-4 matrix.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libicu-dev libsdl2-2.0-0 libfontconfig1 fonts-noto-cjk \
+            ca-certificates curl unzip
+
+      - name: Linux verification (build ruxen + fetch blobs + shim + full suite + soak)
+        # The SAME script the local Dockerfile.linux-verify container runs. RUXEN_SRC
+        # and CANVAS_DIR point at the two checkouts; RUXEN_PREFIX is writable here so
+        # no read-only-source copy is needed (the script handles either).
+        env:
+          RUXEN_SRC: ${{ github.workspace }}/ruxen
+          CANVAS_DIR: ${{ github.workspace }}/canvas
+          RUXEN_PREFIX: ${{ github.workspace }}/.ruxen-stage
+          SDL_VIDEODRIVER: dummy
+        run: bash canvas/scripts/linux_verify.sh
+
+  # ───────────────────── Windows — EXPERIMENTAL, allowed-failure ───────────────
+  windows:
+    name: Windows (EXPERIMENTAL — compile-only, allowed-failure)
+    runs-on: windows-latest
+    continue-on-error: true   # allowed-failure: the seam is unproven on Windows
+    steps:
+      - name: Checkout canvas
+        uses: actions/checkout@v4
+        with:
+          path: canvas
+
+      - name: Fetch Skia + HarfBuzz (Windows RID, SHA-pinned)
+        shell: bash
+        run: bash canvas/runtime/fetch_skia.sh
+
+      - name: Compile the C shim with clang-cl (MSVC ABI)
+        shell: bash
+        # COMPILE-FIRST: prove the LoadLibrary/GetProcAddress seam + the win basenames
+        # compile under the MSVC toolchain. We syntax-check both TUs; we do NOT yet
+        # link or run the suite (that needs the ruxen toolchain built for Windows,
+        # the next promotion step). A failure here is allowed (continue-on-error) and
+        # is the EXPECTED state until the seam is proven — it surfaces drift early.
+        run: |
+          set -x
+          clang-cl /c /W3 \
+            canvas/runtime/skia_shim.c \
+            canvas/runtime/sdl_window.c \
+            /Fo"$RUNNER_TEMP/" \
+          || { echo "Windows compile failed (EXPERIMENTAL — expected until proven)"; exit 1; }
+          echo "Windows shim compiled (compile-only milestone)."

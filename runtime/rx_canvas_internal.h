@@ -31,13 +31,45 @@
 /* ---- events ---- */
 
 #define RXC_EVENT_CAP 256
-#define RXC_EVENT_KIND_MAX 5  /* CloseRequested — keep in sync with Event in src/lib.rx */
+#define RXC_EVENT_KIND_MAX 9  /* FileDrop — keep in sync with Event in src/event.rx */
+/* SDL_TextEditingEvent caps its marked-text chunk at 32 bytes (incl. NUL); each
+ * TextEditing event self-carries its composition string in the ring slot so the
+ * (start, length) cursor and the marked text stay associated (no ambiguity when
+ * several composition updates queue). Other event kinds leave it empty. */
+#define RXC_EVENT_TEXT_CAP 32
 
 typedef struct {
-    int32_t kind;   /* event-kind tag; see the Rxc module in src/lib.rx */
-    double  a;      /* x / keycode / width  (event-kind dependent) */
-    double  b;      /* y / unused  / height (event-kind dependent) */
+    int32_t kind;   /* event-kind tag; see the Rxc module in src/event.rx */
+    double  a;      /* x / keycode / composition-start (event-kind dependent) */
+    double  b;      /* y / unused  / composition-length (event-kind dependent) */
+    /* IME composition marked text (TextEditing only; "" otherwise). NUL-terminated.
+     * Capped at 32 bytes — SDL caps composition chunks there, so it always fits. */
+    char    text[RXC_EVENT_TEXT_CAP];
+    /* OWNED heap copy of a dropped FILE PATH (FileDrop only; NULL otherwise). A
+     * path is routinely longer than RXC_EVENT_TEXT_CAP, so it can't ride the inline
+     * `text` buffer — it gets its own malloc'd string. OWNERSHIP: exactly one slot
+     * owns it. push strdup's it into the ring slot; poll MOVES it into `pending`
+     * (NULLing the ring slot) and frees the prior `pending.drop_path` first; a slot
+     * is NULL'd whenever a non-drop event is pushed into it; host_drop frees any
+     * still held in `pending` or unpolled ring slots. So no double-free, no leak,
+     * no dangling SDL pointer (SDL's own copy is freed at pump time). */
+    char   *drop_path;
+    /* Keyboard MODIFIER bitfield for a KeyDown event (RX_MOD_*; 0 otherwise). A
+     * side-channel exactly like drop_path / the marked text: the Event.KeyDown
+     * payload stays a bare keycode (Int), and the shift/ctrl/alt/gui state is read
+     * back via Window#key_modifiers right after polling. Append-only: every other
+     * event kind leaves this 0 (push_event / push_event_text clear it). */
+    int32_t mods;
 } RxEvent;
+
+/* Keyboard modifier bits carried alongside a KeyDown (the RxEvent.mods field).
+ * A small stable canvas-side enum (like the blend-mode ints), mapped from SDL's
+ * KMOD_* in the pump. Keep in sync with the Window.mod_* constants in
+ * src/window.rx. */
+#define RX_MOD_SHIFT 1
+#define RX_MOD_CTRL  2
+#define RX_MOD_ALT   4
+#define RX_MOD_GUI   8
 
 /* ---- the host object ----
  *
@@ -74,7 +106,76 @@ typedef struct RxHost {
     void     *sk_surface;
     void     *sk_canvas;
     int32_t   sk_tried;
+
+    /* GPU (Ganesh GL) backend state (trailing — invisible to sdl_window.c's
+     * RxHostPrefix view; docs/GPU.md). Set only when this host was put into GPU
+     * mode (a GL window + context were created for it and the GPU surface was
+     * built). gpu_requested gates whether rx_host_canvas even ATTEMPTS the GPU
+     * rung, so existing offscreen/raster hosts are wholly unaffected.
+     *   gr_context  — the GrDirectContext over the window's GL context
+     *   gr_target   — the GrBackendRenderTarget wrapping the default FBO
+     *   gpu_surface — the GPU-backed SkSurface (its canvas is sk_canvas when GPU
+     *                 is active); released BEFORE gr_context, both before the GL
+     *                 context is deleted (teardown order, docs/GPU.md).
+     * gl_interface  — the GrGLInterface (released last of the GPU objects). */
+    void     *gr_context;
+    void     *gr_target;
+    void     *gpu_surface;
+    void     *gl_interface;
+    int32_t   gpu_requested;  /* caller asked for the GPU backend on this host */
+    int32_t   gpu_tried;      /* GPU surface creation attempted (success or not) */
+    int32_t   is_gpu;         /* 1 iff sk_canvas currently targets the GPU surface */
+
+    /* Which GPU backend is live for this host (RX_GPU_KIND_*; 0 = raster). The
+     * Metal rung reuses gr_context (its GrDirectContext) + gpu_surface (an
+     * OFFSCREEN GPU surface) but has no gr_target / gl_interface. For the Metal
+     * offscreen path, gpu_offscreen marks that end_frame must read the GPU
+     * surface's pixels back into `pixels` so read_pixel observes real GPU output
+     * (the headless pixel-verification path — docs/GPU.md). The Metal device +
+     * command queue are a process-wide singleton (rx_metal), NOT per-host. */
+    int32_t   gpu_backend_kind;
+    int32_t   gpu_offscreen;  /* 1 iff this GPU host renders offscreen + reads back */
+    /* 1 iff this GPU host renders to an ON-SCREEN Metal CAMetalLayer: each frame
+     * acquires the layer's next drawable, builds a per-frame GPU surface over the
+     * drawable's texture, flush+submits, and presents the drawable. The surface +
+     * backend-render-target are per-frame (a fresh drawable each frame), unlike
+     * the offscreen path's persistent surface. docs/GPU.md. */
+    int32_t   gpu_windowed;
+
+    /* ---- HiDPI design->backing content scale (docs/GPU.md) ----
+     * The app draws at DESIGN coordinates (e.g. Window.open(320,360) -> draws a
+     * 320x360 UI), but the windowed surface is sized to the native BACKING pixels
+     * (e.g. 640x720 on a 2x display). To render design content crisp at native
+     * resolution, begin_frame applies a base transform scale = surface_size /
+     * design_size as the FIRST canvas transform, so all design-coord draws fill
+     * the backing surface and Skia rasterizes glyphs/shapes at native density.
+     *
+     * design_w/design_h == 0 means "no content scale" — the default for offscreen
+     * / test surfaces, which draw at explicit pixel sizes (scale 1). Windowed
+     * hosts set this to their logical (design) size at enable; an offscreen host
+     * can set it explicitly to make the content-scale logic headless-testable
+     * (a backing-sized framebuffer with a smaller design size). */
+    int32_t   design_w;
+    int32_t   design_h;
+
+    /* Current blend mode for subsequent draws (docs/ROADMAP.md Phase-1 E1). A
+     * small canvas-side enum (RX_BLEND_*), mapped to SkBlendMode when a draw
+     * builds its paint — Skia paints carry the blend mode, so this is paint
+     * state, not a per-draw arg. 0 (= RX_BLEND_SRC_OVER) is the default;
+     * begin_frame resets it so it never leaks across frames (like the
+     * transform/clip reset). */
+    int32_t   blend_mode;
 } RxHost;
+
+/* Canvas-side blend-mode enum (stable small ints, like the align/direction
+ * params), mapped to SkBlendMode in skia_shim.c. Keep in sync with the
+ * Canvas#set_blend_mode doc in src/canvas.rx. */
+#define RX_BLEND_SRC_OVER 0   /* default — source-over (normal alpha compositing) */
+#define RX_BLEND_CLEAR    1   /* clear destination where source draws */
+#define RX_BLEND_SRC      2   /* replace destination with source (no blend) */
+#define RX_BLEND_MULTIPLY 3
+#define RX_BLEND_SCREEN   4
+#define RX_BLEND_MAX      4
 
 /* the ring-buffer feeder, defined in skia_shim.c, used by the pump */
 int64_t ruxen_canvas_push_event(int64_t self, int64_t kind, double a, double b);

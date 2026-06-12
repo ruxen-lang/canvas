@@ -1,0 +1,152 @@
+# Pin tests for the HiDPI design->backing content scale (docs/GPU.md).
+#
+# A windowed canvas renders into a BACKING-pixel surface (e.g. 640x480 on a 2x
+# display) but the app draws at DESIGN coordinates (e.g. a 320x240 UI). begin_frame
+# applies a base transform scale = surface(backing) / design, so design-coord
+# draws fill the backing surface at NATIVE resolution (crisp), with no per-app
+# wiring. The same content-scale logic is exercised here HEADLESS on the raster
+# Skia path: an offscreen 640x480 surface with design size 320x240 (scale 2). A
+# design-coord draw_rect(0,0,320,240) must fill the ENTIRE 640x480 backing buffer
+# — not just a 320x240 corner — proving design content fills the backing surface
+# at native density. (When Skia is inactive, canvas_scale no-ops; the test gates
+# on skia_active? and asserts the no-scale fallback there.)
+
+Tester.describe("HiDPI content scale fills the backing surface") do |t: &var Tester|
+  t.it("a design-coord rect fills the whole backing buffer at scale 2") do
+    # backing-pixel surface 640x480; design space 320x240 -> content scale 2.
+    var c = match Canvas.create(640, 480)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    let active = c.skia_active?
+
+    match c.set_design_size(320, 240)
+      Ok(_)  -> nil
+      Err(_) -> panic!("set_design_size failed")
+    end
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    # Draw a fill covering the FULL DESIGN area (0,0,320,240). With the content
+    # scale applied this must cover the full 640x480 backing surface.
+    match c.draw_rect(Rect.new(0.0f32, 0.0f32, 320.0f32, 240.0f32), Color.rgb(0u8, 128u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+
+    let fill = Color.rgb(0u8, 128u8, 255u8).to_argb as Int
+    if active
+      # the design rect fills the ENTIRE backing buffer (far corners are fill,
+      # not background) — content scale 2 mapped 320->640, 240->480.
+      t.expect(c.read_pixel(0, 0)).to_eq(fill)
+      t.expect(c.read_pixel(639, 479)).to_eq(fill)     # far corner: filled
+      t.expect(c.read_pixel(600, 460)).to_eq(fill)     # near the far edge
+      t.expect(c.read_pixel(400, 300)).to_eq(fill)     # well past the 320x240 box
+    else
+      # Skia inactive: canvas_scale no-ops, so the rect (software floor box) only
+      # covers the design region [0,320)x[0,240); the rest stays background.
+      let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      t.expect(c.read_pixel(0, 0)).to_eq(fill)         # inside design region
+      t.expect(c.read_pixel(400, 300)).to_eq(bg)       # past design region: unfilled
+    end
+  end
+
+  t.it("content_scale reports the design->backing ratio") do
+    var c = match Canvas.create(640, 480)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    # no design set yet -> scale 1.0
+    let (sx0, sy0) = c.content_scale
+    t.expect(sx0 == 1.0f32).to_eq(true)
+    t.expect(sy0 == 1.0f32).to_eq(true)
+
+    match c.set_design_size(320, 240)
+      Ok(_)  -> nil
+      Err(_) -> panic!("set_design_size failed")
+    end
+    let (sx, sy) = c.content_scale
+    t.expect(sx == 2.0f32).to_eq(true)   # 640/320
+    t.expect(sy == 2.0f32).to_eq(true)   # 480/240
+  end
+
+  t.it("text rendered under content scale inks more rows than at scale 1") do
+    # Same string + design size, rendered at scale 1 vs scale 2: the scaled frame
+    # rasterizes the glyph at 2x, so it inks more rows (native-density proof).
+    var c1 = match Canvas.create(200, 80)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    var c2 = match Canvas.create(200, 80)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let active = c1.skia_active?
+
+    # c1: no content scale (scale 1). c2: design 100x40 into a 200x80 backing -> 2x.
+    match c2.set_design_size(100, 40)
+      Ok(_)  -> nil
+      Err(_) -> panic!("set_design_size failed")
+    end
+
+    let _a = c1.begin_frame
+    let _b = c1.clear(Color.rgb(0u8, 0u8, 0u8))
+    let _c = c1.draw_text("Ag", 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
+    let _d = c1.end_frame
+    let _e = c2.begin_frame
+    let _f = c2.clear(Color.rgb(0u8, 0u8, 0u8))
+    let _g = c2.draw_text("Ag", 4.0f32, 30.0f32, Color.rgb(255u8, 255u8, 255u8))
+    let _h = c2.end_frame
+
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    var rows1 = 0
+    var y = 0
+    while y < 80
+      var x = 0
+      var inked = false
+      while x < 200
+        if c1.read_pixel(x, y) != bg
+          inked = true
+        end
+        x += 1
+      end
+      if inked
+        rows1 += 1
+      end
+      y += 1
+    end
+    var rows2 = 0
+    y = 0
+    while y < 80
+      var x = 0
+      var inked = false
+      while x < 200
+        if c2.read_pixel(x, y) != bg
+          inked = true
+        end
+        x += 1
+      end
+      if inked
+        rows2 += 1
+      end
+      y += 1
+    end
+
+    if active
+      t.expect(rows1 > 0).to_eq(true)
+      t.expect(rows2 > rows1).to_eq(true)   # 2x content scale -> taller glyph ink
+    else
+      t.expect(true).to_eq(true)            # bitmap fallback: no scale, nothing to assert
+    end
+  end
+end

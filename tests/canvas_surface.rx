@@ -35,6 +35,38 @@ Tester.describe("Canvas surface") do |t: &var Tester|
     t.expect(bad).to_eq(true)
   end
 
+  t.it("rejects gigantic / integer-overflow-bait dimensions (no wrap, no OOM)") do
+    # The per-axis cap (16384) is enforced BEFORE the width*height*4 allocation, so
+    # a product that would overflow a 32-bit size is rejected at the gate rather than
+    # wrapping to a tiny malloc and corrupting memory. Prod-hardening Item 3(c):
+    # honest rejection, not a crash. (The C-side error_inject_verify.c drives the
+    # raw host_new directly; this pins the same contract through the public API.)
+    var bad = false
+    match Canvas.create(100000, 100000)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+
+    match Canvas.create(65536, 65536)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    t.expect(bad).to_eq(true)
+  end
+
+  t.it("accepts dimensions exactly at the maximum (cap is not off-by-one)") do
+    # 16384x16384 is the largest accepted size (1 GiB framebuffer, fits size_t).
+    # Allocating it would be wasteful in the harness, so we only assert that the
+    # max-per-axis with a tiny other axis is accepted — the boundary is inclusive.
+    var ok = false
+    match Canvas.create(16384, 1)
+      Ok(_)  -> ok = true
+      Err(_) -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
   t.it("starts fully transparent") do
     let c = match Canvas.create(4, 4)
       Ok(v)  -> v

@@ -1,0 +1,155 @@
+# Pin tests for multi-window support (docs/MULTIWINDOW.md).
+#
+# These run headless (the forked harness never opens a live OS window), so they
+# pin the parts of multi-window that are verifiable without a display: each
+# Window owns an INDEPENDENT canvas (framebuffer) and an INDEPENDENT event ring.
+# The live-window event DEMUX (routing SDL events by windowID) needs a real
+# display and is smoke-verified by examples/multiwindow_verify.c.
+Tester.describe("Multi-window") do |t: &var Tester|
+  t.it("opens N independent windows, each with its own canvas") do
+    var a = match Window.open("A", 32, 24)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open A failed")
+      end
+    var b = match Window.open("B", 64, 48)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open B failed")
+      end
+    t.expect(a.title).to_eq("A")
+    t.expect(b.title).to_eq("B")
+    t.expect(a.width).to_eq(32)
+    t.expect(b.width).to_eq(64)
+    t.expect(a.canvas.width).to_eq(32)
+    t.expect(b.canvas.width).to_eq(64)
+  end
+  t.it("each window's canvas renders into its OWN framebuffer") do
+    var a = match Window.open("A", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open A failed")
+      end
+    var b = match Window.open("B", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open B failed")
+      end
+    let red: Color = Color.rgb(255u8, 0u8, 0u8)
+    let blue: Color = Color.rgb(0u8, 0u8, 255u8)
+    match a.canvas.begin_frame
+      Ok(_) -> nil
+      Err(_) -> panic!("A begin_frame failed")
+    end
+    match a.canvas.clear(red)
+      Ok(_) -> nil
+      Err(_) -> panic!("A clear failed")
+    end
+    match a.canvas.end_frame
+      Ok(_) -> nil
+      Err(_) -> panic!("A end_frame failed")
+    end
+    match b.canvas.begin_frame
+      Ok(_) -> nil
+      Err(_) -> panic!("B begin_frame failed")
+    end
+    match b.canvas.clear(blue)
+      Ok(_) -> nil
+      Err(_) -> panic!("B clear failed")
+    end
+    match b.canvas.end_frame
+      Ok(_) -> nil
+      Err(_) -> panic!("B end_frame failed")
+    end
+    t.expect(a.canvas.read_pixel(0, 0)).to_eq(red.to_argb as Int)
+    t.expect(b.canvas.read_pixel(0, 0)).to_eq(blue.to_argb as Int)
+  end
+  t.it("events are isolated per window (no cross-talk between rings)") do
+    var a = match Window.open("A", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open A failed")
+      end
+    var b = match Window.open("B", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open B failed")
+      end
+    match a.push_event(Event.KeyDown(7))
+      Ok(_) -> nil
+      Err(_) -> panic!("A push_event failed")
+    end
+    var b_empty = false
+    match b.poll_event
+      Some(_) -> b_empty = false
+      nil -> b_empty = true
+    end
+    t.expect(b_empty).to_eq(true)
+    var a_got = 0
+    match a.poll_event
+      Some(Event.KeyDown(k)) -> a_got = k
+      _ -> a_got = -1
+    end
+    t.expect(a_got).to_eq(7)
+  end
+  t.it("interleaved pushes keep each window's FIFO order independent") do
+    var a = match Window.open("A", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open A failed")
+      end
+    var b = match Window.open("B", 8, 8)
+        Ok(v) -> v
+        Err(_) -> panic!("Window.open B failed")
+      end
+    match a.push_event(Event.KeyDown(1))
+      Ok(_) -> nil
+      Err(_) -> panic!("push failed")
+    end
+    match b.push_event(Event.KeyDown(10))
+      Ok(_) -> nil
+      Err(_) -> panic!("push failed")
+    end
+    match a.push_event(Event.KeyDown(2))
+      Ok(_) -> nil
+      Err(_) -> panic!("push failed")
+    end
+    match b.push_event(Event.KeyDown(20))
+      Ok(_) -> nil
+      Err(_) -> panic!("push failed")
+    end
+    var a1 = -1
+    match a.poll_event
+      Some(Event.KeyDown(k)) -> a1 = k
+      _ -> a1 = -1
+    end
+    var b1 = -1
+    match b.poll_event
+      Some(Event.KeyDown(k)) -> b1 = k
+      _ -> b1 = -1
+    end
+    var a2 = -1
+    match a.poll_event
+      Some(Event.KeyDown(k)) -> a2 = k
+      _ -> a2 = -1
+    end
+    var b2 = -1
+    match b.poll_event
+      Some(Event.KeyDown(k)) -> b2 = k
+      _ -> b2 = -1
+    end
+    t.expect(a1).to_eq(1)
+    t.expect(a2).to_eq(2)
+    t.expect(b1).to_eq(10)
+    t.expect(b2).to_eq(20)
+  end
+  t.it("opening and dropping many windows is deterministic") do
+    var i = 0
+    while i < 8
+      var w1 = match Window.open("w1", 16, 16)
+          Ok(v) -> v
+          Err(_) -> panic!("Window.open w1 failed")
+        end
+      var w2 = match Window.open("w2", 16, 16)
+          Ok(v) -> v
+          Err(_) -> panic!("Window.open w2 failed")
+        end
+      t.expect(w1.width).to_eq(16)
+      t.expect(w2.width).to_eq(16)
+      i += 1
+    end
+  end
+end

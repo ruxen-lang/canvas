@@ -4,6 +4,12 @@
 class RawImage
   lib "runtime/skia_shim.c"
     def self.load_raw as "ruxen_canvas_image_load"(path: &String) -> RawImage
+    # Render-to-texture / raster cache: snapshot the given host's surface into an
+    # immutable image (owned exactly like a loaded image — freed via `drop`).
+    # `host` is the RawHost's machine-word handle; the returned RawImage is null on
+    # failure (no Skia / no surface). Declared here so the RawImage return type
+    # resolves in this file's `lib` block.
+    def self.snapshot_of as "ruxen_canvas_host_snapshot"(host: Int) -> RawImage
     def ptr as "ruxen_canvas_image_ptr"(self) -> Int
     def is_null as "ruxen_canvas_image_is_null"(self) -> Bool
     def width as "ruxen_canvas_image_width"(self) -> Int

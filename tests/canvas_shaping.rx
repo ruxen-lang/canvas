@@ -1,0 +1,138 @@
+# Pin tests for proper text SHAPING: Canvas#draw_text_shaped /
+# #measure_text_shaped / #shaping_available?.
+#
+# Shaping = HarfBuzz (kerning, ligatures, RTL/complex) + Skia positioned-glyph
+# render (sk_textblob). The fetched libSkiaSharp has no SkShaper, so HarfBuzz is
+# fetched separately (libHarfBuzzSharp); both are fed the SAME font file. These
+# are Skia+HarfBuzz-only — with neither, the calls return a clean Err / 0 and the
+# non-shaped draw_text / draw_paragraph path is the fallback.
+#
+# Skia is active locally and HarfBuzz is fetched, so the `active` branch runs REAL
+# shaping + pixel readback. The kerning NUMBER (shaped run measurably tighter than
+# naive per-char placement) is proven in examples/shape_kerning_verify.c; here we
+# pin the structural shaping contract: a shaped run renders ink, reports a sane
+# advance width matching the drawn extent, and a kerning-heavy run is tighter than
+# a non-kerning run of the same length.
+
+Tester.describe("Canvas.shaping_available?") do |t: &var Tester|
+  t.it("is total and safe to query") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let s = c.shaping_available?
+    t.expect(s == true || s == false).to_eq(true)
+  end
+end
+
+Tester.describe("Canvas.draw_text_shaped") do |t: &var Tester|
+  t.it("renders shaped ink and reports an advance matching the drawn extent") do
+    var c = match Canvas.create(200, 40)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let bg = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    let white = Color.rgb(255u8, 255u8, 255u8)
+
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    let _ = c.clear(Color.rgb(0u8, 0u8, 0u8))
+    let res = c.draw_text_shaped("Shaping Works", 4.0f32, 28.0f32, 24.0f32, "tests/fixtures/LiberationSans.ttf", 0, white)
+    let _2 = c.end_frame
+
+    if on
+      let w = match res
+        Ok(v)  -> v
+        Err(e) -> panic!("draw_text_shaped failed: #{e}")
+      end
+      t.expect(w > 0).to_eq(true)
+
+      # rightmost lit column of the rendered ink
+      var rightmost = -1
+      var y = 0
+      while y < 40
+        var x = 0
+        while x < 200
+          if c.read_pixel(x, y) != bg
+            if x > rightmost
+              rightmost = x
+            end
+          end
+          x += 1
+        end
+        y += 1
+      end
+      # ink was drawn (extent positive) and lands within the reported advance
+      # (origin x=4 + width w, with a small slack for the final glyph's bearing).
+      t.expect(rightmost > 0).to_eq(true)
+      t.expect(rightmost <= 4 + w + 4).to_eq(true)
+    else
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+end
+
+Tester.describe("Canvas.measure_text_shaped kerning + ligatures") do |t: &var Tester|
+  t.it("kerning pulls 'AV' tighter than 'A'+'V' measured separately") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "tests/fixtures/LiberationSans.ttf"
+    if on
+      # The decisive, face-independent kerning proof: shaping the PAIR "AV"
+      # applies GPOS negative kerning, so it is strictly NARROWER than the sum of
+      # the two glyphs shaped alone (no pair => no kerning). A naive per-glyph
+      # layout (a stub) would give exactly the sum.
+      let av = c.measure_text_shaped("AV", 24.0f32, arial.clone, 0)
+      let a = c.measure_text_shaped("A", 24.0f32, arial.clone, 0)
+      let v = c.measure_text_shaped("V", 24.0f32, arial.clone, 0)
+      t.expect(av > 0).to_eq(true)
+      t.expect(a > 0 && v > 0).to_eq(true)
+      t.expect(av < a + v).to_eq(true)   # kerning applied: AV tighter than A+V
+    else
+      let z = c.measure_text_shaped("AV", 24.0f32, arial.clone, 0)
+      t.expect(z).to_eq(0)
+    end
+  end
+
+  t.it("'ffi' forms a ligature, narrower than three separate 'f'") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    let on = c.shaping_available?
+    let arial = "tests/fixtures/LiberationSans.ttf"
+    if on
+      # Arial maps "ffi" to a single ffi ligature glyph, narrower than 3 'f'
+      # advances — a ligature can only happen via shaping, never naive placement.
+      let ffi = c.measure_text_shaped("ffi", 24.0f32, arial.clone, 0)
+      let f = c.measure_text_shaped("f", 24.0f32, arial.clone, 0)
+      t.expect(ffi > 0).to_eq(true)
+      t.expect(ffi < f * 3).to_eq(true)   # ligature: ffi tighter than f+f+f
+    else
+      let z = c.measure_text_shaped("ffi", 24.0f32, arial.clone, 0)
+      t.expect(z).to_eq(0)
+    end
+  end
+
+  t.it("a missing/garbage font path is a clean failure, not a crash") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    # Whether or not shaping is available, a non-existent font file must not
+    # crash — measure returns 0 (clean).
+    let z = c.measure_text_shaped("hi", 24.0f32, "/no/such/font.ttf", 0)
+    t.expect(z).to_eq(0)
+  end
+end

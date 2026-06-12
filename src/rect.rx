@@ -32,4 +32,6 @@ struct Rect
       self.x < other.right && other.x < self.right &&
       self.y < other.bottom && other.y < self.bottom
   end
+
+  alias overlaps intersects
 end

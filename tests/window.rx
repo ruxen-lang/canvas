@@ -2,11 +2,11 @@
 
 Tester.describe("Window") do |t: &var Tester|
   t.it("opens with a title and size and owns a canvas") do
-    var w = match Window.open(String.from("hello"), 320, 240)
+    var w = match Window.open("hello", 320, 240)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
-    t.expect(w.title).to_eq(String.from("hello"))
+    t.expect(w.title).to_eq("hello")
     t.expect(w.width).to_eq(320)
     t.expect(w.height).to_eq(240)
     t.expect(w.canvas.width).to_eq(320)
@@ -15,13 +15,13 @@ Tester.describe("Window") do |t: &var Tester|
 
   t.it("rejects invalid sizes") do
     var bad = false
-    match Window.open(String.from("x"), 0, 240)
+    match Window.open("x", 0, 240)
       Ok(_)  -> bad = false
       Err(_) -> bad = true
     end
     t.expect(bad).to_eq(true)
 
-    match Window.open(String.from("x"), 320, 16385)
+    match Window.open("x", 320, 16385)
       Ok(_)  -> bad = false
       Err(_) -> bad = true
     end
@@ -29,7 +29,7 @@ Tester.describe("Window") do |t: &var Tester|
   end
 
   t.it("the window's canvas draws a full frame") do
-    var w = match Window.open(String.from("frame"), 8, 8)
+    var w = match Window.open("frame", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -59,12 +59,62 @@ Tester.describe("Window") do |t: &var Tester|
   t.it("teardown is deterministic (open and drop many)") do
     var i = 0
     while i < 50
-      let w = match Window.open(String.from("w"), 32, 32)
+      let w = match Window.open("w", 32, 32)
         Ok(v)  -> v
         Err(_) -> panic!("Window.open failed")
       end
       t.expect(w.width).to_eq(32)
       i += 1
     end
+  end
+end
+
+# Pin tests for Window#frame — the resource-bracket block API (the showcase).
+# This is the same full-frame draw as "the window's canvas draws a full frame"
+# above, expressed with the new `window.frame do |c| ... end` form: the four-call
+# begin/clear/draw/end dance collapses to one bracketed block. Headless windows
+# skip the present, so this pins entirely in the forked test harness.
+Tester.describe("Window#frame block bracket") do |t: &var Tester|
+  t.it("brackets a full frame; draws land and the block runs once") do
+    var w = match Window.open("frame", 8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    var runs = 0
+    let r = w.frame do |c: &var Canvas|
+      runs += 1
+      match c.clear(Color.rgb(0u8, 0u8, 255u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("clear failed")
+      end
+      match c.draw_rect(Rect.new(2.0f32, 2.0f32, 2.0f32, 2.0f32), Color.rgb(255u8, 0u8, 0u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_rect failed")
+      end
+    end
+    match r
+      Ok(_)  -> nil
+      Err(_) -> panic!("frame returned Err")
+    end
+    t.expect(runs).to_eq(1)
+    let blue_c: Color = Color.rgb(0u8, 0u8, 255u8)
+    let red_c: Color = Color.rgb(255u8, 0u8, 0u8)
+    t.expect(w.canvas.read_pixel(0, 0)).to_eq(blue_c.to_argb as Int)
+    t.expect(w.canvas.read_pixel(2, 2)).to_eq(red_c.to_argb as Int)
+  end
+
+  t.it("a blockless frame is an explicit Err, never a silent empty frame") do
+    var w = match Window.open("noblock", 4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    var was_err = false
+    # Parens required: `w.frame` paren-less hits the ruxen Tier-1 optional-block
+    # MIR gap; `w.frame()` reaches the runtime block_defined? guard.
+    match w.frame()
+      Ok(_)  -> was_err = false
+      Err(_) -> was_err = true
+    end
+    t.expect(was_err).to_eq(true)
   end
 end

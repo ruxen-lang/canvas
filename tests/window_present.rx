@@ -6,7 +6,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("present before show errors (never crashes)") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -18,7 +18,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("pump before show forwards zero events") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -26,7 +26,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("hide is idempotent without a window") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -36,7 +36,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
   end
 
   t.it("headless event flow still works alongside the window surface") do
-    var w = match Window.open(String.from("t"), 16, 16)
+    var w = match Window.open("t", 16, 16)
       Ok(win) -> win
       Err(_)  -> panic!("open failed")
     end
@@ -45,7 +45,7 @@ Tester.describe("Window.show/present/pump — headless pins") do |t: &var Tester
       Err(_) -> panic!("push failed")
     end
     let got = match w.poll_event
-      Some(Event.PointerDown(x, y)) -> x * 100 + y
+      Some(Event.PointerDown(x, y)) -> (x as Int) * 100 + (y as Int)
       Some(_) -> -1
       nil     -> -2
     end

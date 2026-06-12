@@ -1,0 +1,61 @@
+# Pin tests for the clipboard (E2 desktop services): Window.clipboard_text /
+# Window.set_clipboard_text via SDL's clipboard. SDL clipboard works WITHOUT a
+# live window (verified to round-trip under the dummy video driver), so under the
+# forked harness (which forces the dummy driver, fork-safe) a set->get round-trips.
+# When SDL2 is not installed at all, both report a clean Err — pinned too.
+
+Tester.describe("Window.clipboard round-trip") do |t: &var Tester|
+  t.it("set_clipboard_text then clipboard_text returns the same text") do
+    let usable = match Window.set_clipboard_text("ruxen-canvas-clip-42")
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if usable
+      # Clipboard is available — the set succeeded, so the get must round-trip it.
+      match Window.clipboard_text
+        Ok(text) -> t.expect(text).to_eq("ruxen-canvas-clip-42")
+        Err(e)   -> panic!("clipboard_text Err after a successful set: #{e}")
+      end
+    else
+      # No SDL / no clipboard backend: clipboard_text must ALSO be a clean Err
+      # (never crash, never a bogus Ok). That is the headless contract.
+      var failed = false
+      match Window.clipboard_text
+        Ok(_)  -> failed = false
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+
+  t.it("clipboard_text and set_clipboard_text agree on availability") do
+    # The two calls must report the SAME availability — either both work or both
+    # Err. (A set that succeeds but a get that errors, or vice versa, would mean
+    # an inconsistent backend.)
+    let set_ok = match Window.set_clipboard_text("agree")
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    let get_ok = match Window.clipboard_text
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    t.expect(set_ok).to_eq(get_ok)
+  end
+
+  t.it("overwriting the clipboard replaces the previous text") do
+    let usable = match Window.set_clipboard_text("first")
+      Ok(_)  -> true
+      Err(_) -> false
+    end
+    if usable
+      let _ = Window.set_clipboard_text("second")
+      match Window.clipboard_text
+        Ok(text) -> t.expect(text).to_eq("second")
+        Err(e)   -> panic!("clipboard_text Err: #{e}")
+      end
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+end

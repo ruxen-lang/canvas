@@ -15,11 +15,11 @@ class Canvas
   ## Create an offscreen canvas with the given pixel size.
   def self.create(width: Int, height: Int) -> Result[Canvas, String]
     if !Rxc.valid_dimensions(width, height)
-      return Err(String.from("canvas: invalid canvas size #{width}x#{height}"))
+      return Err("canvas: invalid canvas size #{width}x#{height}")
     end
     let raw = RawHost.new(width, height)
     if raw.is_null
-      return Err(String.from("canvas: framebuffer allocation failed (#{width}x#{height})"))
+      return Err("canvas: framebuffer allocation failed (#{width}x#{height})")
     end
     Ok(Canvas.new(raw))
   end
@@ -51,6 +51,24 @@ class Canvas
     self.status_to_result(self.raw.end_frame_raw, "end_frame")
   end
 
+  ## Bracket a whole frame around a drawing block: `begin_frame`, run the block
+  ## with a `&var Canvas`, then `end_frame` — the four-call paint dance collapsed
+  ## to one. The block draws on the borrowed canvas; any error from `begin_frame`
+  ## / `end_frame` short-circuits to `Err` (the block does not run if the frame
+  ## could not be opened). This is the OFFSCREEN bracket (no `present`); use
+  ## `Window#frame` for an on-screen window, which also presents.
+  ##
+  ## A block is REQUIRED: a blockless call is `Err("frame requires a block")`,
+  ## never a silent empty frame.
+  def var frame(&block: Fn[(&var Canvas) -> nil]) -> Result[nil, String]
+    if !block_defined?
+      return Err("canvas: frame requires a block")
+    end
+    self.begin_frame()?
+    yield(&var *self)
+    self.end_frame()
+  end
+
   ## Push the current transform + clip onto the state stack; returns a save
   ## count to pass to `restore_to`. Pair every `save` with a `restore`. Applied
   ## only on the Skia backend (a no-op under the software fallback).
@@ -58,7 +76,39 @@ class Canvas
     self.raw.save_raw
   end
 
-  ## Pop the last `save`, restoring the previous transform + clip.
+  ## Push an offscreen layer onto the state stack; subsequent drawing
+  ## accumulates into it, and the matching `restore` composites the whole layer
+  ## down at once. The basis for group opacity and blended overlays. Returns the
+  ## layer's save count (pass to `restore_to`) on `Ok`. Skia-only — `Err` when
+  ## the backend is absent (a layer can't be faked in software without producing
+  ## wrong pixels).
+  def var save_layer -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_raw, "save_layer")
+  end
+
+  ## Like `save_layer`, but composites the layer with a uniform group `alpha`
+  ## (0 = transparent, 255 = opaque) on `restore` — fade transitions and
+  ## translucent panels. Returns the layer's save count on `Ok`. Skia-only.
+  def var save_layer_alpha(alpha: Int) -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_alpha_raw(alpha), "save_layer_alpha")
+  end
+
+  ## Push an offscreen layer whose contents are BLURRED (Gaussian, `sigma` px) when
+  ## the matching `restore` composites them down. The general blur primitive: draw
+  ## any content — shapes, text, paths — into the layer and it comes out blurred,
+  ## generalizing the rrect-only `draw_round_rect_shadow`. Use it for frosted-glass
+  ## panels, blurred backdrops, and soft shadows of arbitrary shapes: push the blur
+  ## layer, draw the shape in the shadow color, `restore`, then draw the crisp
+  ## widget on top. `sigma` is the blur radius (larger = softer); `sigma <= 0` is
+  ## `Err` (use plain `save_layer`). Returns the layer's save count on `Ok` (pair
+  ## with `restore` / `restore_to`). Skia-only — `Err` when the backend is absent
+  ## (a blurred layer can't be faked in software without wrong pixels).
+  def var save_layer_blur(sigma: Float32) -> Result[Int, String]
+    self.layer_result(self.raw.save_layer_blur_raw(sigma as Float), "save_layer_blur")
+  end
+
+  ## Pop the last `save` / `save_layer`, restoring the previous state and
+  ## compositing any pushed layer down.
   def var restore -> Result[nil, String]
     self.status_to_result(self.raw.restore_raw, "restore")
   end
@@ -91,6 +141,27 @@ class Canvas
     self.status_to_result(self.raw.rotate_raw(degrees as Float), "rotate")
   end
 
+  ## Skew the coordinate system by (sx, sy): a point's x shifts by `sx * y` and
+  ## its y by `sy * x` — italic slants, shear effects. Composes with the current
+  ## transform; scope inside `save`/`restore`. Applied on the Skia backend (a
+  ## no-op under the software fallback, like the other transforms).
+  def var skew(sx: Float32, sy: Float32) -> Result[nil, String]
+    self.status_to_result(self.raw.skew_raw(sx as Float, sy as Float), "skew")
+  end
+
+  ## Concatenate a full 2D affine matrix onto the current transform. The six
+  ## values are the matrix's top two rows (row-major): `a` scaleX, `b` skewX,
+  ## `c` translateX / `d` skewY, `e` scaleY, `f` translateY (the perspective row
+  ## is fixed to identity). This is the general primitive that
+  ## translate/scale/rotate/skew are special cases of — use it to apply a matrix
+  ## composed elsewhere (e.g. a layout transform). Composes with the current
+  ## matrix; scope inside `save`/`restore`. Skia backend (no-op under software).
+  def var concat(a: Float32, b: Float32, c: Float32, d: Float32, e: Float32, f: Float32) -> Result[nil, String]
+    self.status_to_result(
+      self.raw.concat_raw(a as Float, b as Float, c as Float, d as Float, e as Float, f as Float),
+      "concat")
+  end
+
   ## Intersect the clip with `rect` — subsequent drawing is confined to it
   ## (overflow/masking). Scope inside `save`/`restore`. Applied on the Skia
   ## backend; under the software fallback this returns `Ok` without clipping
@@ -111,6 +182,45 @@ class Canvas
   def var clear(color: Color) -> Result[nil, String]
     let code = self.raw.clear_raw(color.r as Int, color.g as Int, color.b as Int, color.a as Int)
     self.status_to_result(code, "clear")
+  end
+
+  ## Set the blend mode for SUBSEQUENT draws (a small stable int enum, like the
+  ## `align`/`direction` params — NOT a wrapped Skia enum). Skia paints carry the
+  ## blend mode, so this is paint state, not a per-draw argument; it persists
+  ## until changed and is RESET to source-over at the start of each frame
+  ## (`begin_frame`), so it never leaks across frames. Modes:
+  ##   0 = source-over (default — normal alpha compositing)
+  ##   1 = clear       (erase the destination where the source draws)
+  ##   2 = src         (replace the destination with the source, no blend)
+  ##   3 = multiply    (darken: product of source and destination)
+  ##   4 = screen      (lighten: inverse-product)
+  ## Applied on the Skia backend (shape fills + lines + paths); under the software
+  ## fallback the mode is stored but draws stay source-over (no wrong pixels). An
+  ## out-of-range mode is `Err`. Use `Canvas.blend_*` constants for readability.
+  def var set_blend_mode(mode: Int) -> Result[nil, String]
+    self.status_to_result(self.raw.set_blend_mode_raw(mode), "set_blend_mode")
+  end
+
+  ## Blend-mode constants for `set_blend_mode` (see its doc). Named so call sites
+  ## read `c.set_blend_mode(Canvas.blend_multiply)` rather than a bare `3`.
+  def self.blend_src_over -> Int
+    0
+  end
+
+  def self.blend_clear -> Int
+    1
+  end
+
+  def self.blend_src -> Int
+    2
+  end
+
+  def self.blend_multiply -> Int
+    3
+  end
+
+  def self.blend_screen -> Int
+    4
   end
 
   ## Fill a rectangle with source-over blending, clipped to the surface.
@@ -179,6 +289,36 @@ class Canvas
     self.status_to_result(code, "draw_line")
   end
 
+  ## Stroke a DASHED line from (x0, y0) to (x1, y1): the stroke alternates an
+  ## `on_len`-pixel painted run and an `off_len`-pixel gap, repeated along the
+  ## line (`sk_path_effect_create_dash`). `phase` offsets the start of the dash
+  ## pattern (animate it for marching-ants selection borders). `on_len` must be
+  ## > 0 and `off_len` >= 0 (a 0 gap is a solid line); `width` must be > 0 (a
+  ## dash needs a real stroke). Antialiased; Skia-only — `Err` when the backend
+  ## or the dash symbols are absent. Use for dotted dividers, focus rings, and
+  ## selection outlines.
+  def var draw_dashed_line(x0: Float32, y0: Float32, x1: Float32, y1: Float32, width: Float32, on_len: Float32, off_len: Float32, phase: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_dashed_line_raw(
+      x0 as Float, y0 as Float, x1 as Float, y1 as Float, width as Float,
+      on_len as Float, off_len as Float, phase as Float, color.to_argb as Int)
+    self.status_to_result(code, "draw_dashed_line")
+  end
+
+  ## Fill an arbitrary `path` (lines, béziers, arcs) with a solid color, using
+  ## the path's fill rule. The general primitive for icons and custom shapes.
+  ## Antialiased; Skia-only (Err otherwise — no software fallback for paths).
+  def var draw_path(path: &Path2D, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_path_raw(path.handle, 0.0, color.to_argb as Int)
+    self.status_to_result(code, "draw_path")
+  end
+
+  ## Stroke an arbitrary `path`'s outline with the given line `width`.
+  ## Antialiased; Skia-only.
+  def var stroke_path(path: &Path2D, width: Float32, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_path_raw(path.handle, width as Float, color.to_argb as Int)
+    self.status_to_result(code, "stroke_path")
+  end
+
   ## Fill a rectangle with a 2-stop linear gradient from color `c0` at
   ## (gx0, gy0) to `c1` at (gx1, gy1). Antialiased; Skia-only.
   def var fill_rect_gradient(rect: Rect, gx0: Float32, gy0: Float32, gx1: Float32, gy1: Float32, c0: Color, c1: Color) -> Result[nil, String]
@@ -215,6 +355,23 @@ class Canvas
       rect.x as Float, rect.y as Float, rect.width as Float, rect.height as Float,
       radius as Float, blur as Float, color.to_argb as Int)
     self.status_to_result(code, "draw_round_rect_shadow")
+  end
+
+  ## Snapshot this canvas's current contents into an immutable `Image` — the
+  ## render-to-texture / raster-cache primitive. Draw an expensive subtree once into
+  ## an offscreen `Canvas` (`Canvas.create(w, h)`), `snapshot` it, then blit the
+  ## snapshot cheaply with `draw_image` every frame (or use it for L2 effects). The
+  ## snapshot is a COPY of the pixels at call time: later draws into this canvas —
+  ## or dropping it — leave the image intact, and the offscreen draw never touches
+  ## any other canvas's framebuffer until you `draw_image` it. Returns `Err` when the
+  ## Skia backend is unavailable (the software-raster fallback has no surface to
+  ## snapshot) or the snapshot could not be taken. Skia backend only.
+  def var snapshot -> Result[Image, String]
+    let raw = RawImage.snapshot_of(self.raw.handle)
+    if raw.is_null
+      return Err("canvas: snapshot requires the Skia backend (run runtime/fetch_skia.sh)")
+    end
+    Ok(Image.new(raw))
   end
 
   ## Draw `image` at (x, y) at its natural pixel size. Skia backend only.
@@ -267,6 +424,306 @@ class Canvas
     self.raw.text_height_sized_raw(size as Float)
   end
 
+  ## Draw `text` in the named font `family` at `size` px, (x, y) the baseline
+  ## origin. An unknown/uninstalled `family` falls back to the default typeface
+  ## (a missing font never breaks rendering — not an error). Skia-only: picking
+  ## a family is meaningless for the bitmap face, so this returns `Err` when the
+  ## backend is absent. Pair with `measure_text_font` for centering.
+  def var draw_text_font(text: String, x: Float32, y: Float32, size: Float32, family: String, color: Color) -> Result[nil, String]
+    let code = self.raw.draw_text_font_raw(&text, x as Float, y as Float, size as Float, &family, color.to_argb as Int)
+    self.status_to_result(code, "draw_text_font")
+  end
+
+  ## Advance width of `text` in the named font `family` at `size` px — pair with
+  ## `draw_text_font` for centering. An unknown family measures like the default
+  ## typeface; the bitmap advance when Skia is absent (always a usable number).
+  def measure_text_font(text: String, size: Float32, family: String) -> Int
+    self.raw.measure_text_font_raw(&text, size as Float, &family)
+  end
+
+  ## Line height of the named font `family` at `size` px (Skia metrics when
+  ## active, else the bitmap 7px; an unknown family falls back to the default).
+  def text_height_font(size: Float32, family: String) -> Int
+    self.raw.text_height_font_raw(size as Float, &family)
+  end
+
+  ## Draw a **word-wrapped, aligned paragraph** of `text` into a `max_width`
+  ## column. `(x, y)` is the origin: `x` is the column's left edge, `y` is the
+  ## FIRST line's baseline; wrapped lines stack one line-height below. `align`:
+  ## 0 = left, 1 = center, 2 = right (within the column). An unknown `family`
+  ## falls back to the default typeface. Returns `Ok(total_height)` in pixels —
+  ## the laid-out block height, so L2 can size a text block — or `Err`.
+  ##
+  ## Skia-only: greedy whitespace word-wrap on real font metrics (an explicit
+  ## `\n` forces a break; a single word wider than `max_width` renders on its own
+  ## line rather than looping). A wrapped paragraph can't be faked on the bitmap
+  ## face, so this returns `Err` when the Skia backend is absent. Proper
+  ## international shaping (bidi / complex scripts) is a later HarfBuzz follow-up.
+  def var draw_paragraph(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, family: String, align: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_raw(&text, x as Float, y as Float, max_width as Float, size as Float, &family, align, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph")
+  end
+
+  ## Measure a **word-wrapped paragraph** WITHOUT drawing: returns the laid-out
+  ## block's total height in pixels (n_lines × line-height) for layout. Returns 0
+  ## when the Skia backend is absent (no real wrap possible). Pair with
+  ## `draw_paragraph` to reserve space for a wrapping label/text block.
+  def measure_paragraph(text: String, max_width: Float32, size: Float32, family: String) -> Int
+    let packed = self.raw.measure_paragraph_raw(&text, max_width as Float, size as Float, &family)
+    if packed < 0
+      0
+    else
+      # shim packs (max_line_width << 32) | total_height; height is the low 32 bits.
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest wrapped line of a paragraph in pixels (the block's content
+  ## width), for layout that shrink-wraps a text block to its longest line.
+  ## 0 when the Skia backend is absent.
+  def measure_paragraph_width(text: String, max_width: Float32, size: Float32, family: String) -> Int
+    let packed = self.raw.measure_paragraph_raw(&text, max_width as Float, size as Float, &family)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
+  ## True when proper text **shaping** is available: Skia's positioned-glyph
+  ## render API plus the HarfBuzz shaper are both loaded (run
+  ## `runtime/fetch_skia.sh`). A capability probe — when false, `draw_text_shaped`
+  ## returns `Err` and callers use the non-shaped `draw_text` / `draw_paragraph`.
+  def shaping_available? -> Bool
+    self.raw.shaping_available_raw
+  end
+
+  ## Draw one **HarfBuzz-shaped run** of `text` in the font FILE `font_path` at
+  ## `size` px, baseline origin `(x, y)`. Shaping applies kerning + ligatures
+  ## (and RTL / complex scripts when `direction` is set): `direction` is 0 auto /
+  ## 1 left-to-right / 2 right-to-left. Returns `Ok(advance_width_px)` — the
+  ## shaped run's width, for centering/layout — or `Err`.
+  ##
+  ## Skia + HarfBuzz only (greedy non-shaped `draw_text` / `draw_paragraph` is the
+  ## fallback when shaping is unavailable). Scope: ONE run, ONE font by file path;
+  ## proper bidi / line-break / multi-run paragraphs are a later ICU follow-up.
+  def var draw_text_shaped(text: String, x: Float32, y: Float32, size: Float32, font_path: String, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_shaped_raw(&text, x as Float, y as Float, size as Float, &font_path, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_text_shaped")
+  end
+
+  ## Advance **width** in pixels of a HarfBuzz-shaped run of `text` in font file
+  ## `font_path` at `size` px (kerning/ligatures applied), without drawing — for
+  ## layout. `direction`: 0 auto / 1 LTR / 2 RTL. Returns 0 when shaping is
+  ## unavailable (pair with `shaping_available?`).
+  def measure_text_shaped(text: String, size: Float32, font_path: String, direction: Int) -> Int
+    let code = self.raw.measure_text_shaped_raw(&text, size as Float, &font_path, direction)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
+  ## Draw a word-wrapped, aligned **shaped** paragraph: the same greedy whitespace
+  ## word-wrap as `draw_paragraph`, but each wrapped line is measured + rendered
+  ## through the HarfBuzz-shaped glyph path, so wrapping, alignment, and ink all
+  ## use kerned/ligature widths (a line with `ffi`/`AV` is narrower than the naive
+  ## per-char path). `(x, y)` is the column left edge + first baseline; `align`
+  ## 0 left / 1 center / 2 right; `direction` 0 auto / 1 LTR / 2 RTL. Returns
+  ## `Ok(total_height)` or `Err`.
+  ##
+  ## Skia + HarfBuzz only; when shaping is unavailable this returns `Err` and
+  ## callers fall back to the non-shaped `draw_paragraph` (untouched). Font by
+  ## file path. Greedy whitespace wrap only — ICU bidi / line-break is the
+  ## deferred "full international" follow-up (`docs/SHAPING.md`).
+  def var draw_paragraph_shaped(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, font_path: String, align: Int, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_shaped_raw(&text, x as Float, y as Float, max_width as Float, size as Float, &font_path, align, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph_shaped")
+  end
+
+  ## Measure a **shaped** word-wrapped paragraph without drawing: returns the
+  ## laid-out block height in pixels (using shaped line widths for the wrap). 0
+  ## when shaping is unavailable. Pair with `draw_paragraph_shaped` for layout.
+  def measure_paragraph_shaped(text: String, max_width: Float32, size: Float32, font_path: String, direction: Int) -> Int
+    let packed = self.raw.measure_paragraph_shaped_raw(&text, max_width as Float, size as Float, &font_path, direction)
+    if packed < 0
+      0
+    else
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest **shaped** wrapped line of a paragraph in pixels (the block's
+  ## content width). 0 when shaping is unavailable.
+  def measure_paragraph_shaped_width(text: String, max_width: Float32, size: Float32, font_path: String, direction: Int) -> Int
+    let packed = self.raw.measure_paragraph_shaped_raw(&text, max_width as Float, size as Float, &font_path, direction)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
+  ## Draw `text` at baseline `(x, y)` with **per-character font fallback**: any
+  ## codepoint the base font lacks (CJK, emoji) is rendered with a system-matched
+  ## font, so it shows real glyphs instead of tofu boxes. Returns `Ok(width)` —
+  ## the total advance in pixels — or `Err` when the font-fallback surface is
+  ## unavailable (pair with `fallback_available?`). The string is itemized into
+  ## runs by font coverage and each run rendered with a covering typeface
+  ## (`docs/decisions/text-fallback.md`). CJK + emoji render; complex-script
+  ## shaping inside a fallback font is the documented remainder.
+  def var draw_text_fallback(text: String, x: Float32, y: Float32, size: Float32, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_fallback_raw(&text, x as Float, y as Float, size as Float, color.to_argb as Int)
+    self.layer_result(code, "draw_text_fallback")
+  end
+
+  ## Total advance width in pixels of `text` rendered with font fallback, without
+  ## drawing — for layout/centering. 0 when the fallback surface is unavailable.
+  def measure_text_fallback(text: String, size: Float32) -> Int
+    let code = self.raw.measure_text_fallback_raw(&text, size as Float)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
+  ## True when per-character font fallback can run (the system font manager +
+  ## direct-glyph render surface resolved). A capability probe; when false,
+  ## `draw_text_fallback` returns `Err`.
+  def fallback_available? -> Bool
+    self.raw.fallback_available_raw
+  end
+
+  ## The family name the most recent fallback resolved to (e.g. `"PingFang SC"`,
+  ## `"Apple Color Emoji"`), or `""` before any fallback has run. Lets L2/tests
+  ## document what the fallback picked.
+  def last_fallback_family -> String
+    self.raw.last_fallback_family_raw
+  end
+
+  ## The cumulative number of shaped-run measure-cache HITS this process (a hit =
+  ## re-measuring a run already shaped, skipping HarfBuzz). Process-global. Lets a
+  ## test/L2 confirm the cache is working on a repeated label
+  ## (`docs/decisions/text-fallback.md`).
+  def shape_cache_hits -> Int
+    self.raw.shape_cache_hits_raw
+  end
+
+  ## Draw a single line with **per-run shaping + font fallback**: each run the base
+  ## font (`font_path`) covers is HarfBuzz-shaped (kerning / ligatures), and each
+  ## run it lacks (CJK / emoji) is rendered with a system-matched fallback font. So
+  ## a mixed Latin+CJK line shapes the Latin AND renders the CJK in one call.
+  ## Returns `Ok(width)` — the total advance in pixels — or `Err` when shaping /
+  ## fallback is unavailable. `direction` 0 auto / 1 LTR / 2 RTL (applies to the
+  ## shaped runs). `docs/decisions/text-fallback.md`.
+  def var draw_text_shaped_multi(text: String, x: Float32, y: Float32, size: Float32, font_path: String, direction: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_shaped_multi_raw(&text, x as Float, y as Float, size as Float, &font_path, direction, color.to_argb as Int)
+    self.layer_result(code, "draw_text_shaped_multi")
+  end
+
+  ## Total advance width in pixels of a per-run-shaped + fallback line, without
+  ## drawing — for layout/centering. 0 when shaping/fallback is unavailable.
+  def measure_text_shaped_multi(text: String, size: Float32, font_path: String, direction: Int) -> Int
+    let code = self.raw.measure_text_shaped_multi_raw(&text, size as Float, &font_path, direction)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
+  ## True when bidi reordering is available (ICU `ubidi` + shaping + fallback). A
+  ## capability probe; when false, `draw_text_bidi` returns `Err` and callers use
+  ## the single-direction shaped path. `docs/decisions/text-fallback.md`.
+  def bidi_available? -> Bool
+    self.raw.bidi_available_raw
+  end
+
+  ## Draw a **mixed-direction** line with ICU **bidi** visual reordering + per-run
+  ## shaping + font fallback: a line of LTR text with embedded RTL (Hebrew/Arabic)
+  ## is laid out in VISUAL order — each directional run shaped with its resolved
+  ## direction (covered runs shaped, uncovered runs via fallback), runs placed
+  ## left-to-right in visual order. Returns `Ok(width)` or `Err` when bidi/shaping
+  ## is unavailable. `font_path` is the base font file. **Scope:** single-line
+  ## reordering with an LTR (auto) base; wrapped bidi paragraphs are a follow-up
+  ## (`docs/decisions/text-fallback.md`). Never renders visually-wrong RTL.
+  def var draw_text_bidi(text: String, x: Float32, y: Float32, size: Float32, font_path: String, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_text_bidi_raw(&text, x as Float, y as Float, size as Float, &font_path, color.to_argb as Int)
+    self.layer_result(code, "draw_text_bidi")
+  end
+
+  ## Total advance width in pixels of a bidi-reordered line, without drawing. 0
+  ## when bidi/shaping is unavailable.
+  def measure_text_bidi(text: String, size: Float32, font_path: String) -> Int
+    let code = self.raw.measure_text_bidi_raw(&text, size as Float, &font_path)
+    if code < 0
+      0
+    else
+      code
+    end
+  end
+
+  ## True when ICU Unicode segmentation is available (the system `libicucore` is
+  ## reachable). A capability probe; when false, `grapheme_count` /
+  ## `grapheme_boundary_at` return 0 / -1 and the paragraph wrap uses the
+  ## greedy-whitespace fallback (`docs/decisions/text-fallback.md`).
+  def icu_available? -> Bool
+    self.raw.icu_available_raw
+  end
+
+  ## The number of **grapheme clusters** (user-perceived characters) in `text`,
+  ## via ICU. An emoji+ZWJ sequence (e.g. a family emoji) counts as ONE; a
+  ## combining mark stays with its base. 0 when ICU is unavailable or the string
+  ## is empty. L2 uses this for caret/selection counts.
+  def grapheme_count(text: String) -> Int
+    self.raw.grapheme_count_raw(&text)
+  end
+
+  ## The UTF-8 **byte offset** of the `n`-th grapheme boundary in `text` (`n = 0`
+  ## is byte 0; `n = grapheme_count` is the byte length). -1 when ICU is
+  ## unavailable or `n` is out of range. L2 maps a caret index to a byte offset
+  ## for selection/editing with this.
+  def grapheme_boundary_at(text: String, n: Int) -> Int
+    self.raw.grapheme_boundary_at_raw(&text, n)
+  end
+
+  ## Draw a word-wrapped paragraph that breaks at **ICU Unicode line-break**
+  ## opportunities (not just whitespace) and renders each line with **font
+  ## fallback** — so CJK text (which has NO spaces) wraps at character boundaries
+  ## instead of overflowing the column, and mixed CJK/Latin/emoji renders. `(x, y)`
+  ## is the column left edge + first baseline; `align` 0 left / 1 center / 2 right.
+  ## Returns `Ok(total_height)` or `Err` when ICU or the fallback surface is
+  ## unavailable (callers then use `draw_paragraph_shaped` / `draw_paragraph`).
+  def var draw_paragraph_icu(text: String, x: Float32, y: Float32, max_width: Float32, size: Float32, align: Int, color: Color) -> Result[Int, String]
+    let code = self.raw.draw_paragraph_icu_raw(&text, x as Float, y as Float, max_width as Float, size as Float, align, color.to_argb as Int)
+    self.layer_result(code, "draw_paragraph_icu")
+  end
+
+  ## Measure an ICU-line-broken, font-fallback paragraph without drawing: the
+  ## laid-out block height in pixels. 0 when ICU/fallback is unavailable. Pair with
+  ## `draw_paragraph_icu` to reserve space.
+  def measure_paragraph_icu(text: String, max_width: Float32, size: Float32) -> Int
+    let packed = self.raw.measure_paragraph_icu_raw(&text, max_width as Float, size as Float)
+    if packed < 0
+      0
+    else
+      packed & 0xFFFFFFFF
+    end
+  end
+
+  ## The widest wrapped line of an ICU-line-broken paragraph in pixels (the
+  ## block's content width). 0 when ICU/fallback is unavailable.
+  def measure_paragraph_icu_width(text: String, max_width: Float32, size: Float32) -> Int
+    let packed = self.raw.measure_paragraph_icu_raw(&text, max_width as Float, size as Float)
+    if packed < 0
+      0
+    else
+      (packed >> 32) & 0xFFFFFFFF
+    end
+  end
+
   ## Advance width in pixels `text` would occupy when drawn (single line).
   ## Uses Skia's real font metrics when active — so measure matches draw, for
   ## centering button labels — else the bitmap advance. Takes an owned String
@@ -296,6 +753,75 @@ class Canvas
     self.raw.skia_active_raw
   end
 
+  ## True when the GPU (Ganesh GL) backend COULD run in this process: Skia is
+  ## loaded AND every gr_* / backend-render-target symbol resolved (docs/GPU.md).
+  ## A capability probe mirroring `skia_available?` — it does not by itself prove
+  ## a GL context or GPU surface exists (use `gpu_active?` for that). GPU is the
+  ## top rung of the backend ladder; when it is unavailable the canvas renders on
+  ## the Skia raster path, or the software fallback, exactly as before.
+  def gpu_available? -> Bool
+    self.raw.gpu_available_raw
+  end
+
+  ## True only when THIS canvas has a live GPU-backed Skia surface — a
+  ## GrDirectContext plus a GPU surface exist and draws genuinely go through the
+  ## GPU (GL window backend OR offscreen Metal). The unambiguous "GPU is
+  ## rendering into me" signal (mirrors `skia_active?` for the raster surface).
+  ## False on a host where no GPU surface could be built, where drawing falls
+  ## back cleanly.
+  def gpu_active? -> Bool
+    self.raw.gpu_active_raw
+  end
+
+  ## True when the **Metal** GPU backend specifically can run here: the Metal
+  ## Skia symbols resolved AND a system Metal device + command queue were
+  ## created. This gates `enable_gpu_offscreen` — the headless, no-window GPU
+  ## render+readback path on Apple. Always false off Apple / where no GPU device
+  ## is present.
+  def gpu_metal_available? -> Bool
+    self.raw.gpu_metal_available_raw
+  end
+
+  ## Which GPU backend is live for this canvas: 0 = none (raster/software),
+  ## 1 = OpenGL (Ganesh GL), 2 = Metal. The `gpu_backend_kind` slot, so callers
+  ## can tell which rung the selection ladder landed on.
+  def gpu_backend_kind -> Int
+    self.raw.gpu_backend_kind_raw
+  end
+
+  ## Put THIS canvas onto an **offscreen Metal GPU surface** (Apple): subsequent
+  ## draws render on the GPU and `end_frame` reads the result back into the
+  ## framebuffer, so `read_pixel` observes real GPU output — no window or display
+  ## needed. The headless GPU pixel-verification path (docs/GPU.md). Returns
+  ## `Ok(nil)` when the Metal surface is live (`gpu_active?` then true,
+  ## `gpu_backend_kind == 2`), or a clean `Err` when Metal is unavailable — in
+  ## which case the canvas stays on the raster/software path (never half-GPU,
+  ## never wrong pixels). Must be called before the first `begin_frame`/draw.
+  def var enable_gpu_offscreen -> Result[nil, String]
+    self.status_to_result(self.raw.enable_gpu_offscreen_raw, "enable_gpu_offscreen")
+  end
+
+  ## Set this canvas's **design size** — the logical coordinate space the app
+  ## draws in. `begin_frame` then applies a base content-scale = surface(backing)
+  ## pixel size / design size, so design-coordinate draws fill the native backing
+  ## surface at native resolution (crisp HiDPI). Windowed canvases set this
+  ## automatically; you only call this to opt an offscreen canvas into the same
+  ## content-scale (e.g. render a design-size UI into a larger backing buffer).
+  ## Pass `0, 0` to disable (scale 1). Call before the first `begin_frame`.
+  def var set_design_size(design_w: Int, design_h: Int) -> Result[nil, String]
+    self.status_to_result(self.raw.set_design_size_raw(design_w, design_h), "set_design_size")
+  end
+
+  ## The active design->backing content scale as `(sx, sy)` Float32 (1.0 when no
+  ## content scale is set). Lets L2/tests read the density a logical-coord frame
+  ## renders at — e.g. a 320-design canvas on a 640-backing surface reports 2.0.
+  def content_scale -> (Float32, Float32)
+    let packed = self.raw.content_scale_raw
+    let fx = (packed >> 32) & 0xFFFFFFFF
+    let fy = packed & 0xFFFFFFFF
+    ((fx as Float32) / 65536.0f32, (fy as Float32) / 65536.0f32)
+  end
+
   ## INTERNAL (used by Window.open): attach the live OS window. Mirrors
   ## draw_text's exact FFI calling shape — an owned String parameter
   ## borrowed at the call — which is the one &String form that lowers
@@ -312,23 +838,45 @@ class Canvas
     self.raw.window_show(&title, scale)
   end
 
+  ## `fill_rect` is the Ruby/Skia-idiomatic synonym for `draw_rect` — this draw
+  ## *fills* the rect (source-over). Both names resolve to the one method body.
+  alias fill_rect draw_rect
+
+  ## `line_height` is the standard typographic term for the font's line height —
+  ## a synonym for `text_height`. Both names resolve to the one method body.
+  alias line_height text_height
+
   private
 
   ## Map a C-shim status code onto the package's error story: `Ok(nil)` or
   ## a descriptive `Err` — a not-yet-valid call is never a silent no-op.
-  def status_to_result(code: Int, what: &str) -> Result[nil, String]
+  def status_to_result(code: Int, what: &String) -> Result[nil, String]
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_no_frame(code)
-      Err(String.from("canvas: #{what} called outside begin_frame/end_frame"))
+      Err("canvas: #{what} called outside begin_frame/end_frame")
     elsif Rxc.is_in_frame(code)
-      Err(String.from("canvas: #{what} called while a frame is already open"))
+      Err("canvas: #{what} called while a frame is already open")
     elsif Rxc.is_bad_args(code)
-      Err(String.from("canvas: #{what} failed: invalid arguments"))
+      Err("canvas: #{what} failed: invalid arguments")
     elsif Rxc.is_no_skia(code)
-      Err(String.from("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)"))
+      Err("canvas: #{what} requires the Skia backend (run runtime/fetch_skia.sh)")
     else
-      Err(String.from("canvas: #{what} failed with unknown status #{code}"))
+      Err("canvas: #{what} failed with unknown status #{code}")
+    end
+  end
+
+  ## Map a `save_layer*` return onto `Result[Int, String]`. The shim returns the
+  ## layer's save count (>= 1) on success, or a NEGATIVE `-RXC_ERR_*` on failure
+  ## (Skia save counts are always >= 1, so the sign is an unambiguous channel).
+  def layer_result(code: Int, what: &String) -> Result[Int, String]
+    if code >= 0
+      Ok(code)
+    else
+      match self.status_to_result(0 - code, what)
+        Ok(_)  -> Err("canvas: #{what} failed with unknown status #{code}")
+        Err(e) -> Err(e)
+      end
     end
   end
 end

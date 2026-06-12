@@ -1,0 +1,85 @@
+# Pin test for the windowed pointer-coordinate mapping (the interaction fix).
+#
+# With show_gpu_scaled(N) / show_scaled(N) the OS window is N x the design size,
+# and SDL reports the mouse in window POINTS (0..design*N). The app needs DESIGN
+# coords (0..design). The pump must divide pointer x/y by the show factor N (NOT
+# by 1, and NOT by the Retina backing/dpr — SDL already reports points). The bug:
+# the Metal/GL windowed paths set s_scale=1, so a click on the top of a 320x360
+# UI shown at 2x landed ~2x too low.
+#
+# This is headless-verifiable: window_pump_test_pointer runs the EXACT mapping the
+# pump uses (point / show_scale) on a synthetic window-point event and pushes the
+# design-mapped result into the ring; we poll it back and assert design coords.
+
+Tester.describe("windowed pointer coords map window-points -> design coords") do |t: &var Tester|
+  t.it("scale 2: a window point (200,300) maps to design (100,150)") do
+    var w = match Window.open("input scale", 320, 360)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # synthetic SDL pointer at window-point (200,300) under a 2x show scale.
+    match w.canvas.raw.window_pump_test_pointer(2, 200, 300)
+      0 -> nil
+      _ -> panic!("pump_test_pointer failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerDown(x, y)) -> ok = x == 100 && y == 150   # / 2
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("scale 1: a window point maps 1:1 (no halving)") do
+    var w = match Window.open("input scale 1", 64, 48)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.canvas.raw.window_pump_test_pointer(1, 40, 24)
+      0 -> nil
+      _ -> panic!("pump_test_pointer failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerDown(x, y)) -> ok = x == 40 && y == 24
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("scale 3: window point (300,360) -> design (100,120)") do
+    var w = match Window.open("input scale 3", 100, 120)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.canvas.raw.window_pump_test_pointer(3, 300, 360)
+      0 -> nil
+      _ -> panic!("pump_test_pointer failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerDown(x, y)) -> ok = x == 100 && y == 120
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("top of the UI does NOT register near the bottom (the bug)") do
+    var w = match Window.open("top click", 320, 360)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # A click near the TOP of a 2x window (point y=20) must map to design y=10 —
+    # NOT y=20 (which, unscaled, would be ~2x too low and hit a different widget).
+    match w.canvas.raw.window_pump_test_pointer(2, 30, 20)
+      0 -> nil
+      _ -> panic!("pump_test_pointer failed")
+    end
+    var dy = -1
+    match w.poll_event
+      Some(Event.PointerDown(_, y)) -> dy = y
+      _ -> dy = -1
+    end
+    t.expect(dy).to_eq(10)        # design y, not 20
+  end
+end

@@ -7,7 +7,7 @@
 
 Tester.describe("Window.show — live path") do |t: &var Tester|
   t.it("show either puts a window up or fails cleanly, drawing works either way") do
-    var w = match Window.open(String.from("canvas pin test"), 64, 48)
+    var w = match Window.open("canvas pin test", 64, 48)
       Ok(v)  -> v
       Err(_) -> panic!("Window.open failed")
     end
@@ -54,7 +54,7 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
   end
 
   t.it("show is idempotent once shown") do
-    var w = match Window.open(String.from("idem"), 16, 16)
+    var w = match Window.open("idem", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
@@ -73,7 +73,7 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
   end
 
   t.it("show after hide opens a fresh window") do
-    var w = match Window.open(String.from("reshow"), 16, 16)
+    var w = match Window.open("reshow", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
@@ -95,11 +95,11 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
   end
 
   t.it("a second window cannot steal the shown window") do
-    var a = match Window.open(String.from("first"), 16, 16)
+    var a = match Window.open("first", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
-    var b = match Window.open(String.from("second"), 16, 16)
+    var b = match Window.open("second", 16, 16)
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end
@@ -128,7 +128,7 @@ Tester.describe("Window.show — live path") do |t: &var Tester|
   end
 
   t.it("sleep_ms returns (frame pacing primitive)") do
-    let w = match Window.open(String.from("h"), 8, 8)
+    let w = match Window.open("h", 8, 8)
       Ok(v)  -> v
       Err(_) -> panic!("open failed")
     end

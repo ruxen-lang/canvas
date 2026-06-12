@@ -19,7 +19,7 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    match c.draw_text(String.from("A"), 2.0f32, 14.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text("A", 2.0f32, 14.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("draw_text failed")
     end
@@ -59,7 +59,7 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    match c.draw_text(String.from(" "), 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text(" ", 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("draw_text failed")
     end
@@ -97,11 +97,11 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    match c.draw_text(String.from("WWWW"), 0.0f32, 40.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text("WWWW", 0.0f32, 40.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("below-surface draw_text failed")
     end
-    match c.draw_text(String.from("WWWW"), 0.0f32, -40.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text("WWWW", 0.0f32, -40.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("above-surface draw_text failed")
     end
@@ -119,7 +119,7 @@ Tester.describe("Canvas.draw_text") do |t: &var Tester|
       Err(_) -> panic!("Canvas.create failed")
     end
     var failed = false
-    match c.draw_text(String.from("A"), 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text("A", 0.0f32, 7.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> failed = false
       Err(_) -> failed = true
     end
@@ -133,9 +133,9 @@ Tester.describe("Canvas.measure_text") do |t: &var Tester|
       Ok(v)  -> v
       Err(_) -> panic!("Canvas.create failed")
     end
-    t.expect(c.measure_text(String.from(""))).to_eq(0)
-    let one = c.measure_text(String.from("A"))
-    let many = c.measure_text(String.from("AAAA"))
+    t.expect(c.measure_text("")).to_eq(0)
+    let one = c.measure_text("A")
+    let many = c.measure_text("AAAA")
     t.expect(one > 0).to_eq(true)
     t.expect(many >= one).to_eq(true)
   end
@@ -149,6 +149,15 @@ Tester.describe("Canvas.text_height") do |t: &var Tester|
     end
     t.expect(c.text_height > 0).to_eq(true)
   end
+
+  t.it("line_height is an alias for text_height (both names, one body)") do
+    let c = match Canvas.create(4, 4)
+      Ok(v)  -> v
+      Err(_) -> panic!("Canvas.create failed")
+    end
+    t.expect(c.line_height).to_eq(c.text_height)
+    t.expect(c.line_height > 0).to_eq(true)
+  end
 end
 
 Tester.describe("Canvas font sizing") do |t: &var Tester|
@@ -159,8 +168,8 @@ Tester.describe("Canvas font sizing") do |t: &var Tester|
     end
     let small_h = c.text_height_sized(10.0f32)
     let large_h = c.text_height_sized(30.0f32)
-    let small_w = c.measure_text_sized(String.from("AAA"), 10.0f32)
-    let large_w = c.measure_text_sized(String.from("AAA"), 30.0f32)
+    let small_w = c.measure_text_sized("AAA", 10.0f32)
+    let large_w = c.measure_text_sized("AAA", 30.0f32)
     if c.skia_active?
       t.expect(large_h > small_h).to_eq(true)
       t.expect(large_w > small_w).to_eq(true)
@@ -182,7 +191,7 @@ Tester.describe("Canvas font sizing") do |t: &var Tester|
       Ok(_)  -> nil
       Err(_) -> panic!("clear failed")
     end
-    match c.draw_text_sized(String.from("Hi"), 4.0f32, 30.0f32, 24.0f32, Color.rgb(255u8, 255u8, 255u8))
+    match c.draw_text_sized("Hi", 4.0f32, 30.0f32, 24.0f32, Color.rgb(255u8, 255u8, 255u8))
       Ok(_)  -> nil
       Err(_) -> panic!("draw_text_sized failed")
     end

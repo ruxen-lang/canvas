@@ -27,11 +27,30 @@ typedef struct sk_paint_t      sk_paint_t;
 typedef struct sk_rrect_t      sk_rrect_t;
 typedef struct sk_shader_t     sk_shader_t;
 typedef struct sk_maskfilter_t sk_maskfilter_t;
+typedef struct sk_imagefilter_t sk_imagefilter_t;
 typedef struct sk_image_t      sk_image_t;
 typedef struct sk_data_t       sk_data_t;
 typedef struct sk_font_t       sk_font_t;
 typedef struct sk_typeface_t   sk_typeface_t;
+typedef struct sk_fontmgr_t    sk_fontmgr_t;
+typedef struct sk_string_t     sk_string_t;
 typedef struct sk_colorspace_t sk_colorspace_t;
+typedef struct sk_path_t       sk_path_t;
+typedef struct sk_path_effect_t sk_path_effect_t;
+typedef struct sk_fontstyle_t  sk_fontstyle_t;
+typedef struct sk_textblob_t         sk_textblob_t;
+typedef struct sk_textblob_builder_t sk_textblob_builder_t;
+
+/* ---- Ganesh (GPU) opaque handles ----
+ * The GPU backend (docs/GPU.md). A gr_direct_context drives a GL/Metal/Vulkan
+ * device; a gr_backendrendertarget wraps the window's default framebuffer; the
+ * GPU SkSurface renders into it. All reached through symbols the prebuilt
+ * libSkiaSharp already exports — no new dependency. GL-first: only the gl_*
+ * entry points are bound this cycle (Metal/Vulkan deferred per the ADR). */
+typedef struct gr_direct_context_t    gr_direct_context_t;
+typedef struct gr_recording_context_t gr_recording_context_t;
+typedef struct gr_glinterface_t       gr_glinterface_t;
+typedef struct gr_backendrendertarget_t gr_backendrendertarget_t;
 
 /* Packed 0xAARRGGBB, matching our framebuffer + RxHost.pixels. */
 typedef uint32_t sk_color_t;
@@ -53,6 +72,29 @@ enum { RX_SK_BLUR_NORMAL = 0, RX_SK_BLUR_SOLID = 1, RX_SK_BLUR_OUTER = 2, RX_SK_
 enum { RX_SK_CLIP_DIFFERENCE = 0, RX_SK_CLIP_INTERSECT = 1 };
 /* sk_filter_mode_t */
 enum { RX_SK_FILTER_NEAREST = 0, RX_SK_FILTER_LINEAR = 1 };
+/* sk_path_filltype_t (probe-pinned by upstream SkiaSharp: winding = 0). */
+enum { RX_SK_PATH_FILL_WINDING = 0, RX_SK_PATH_FILL_EVENODD = 1 };
+/* arc_to large-arc / sweep flags (SVG semantics) */
+enum { RX_SK_PATH_ARC_SMALL = 0, RX_SK_PATH_ARC_LARGE = 1 };
+enum { RX_SK_PATH_ARC_CCW = 0, RX_SK_PATH_ARC_CW = 1 };
+
+/* gr_surfaceorigin_t — a window's GL default framebuffer is bottom-left
+ * origin (GL convention); an FBO-backed texture is top-left. */
+enum { RX_GR_SURFACE_ORIGIN_TOP_LEFT = 0, RX_GR_SURFACE_ORIGIN_BOTTOM_LEFT = 1 };
+/* The GL sized internal format we request for the window backbuffer color
+ * attachment. GL_RGBA8 == 0x8058; Skia maps the render-target color type from
+ * it. We keep the GPU surface at RGBA_8888 (not BGRA) because that is the GL
+ * default-framebuffer format; color is converted by Skia at draw, and present
+ * is a swap (no CPU readback in the present path), so this does not need to
+ * match the raster path's BGRA buffer. */
+enum { RX_GR_GL_RGBA8 = 0x8058 };
+/* sk_colortype_t for the GPU surface — RGBA_8888 == 4 (BGRA_8888 == 6 above). */
+enum { RX_SK_COLORTYPE_RGBA_8888 = 4 };
+
+/* Which GPU backend a host's surface is rendered by — the gpu_backend_kind slot.
+ * 0 when the host is on the raster/software path. Probed via
+ * ruxen_canvas_gpu_backend_kind so L2/tests can tell GL from Metal. */
+enum { RX_GPU_KIND_NONE = 0, RX_GPU_KIND_GL = 1, RX_GPU_KIND_METAL = 2 };
 
 /* ---- by-value structs (layout ABI-pinned) ---- */
 typedef struct {
@@ -109,12 +151,31 @@ typedef void (*pfn_canvas_draw_simple_text)(sk_canvas_t *, const void *text, siz
 /* canvas state stack + transforms + clipping */
 typedef int  (*pfn_canvas_save)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore)(sk_canvas_t *);
+/* save_layer pushes an offscreen layer (bounds NULL = whole canvas); the
+ * matching restore composites it down. Returns the save count (>= 1) to pair
+ * with restore / restore_to. Group opacity is done via save_layer with an
+ * alpha-carrying paint (this build has no sk_canvas_save_layer_alpha — the
+ * convenience wrapper was removed upstream; see ruxen_canvas_save_layer_alpha). */
+typedef int  (*pfn_canvas_save_layer)(sk_canvas_t *, const sk_rect_t *bounds,
+        const sk_paint_t *paint);
 typedef int  (*pfn_canvas_get_save_count)(sk_canvas_t *);
 typedef void (*pfn_canvas_restore_to_count)(sk_canvas_t *, int save_count);
 typedef void (*pfn_canvas_translate)(sk_canvas_t *, float dx, float dy);
 typedef void (*pfn_canvas_scale)(sk_canvas_t *, float sx, float sy);
 typedef void (*pfn_canvas_rotate_degrees)(sk_canvas_t *, float degrees);
 typedef void (*pfn_canvas_reset_matrix)(sk_canvas_t *);
+typedef void (*pfn_canvas_skew)(sk_canvas_t *, float sx, float sy);
+/* sk_canvas_concat in THIS libSkiaSharp build takes a 4x4 SkM44 — sixteen floats
+ * in COLUMN-MAJOR order, NOT a 3x3 sk_matrix_t. Empirically pinned (see the shim
+ * comment on ruxen_canvas_concat): sk_canvas_get_matrix round-trips through
+ * sk_canvas_concat only as 16 column-major floats, with the 2D affine occupying:
+ *   col0 = (scaleX, skewY,  0, 0)
+ *   col1 = (skewX,  scaleY, 0, 0)
+ *   col2 = (0,      0,      1, 0)
+ *   col3 = (transX, transY, 0, 1)
+ * i.e. scaleX@[0] scaleY@[5] transX@[12] transY@[13] skewY@[1] skewX@[4]. The
+ * 6-arg Canvas#concat fills these slots; all other entries are the 4x4 identity. */
+typedef void (*pfn_canvas_concat)(sk_canvas_t *, const float m44_colmajor[16]);
 /* clip op: 1 = intersect (ABI-pinned by probe); doAA != 0 for antialiased edges */
 typedef void (*pfn_canvas_clip_rect)(sk_canvas_t *, const sk_rect_t *, int op, int do_aa);
 typedef void (*pfn_canvas_clip_rrect)(sk_canvas_t *, const sk_rrect_t *, int op, int do_aa);
@@ -129,6 +190,11 @@ typedef void        (*pfn_image_unref)(sk_image_t *);
 typedef void        (*pfn_canvas_draw_image_rect)(sk_canvas_t *, const sk_image_t *,
         const sk_rect_t *src, const sk_rect_t *dst, const sk_sampling_options_t *,
         const sk_paint_t *, int constraint);
+/* Snapshot a surface's current contents into an immutable sk_image (the
+ * render-to-texture / raster-cache primitive). The returned image is owned by the
+ * caller (release with sk_image_unref). It does NOT alias the surface's pixels —
+ * subsequent draws into the surface do not change the snapshot. */
+typedef sk_image_t *(*pfn_surface_new_image_snapshot)(sk_surface_t *);
 
 /* radii[4] order: upper-left, upper-right, lower-right, lower-left. */
 typedef sk_rrect_t *(*pfn_rrect_new)(void);
@@ -144,6 +210,16 @@ typedef void        (*pfn_paint_set_style)(sk_paint_t *, int /*sk_paint_style_t*
 typedef void        (*pfn_paint_set_stroke_width)(sk_paint_t *, float);
 typedef void        (*pfn_paint_set_shader)(sk_paint_t *, sk_shader_t *);
 typedef void        (*pfn_paint_set_maskfilter)(sk_paint_t *, sk_maskfilter_t *);
+/* SkBlendMode int (Clear=0, Src=1, SrcOver=3, Screen=14, Multiply=24 — pinned
+ * empirically against this build). The canvas-side RX_BLEND_* enum maps to these. */
+typedef void        (*pfn_paint_set_blendmode)(sk_paint_t *, int /*sk_blendmode_t*/);
+/* Gaussian blur image filter: sigmaX/sigmaY in device px, tile_mode (1 = clamp),
+ * input filter (NULL = source), crop rect (NULL = none). Owned -> imagefilter_unref.
+ * Set on a layer paint so everything drawn into the layer is blurred on restore. */
+typedef sk_imagefilter_t *(*pfn_imagefilter_new_blur)(float sigma_x, float sigma_y,
+        int tile_mode, sk_imagefilter_t *input, const sk_rect_t *crop_rect);
+typedef void              (*pfn_imagefilter_unref)(sk_imagefilter_t *);
+typedef void              (*pfn_paint_set_imagefilter)(sk_paint_t *, sk_imagefilter_t *);
 
 /* colors[count] packed 0xAARRGGBB; pos[count] in [0,1] or NULL for even spacing;
  * matrix NULL = identity. */
@@ -158,13 +234,358 @@ typedef sk_maskfilter_t *(*pfn_maskfilter_new_blur)(int blur_style, float sigma)
 typedef void             (*pfn_maskfilter_unref)(sk_maskfilter_t *);
 
 typedef sk_typeface_t *(*pfn_typeface_create_default)(void);
+/* Resolve a typeface by family name + style; NULL when the family is unknown
+ * (the shim then falls back to the default face — a missing font must not break
+ * rendering). The returned typeface is owned (release with typeface_unref). */
+typedef sk_typeface_t *(*pfn_typeface_create_from_name)(const char *family_name,
+        const sk_fontstyle_t *style);
+typedef void           (*pfn_typeface_unref)(sk_typeface_t *);
+/* weight/width are SkFontStyle ints (400 = normal weight, 5 = normal width);
+ * slant 0 = upright. Owned: release with fontstyle_delete. */
+typedef sk_fontstyle_t *(*pfn_fontstyle_new)(int weight, int width, int slant);
+typedef void            (*pfn_fontstyle_delete)(sk_fontstyle_t *);
 typedef sk_font_t     *(*pfn_font_new_with_values)(sk_typeface_t *, float size, float scale_x,
         float skew_x);
 typedef void           (*pfn_font_set_size)(sk_font_t *, float);
+
+/* ---- per-character font fallback (docs/decisions/text-fallback.md) ----
+ *
+ * The system font manager (Core Text on macOS) resolves which installed font
+ * covers a codepoint, so CJK / emoji render instead of tofu without us naming or
+ * shipping any font. sk_fontmgr_match_family_style_character takes a base family
+ * (NULL = no preference), a style, a BCP-47 array (NULL/0 here), and a codepoint,
+ * and returns an OWNED typeface that covers it (release with typeface_unref) or
+ * NULL. sk_typeface_unichar_to_glyph is the coverage test: glyph 0 (.notdef) ==
+ * the typeface does NOT cover the codepoint.
+ *
+ * BINDING GOTCHAS (empirically determined on the pinned 3.119.4 libSkiaSharp):
+ *   - sk_fontmgr_match_family_style_character SEGFAULTS with a NULL style — it
+ *     requires a NON-NULL sk_fontstyle_t*. We always pass a normal style
+ *     (weight 400 / width 5 / upright).
+ *   - sk_typeface_get_family_name RETURNS an OWNED sk_string_t* (it does NOT
+ *     buf-fill — the buf-fill signature returns empty). Read it with
+ *     sk_string_get_c_str / sk_string_get_size, free with sk_string_destructor. */
+typedef sk_fontmgr_t  *(*pfn_fontmgr_ref_default)(void);
+typedef void           (*pfn_fontmgr_unref)(sk_fontmgr_t *);
+typedef sk_typeface_t *(*pfn_fontmgr_match_family_style_character)(sk_fontmgr_t *,
+        const char *family, const sk_fontstyle_t *style, const char **bcp47,
+        int bcp47_count, int32_t character);
+typedef uint16_t       (*pfn_typeface_unichar_to_glyph)(const sk_typeface_t *, int32_t unichar);
+typedef sk_string_t   *(*pfn_typeface_get_family_name)(const sk_typeface_t *);
+typedef const char    *(*pfn_string_get_c_str)(const sk_string_t *);
+typedef size_t         (*pfn_string_get_size)(const sk_string_t *);
+typedef void           (*pfn_string_destructor)(sk_string_t *);
+typedef void           (*pfn_font_set_typeface)(sk_font_t *, sk_typeface_t *);
+/* Map a codepoint to this font's glyph id (0 = .notdef = not covered), and read
+ * per-glyph horizontal advances. These let a fallback run be rendered directly
+ * through Skia (1:1 codepoint->glyph + advance) without a font FILE for HarfBuzz
+ * — the obtainable path for CJK/emoji fallback (docs/decisions/text-fallback.md).
+ * sk_font_get_widths_bounds fills widths[count] (and bounds, which we pass NULL). */
+typedef uint16_t       (*pfn_font_unichar_to_glyph)(const sk_font_t *, int32_t unichar);
+typedef void           (*pfn_font_get_widths_bounds)(const sk_font_t *, const uint16_t *glyphs,
+        int count, float *widths, sk_rect_t *bounds, const sk_paint_t *);
 typedef void           (*pfn_font_delete)(sk_font_t *);
 typedef float          (*pfn_font_measure_text)(const sk_font_t *, const void *text, size_t byte_len,
         int encoding, sk_rect_t *bounds, const sk_paint_t *);
 typedef float          (*pfn_font_get_metrics)(const sk_font_t *, sk_fontmetrics_t *);
+
+/* ---- paths (arbitrary contours: lines, béziers, arcs) ----
+ * An sk_path is a mutable builder owned on the Ruxen side as an int64 handle;
+ * the shim appends verbs to it, then sk_canvas_draw_path fills/strokes it with
+ * a paint. arc_to uses SVG semantics: (rx, ry, x-axis-rotate-deg, large-arc,
+ * sweep, x, y). All coordinates are device pixels. */
+typedef sk_path_t *(*pfn_path_new)(void);
+typedef void       (*pfn_path_delete)(sk_path_t *);
+typedef void       (*pfn_path_move_to)(sk_path_t *, float x, float y);
+typedef void       (*pfn_path_line_to)(sk_path_t *, float x, float y);
+typedef void       (*pfn_path_quad_to)(sk_path_t *, float cx, float cy, float x, float y);
+typedef void       (*pfn_path_cubic_to)(sk_path_t *, float c1x, float c1y,
+        float c2x, float c2y, float x, float y);
+typedef void       (*pfn_path_arc_to)(sk_path_t *, float rx, float ry, float x_axis_rotate,
+        int large_arc, int sweep, float x, float y);
+typedef void       (*pfn_path_close)(sk_path_t *);
+typedef void       (*pfn_path_set_filltype)(sk_path_t *, int /*sk_path_filltype_t*/);
+typedef void       (*pfn_canvas_draw_path)(sk_canvas_t *, const sk_path_t *, const sk_paint_t *);
+
+/* ---- path effects (dashing) ----
+ * SkiaSharp's flat C API names these `sk_path_effect_*` and the setter
+ * `sk_paint_set_path_effect` (the Phase-1 "blocked" verdict searched the wrong
+ * name, `sk_patheffect_*`, and missed them — see docs/ROADMAP.md). The dash
+ * effect takes an interval array [on, off, on, off, ...] (count must be EVEN and
+ * >= 2; Skia repeats the pattern) and a phase offset into the pattern; the
+ * returned effect is OWNED — release it with sk_path_effect_unref after setting
+ * it on the paint (the paint takes its own reference). */
+typedef sk_path_effect_t *(*pfn_path_effect_create_dash)(const float intervals[],
+        int count, float phase);
+typedef void              (*pfn_path_effect_unref)(sk_path_effect_t *);
+typedef void              (*pfn_paint_set_path_effect)(sk_paint_t *, sk_path_effect_t *);
+
+/* ---- Ganesh GL backend (the GPU surface, docs/GPU.md) ----
+ *
+ * These are the gr_* / sk_surface_new_backend_render_target symbols the prebuilt
+ * libSkiaSharp exports (Skia's include/c/gr_context.h + sk_surface.h C API). All
+ * are OPTIONAL in the loader: a miss disables only the GPU rung, never the
+ * raster backend. ABI shapes below are the upstream SkiaSharp C-API ones.
+ *
+ * gr_gl_framebufferinfo_t describes the GL default-framebuffer the window's GL
+ * context draws into: { fboid, format }. fboid is the bound FBO (0 on most
+ * desktop GL); format is the sized internal color format (GL_RGBA8). Some
+ * SkiaSharp builds add a trailing `protected` bool — we over-allocate by a few
+ * bytes at the call site to be safe rather than risk a short read. */
+typedef struct {
+    unsigned int fFBOID;
+    unsigned int fFormat;
+} gr_gl_framebufferinfo_t;
+
+/* The GL proc loader callback Skia calls to resolve each GL entry point. ctx is
+ * an opaque user pointer (we pass NULL and resolve via SDL_GL_GetProcAddress in
+ * a small trampoline). */
+typedef void *(*gr_gl_get_proc)(void *ctx, const char *name);
+
+/* Assemble a GrGLInterface from a proc loader (preferred — explicit about which
+ * context's procs we bind). Returns an owned interface (gr_glinterface_unref).
+ * gr_glinterface_create_native_interface() is the no-callback alternative that
+ * uses the current context's procs; we try assemble first, then native. */
+typedef gr_glinterface_t *(*pfn_gr_glinterface_assemble_gl)(void *ctx, gr_gl_get_proc get);
+typedef gr_glinterface_t *(*pfn_gr_glinterface_create_native)(void);
+typedef void              (*pfn_gr_glinterface_unref)(gr_glinterface_t *);
+
+/* Build a GPU device context over the (current) GL context described by the
+ * interface. NULL on failure.
+ *
+ * Releasing it: there is NO `gr_direct_context_unref` in this Skia C API — a
+ * GrDirectContext is-a GrRecordingContext, and the canonical release is
+ * `gr_recording_context_unref(gr_recording_context_t*)` (verified absent vs
+ * present by `nm` on the fetched libSkiaSharp; the header confirms it). We
+ * upcast the direct context to gr_recording_context_t* to unref it. */
+typedef gr_direct_context_t *(*pfn_gr_direct_context_make_gl)(const gr_glinterface_t *);
+typedef void                 (*pfn_gr_recording_context_unref)(gr_recording_context_t *);
+typedef void                 (*pfn_gr_direct_context_flush)(gr_direct_context_t *);
+typedef void                 (*pfn_gr_direct_context_flush_and_submit)(gr_direct_context_t *, int sync);
+
+/* Wrap the window's default framebuffer as a GrBackendRenderTarget. Owned:
+ * gr_backendrendertarget_delete. */
+typedef gr_backendrendertarget_t *(*pfn_gr_backendrendertarget_new_gl)(int width, int height,
+        int samples, int stencils, const gr_gl_framebufferinfo_t *glInfo);
+typedef void (*pfn_gr_backendrendertarget_delete)(gr_backendrendertarget_t *);
+
+/* Create a GPU-backed SkSurface that renders into the backend render target.
+ * origin = bottom-left for a GL window; colortype = RGBA_8888. NULL on failure.
+ * Released with the usual sk_surface_unref. */
+typedef sk_surface_t *(*pfn_surface_new_backend_render_target)(gr_recording_context_t *ctx,
+        const gr_backendrendertarget_t *rt, int origin, int colortype,
+        sk_colorspace_t *cs, const void *props);
+
+/* ---- Ganesh Metal backend + offscreen GPU surface + readback (docs/GPU.md) ----
+ *
+ * Metal is the native Apple GPU path (this build is SK_METAL=1 — verified). The
+ * device + command queue come from Metal.framework / the objc runtime (created
+ * in skia_shim.c, not by Skia); gr_direct_context_make_metal consumes them.
+ *
+ * The headless prize: sk_surface_new_render_target makes an OFFSCREEN GPU
+ * surface (Skia allocates its own MTLTexture — no window, no CAMetalLayer), and
+ * sk_surface_read_pixels copies the rendered GPU pixels back to CPU memory. With
+ * a BGRA_8888 surface the readback is byte-identical to the host's 0xAARRGGBB
+ * framebuffer, so the existing read_pixel oracle observes real GPU output. */
+
+/* device + queue are id<MTLDevice> / id<MTLCommandQueue> (opaque). */
+typedef gr_direct_context_t *(*pfn_gr_direct_context_make_metal)(void *device, void *queue);
+
+/* Offscreen GPU surface: Skia allocates the render target. budgeted!=0 lets the
+ * context recycle it; sampleCount 0 = no MSAA; origin top-left for offscreen;
+ * mips!=0 builds mipmaps (0 here). NULL on failure. sk_surface_unref to free. */
+typedef sk_surface_t *(*pfn_surface_new_render_target)(gr_recording_context_t *ctx,
+        int budgeted, const sk_imageinfo_t *info, int sample_count, int origin,
+        const void *props, int should_create_with_mips);
+
+/* ON-SCREEN Metal: wrap a CAMetalDrawable's MTLTexture as a backend render
+ * target, so a GPU SkSurface renders directly into the window's drawable
+ * (docs/GPU.md). gr_mtl_textureinfo_t is just { const void* fTexture } — the
+ * drawable's texture pointer (from window_metal_next_drawable). The resulting
+ * render target feeds sk_surface_new_backend_render_target. Released per frame
+ * (gr_backendrendertarget_delete) since each frame wraps a fresh drawable. */
+typedef struct { const void *fTexture; } gr_mtl_textureinfo_t;
+typedef gr_backendrendertarget_t *(*pfn_gr_backendrendertarget_new_metal)(int width, int height,
+        const gr_mtl_textureinfo_t *mtlInfo);
+
+/* GPU -> CPU readback: copy the surface's pixels into dst (described by dstInfo)
+ * at (srcX, srcY). Returns nonzero on success. */
+typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
+        void *dst_pixels, size_t dst_row_bytes, int src_x, int src_y);
+
+/* GPU -> CPU readback: copy the surface's pixels into dst (described by dstInfo)
+ * at (srcX, srcY). Returns nonzero on success. */
+typedef int (*pfn_surface_read_pixels)(sk_surface_t *surface, sk_imageinfo_t *dst_info,
+        void *dst_pixels, size_t dst_row_bytes, int src_x, int src_y);
+
+/* ---- positioned-glyph rendering (for shaped text, docs/SHAPING.md) ----
+ *
+ * libSkiaSharp has no SkShaper, but it DOES expose the textblob API to render a
+ * pre-positioned glyph run. We shape with HarfBuzz (below), then build a run of
+ * (glyphId, x, y) and draw it. sk_typeface_create_from_file loads the SAME font
+ * file HarfBuzz shapes, so the glyph ids match. The runbuffer's `glyphs` is a
+ * uint16_t[count] and `pos` is a float[2*count] (x,y per glyph). */
+typedef struct {
+    void *glyphs;     /* uint16_t[count] — glyph ids */
+    void *pos;        /* float[2*count]  — x,y per glyph (for alloc_run_pos) */
+    void *utf8text;
+    void *clusters;
+} sk_textblob_runbuffer_t;
+
+typedef sk_typeface_t *(*pfn_typeface_create_from_file)(const char *path, int index);
+typedef sk_textblob_builder_t *(*pfn_textblob_builder_new)(void);
+typedef void           (*pfn_textblob_builder_delete)(sk_textblob_builder_t *);
+/* Allocate a run of `count` positioned glyphs for `font`; fills *runbuffer with
+ * pointers to write glyph ids + (x,y) positions into. bounds may be NULL. */
+typedef void           (*pfn_textblob_builder_alloc_run_pos)(sk_textblob_builder_t *,
+        const sk_font_t *font, int count, const sk_rect_t *bounds,
+        sk_textblob_runbuffer_t *runbuffer);
+typedef sk_textblob_t *(*pfn_textblob_builder_make)(sk_textblob_builder_t *);
+typedef void           (*pfn_textblob_unref)(sk_textblob_t *);
+typedef void           (*pfn_canvas_draw_text_blob)(sk_canvas_t *, sk_textblob_t *,
+        float x, float y, const sk_paint_t *);
+
+/* ---- HarfBuzz shaping (the hb_* flat C API, docs/SHAPING.md) ----
+ *
+ * Shape a UTF-8 run into positioned glyphs (kerning, ligatures; and RTL/complex
+ * when direction/script are set). dlopen'd from libHarfBuzzSharp; bound as an
+ * OPTIONAL tier (a miss only forecloses shaping). All handles are opaque
+ * pointers; the glyph info/position structs are HarfBuzz's stable ABI (5x uint32
+ * / int32 each). hb advances/offsets are in font units scaled by hb_font_set_scale
+ * — we set scale = size*64, so values are 26.6 fixed (divide by 64 for pixels). */
+typedef struct hb_blob_t   hb_blob_t;
+typedef struct hb_face_t   hb_face_t;
+typedef struct hb_font_t   hb_font_t;
+typedef struct hb_buffer_t hb_buffer_t;
+typedef struct { uint32_t codepoint, mask, cluster, var1, var2; } hb_glyph_info_t;
+typedef struct { int32_t x_advance, y_advance, x_offset, y_offset; uint32_t var; } hb_glyph_position_t;
+
+typedef hb_blob_t   *(*pfn_hb_blob_create_from_file_or_fail)(const char *path);
+typedef hb_face_t   *(*pfn_hb_face_create)(hb_blob_t *, unsigned int index);
+typedef hb_font_t   *(*pfn_hb_font_create)(hb_face_t *);
+typedef void         (*pfn_hb_font_set_scale)(hb_font_t *, int x_scale, int y_scale);
+typedef hb_buffer_t *(*pfn_hb_buffer_create)(void);
+typedef void         (*pfn_hb_buffer_add_utf8)(hb_buffer_t *, const char *text,
+        int text_length, unsigned int item_offset, int item_length);
+typedef void         (*pfn_hb_buffer_set_direction)(hb_buffer_t *, int direction);
+typedef void         (*pfn_hb_buffer_guess_segment_properties)(hb_buffer_t *);
+typedef void         (*pfn_hb_shape)(hb_font_t *, hb_buffer_t *, const void *features,
+        unsigned int num_features);
+typedef unsigned int (*pfn_hb_buffer_get_length)(hb_buffer_t *);
+typedef hb_glyph_info_t     *(*pfn_hb_buffer_get_glyph_infos)(hb_buffer_t *, unsigned int *length);
+typedef hb_glyph_position_t *(*pfn_hb_buffer_get_glyph_positions)(hb_buffer_t *, unsigned int *length);
+typedef void         (*pfn_hb_buffer_destroy)(hb_buffer_t *);
+typedef void         (*pfn_hb_font_destroy)(hb_font_t *);
+typedef void         (*pfn_hb_face_destroy)(hb_face_t *);
+typedef void         (*pfn_hb_blob_destroy)(hb_blob_t *);
+
+/* hb_direction_t (stable ABI): 4 = LTR, 5 = RTL, 6 = TTB, 7 = BTT. 0 = invalid
+ * (use guess_segment_properties). We expose LTR/RTL/auto across the FFI. */
+enum { RX_HB_DIR_INVALID = 0, RX_HB_DIR_LTR = 4, RX_HB_DIR_RTL = 5 };
+
+/* The resolved HarfBuzz loader (dlopen'd separately from Skia). */
+typedef struct {
+    int available;   /* 1 iff the dylib loaded and all shaping symbols resolved */
+    pfn_hb_blob_create_from_file_or_fail  blob_create_from_file;
+    pfn_hb_face_create                    face_create;
+    pfn_hb_font_create                    font_create;
+    pfn_hb_font_set_scale                 font_set_scale;
+    pfn_hb_buffer_create                  buffer_create;
+    pfn_hb_buffer_add_utf8                buffer_add_utf8;
+    pfn_hb_buffer_set_direction           buffer_set_direction;
+    pfn_hb_buffer_guess_segment_properties buffer_guess_segment_properties;
+    pfn_hb_shape                          shape;
+    pfn_hb_buffer_get_length              buffer_get_length;
+    pfn_hb_buffer_get_glyph_infos         buffer_get_glyph_infos;
+    pfn_hb_buffer_get_glyph_positions     buffer_get_glyph_positions;
+    pfn_hb_buffer_destroy                 buffer_destroy;
+    pfn_hb_font_destroy                   font_destroy;
+    pfn_hb_face_destroy                   face_destroy;
+    pfn_hb_blob_destroy                   blob_destroy;
+} RxHB;
+
+/* Lazily dlopen()s libHarfBuzzSharp and resolves the table on first call;
+ * process-wide singleton. Never NULL — check ->available. (runtime/skia_shim.c) */
+const RxHB *rx_hb(void);
+
+/* ---- ICU segmentation (libicucore, docs/decisions/text-fallback.md) ----
+ *
+ * Unicode line-break + grapheme-cluster boundaries, for: (a) wrapping a paragraph
+ * at proper break opportunities (so CJK — which has NO spaces — wraps at character
+ * boundaries instead of overflowing), and (b) grapheme boundaries exposed to L2
+ * for caret/selection (an emoji+ZWJ sequence is ONE grapheme).
+ *
+ * NO new dependency on macOS: /usr/lib/libicucore.A.dylib is already on the host.
+ * It has NO on-disk file (dyld-shared-cache only), so `nm` cannot see it — the
+ * symbol check is a runtime dlsym probe. On this host the BARE names resolve
+ * (Apple re-exports the unsuffixed `ubrk_*`); the loader falls back to scanning a
+ * small version-suffix range (_70.._78) if a future host only exports suffixed
+ * names. ICU works in UTF-16, so we convert the UTF-8 input with u_strFromUTF8.
+ *
+ * UBreakIteratorType (stable ABI): UBRK_CHARACTER=0 (grapheme), UBRK_WORD=1,
+ * UBRK_LINE=2, UBRK_SENTENCE=3. UBRK_DONE = -1 (no more boundaries). UErrorCode <
+ * 0 is a benign warning (e.g. U_USING_DEFAULT_WARNING), > 0 a real failure. */
+typedef struct UBreakIterator UBreakIterator;
+typedef uint16_t rx_uchar;     /* UChar — UTF-16 code unit */
+
+enum { RX_UBRK_CHARACTER = 0, RX_UBRK_LINE = 2 };
+enum { RX_UBRK_DONE = -1 };
+
+/* ubidi: resolve a line's directional runs and their VISUAL order. ubidi_setPara
+ * takes a paragraph level (UBIDI_DEFAULT_LTR = 0xfe — auto from the first strong
+ * char, LTR base); ubidi_countRuns gives the visual-run count; ubidi_getVisualRun
+ * returns each run's direction (0 = LTR, 1 = RTL) and its LOGICAL start + length
+ * (UTF-16 units), in VISUAL left-to-right order. Lays out mixed-direction text. */
+typedef struct UBiDi UBiDi;
+enum { RX_UBIDI_DEFAULT_LTR = 0xfe, RX_UBIDI_LTR = 0, RX_UBIDI_RTL = 1 };
+
+typedef UBiDi  *(*pfn_ubidi_open)(void);
+typedef void    (*pfn_ubidi_setPara)(UBiDi *, const rx_uchar *text, int32_t len,
+        uint8_t para_level, uint8_t *embedding_levels, int32_t *status);
+typedef int32_t (*pfn_ubidi_countRuns)(UBiDi *, int32_t *status);
+typedef int     (*pfn_ubidi_getVisualRun)(UBiDi *, int32_t run, int32_t *logical_start,
+        int32_t *length);
+typedef void    (*pfn_ubidi_close)(UBiDi *);
+
+typedef UBreakIterator *(*pfn_ubrk_open)(int type, const char *locale,
+        const rx_uchar *text, int32_t text_len, int32_t *status);
+typedef void            (*pfn_ubrk_setText)(UBreakIterator *, const rx_uchar *text,
+        int32_t text_len, int32_t *status);
+typedef int32_t         (*pfn_ubrk_first)(UBreakIterator *);
+typedef int32_t         (*pfn_ubrk_next)(UBreakIterator *);
+typedef int32_t         (*pfn_ubrk_following)(UBreakIterator *, int32_t offset);
+typedef void            (*pfn_ubrk_close)(UBreakIterator *);
+typedef void            (*pfn_u_strFromUTF8)(rx_uchar *dest, int32_t dest_cap,
+        int32_t *dest_len, const char *src, int32_t src_len, int32_t *status);
+
+typedef struct {
+    int available;   /* 1 iff libicucore loaded and the break-iterator symbols resolved */
+    /* The open library handle(s). On macOS lib_uc is libicucore and lib_i18n is
+     * NULL (everything lives in one handle). On Linux lib_uc is libicuuc.so.<N>
+     * and lib_i18n is libicui18n.so.<N> (ubidi_* may live in either — the loader
+     * resolves each symbol against whichever exports it). Retained for the
+     * process lifetime (ICU is a never-freed singleton); never dlclose'd. */
+    void *lib_uc;
+    void *lib_i18n;
+    pfn_ubrk_open       ubrk_open;
+    pfn_ubrk_setText    ubrk_setText;
+    pfn_ubrk_first      ubrk_first;
+    pfn_ubrk_next       ubrk_next;
+    pfn_ubrk_following  ubrk_following;
+    pfn_ubrk_close      ubrk_close;
+    pfn_u_strFromUTF8   u_strFromUTF8;
+    /* bidi (OPTIONAL within ICU; bidi_ok gates the run-reorder path). */
+    pfn_ubidi_open          ubidi_open;
+    pfn_ubidi_setPara       ubidi_setPara;
+    pfn_ubidi_countRuns     ubidi_countRuns;
+    pfn_ubidi_getVisualRun  ubidi_getVisualRun;
+    pfn_ubidi_close         ubidi_close;
+    int bidi_ok;     /* 1 iff the ubidi symbols resolved (bidi reorder available) */
+} RxICU;
+
+/* Lazily dlopen()s libicucore and resolves the table on first call; process-wide
+ * singleton. Never NULL — check ->available. (runtime/skia_shim.c) */
+const RxICU *rx_icu(void);
 
 /* ---- the resolved loader ---- */
 typedef struct {
@@ -184,12 +605,15 @@ typedef struct {
 
     pfn_canvas_save             canvas_save;
     pfn_canvas_restore          canvas_restore;
+    pfn_canvas_save_layer       canvas_save_layer;
     pfn_canvas_get_save_count   canvas_get_save_count;
     pfn_canvas_restore_to_count canvas_restore_to_count;
     pfn_canvas_translate        canvas_translate;
     pfn_canvas_scale            canvas_scale;
     pfn_canvas_rotate_degrees   canvas_rotate_degrees;
     pfn_canvas_reset_matrix     canvas_reset_matrix;
+    pfn_canvas_skew             canvas_skew;
+    pfn_canvas_concat           canvas_concat;
     pfn_canvas_clip_rect        canvas_clip_rect;
     pfn_canvas_clip_rrect       canvas_clip_rrect;
 
@@ -200,6 +624,7 @@ typedef struct {
     pfn_image_get_height        image_get_height;
     pfn_image_unref             image_unref;
     pfn_canvas_draw_image_rect  canvas_draw_image_rect;
+    pfn_surface_new_image_snapshot surface_new_image_snapshot;
 
     pfn_rrect_new               rrect_new;
     pfn_rrect_delete            rrect_delete;
@@ -213,6 +638,10 @@ typedef struct {
     pfn_paint_set_stroke_width paint_set_stroke_width;
     pfn_paint_set_shader       paint_set_shader;
     pfn_paint_set_maskfilter   paint_set_maskfilter;
+    pfn_paint_set_blendmode    paint_set_blendmode;
+    pfn_imagefilter_new_blur   imagefilter_new_blur;
+    pfn_imagefilter_unref      imagefilter_unref;
+    pfn_paint_set_imagefilter  paint_set_imagefilter;
 
     pfn_shader_new_linear_gradient shader_new_linear_gradient;
     pfn_shader_new_radial_gradient shader_new_radial_gradient;
@@ -220,12 +649,81 @@ typedef struct {
     pfn_maskfilter_new_blur        maskfilter_new_blur;
     pfn_maskfilter_unref           maskfilter_unref;
 
-    pfn_typeface_create_default typeface_create_default;
-    pfn_font_new_with_values    font_new_with_values;
-    pfn_font_set_size           font_set_size;
-    pfn_font_delete             font_delete;
-    pfn_font_measure_text       font_measure_text;
-    pfn_font_get_metrics        font_get_metrics;
+    pfn_typeface_create_default   typeface_create_default;
+    pfn_typeface_create_from_name typeface_create_from_name;
+    pfn_typeface_unref            typeface_unref;
+    pfn_fontstyle_new             fontstyle_new;
+    pfn_fontstyle_delete          fontstyle_delete;
+    pfn_font_new_with_values      font_new_with_values;
+    pfn_font_set_size             font_set_size;
+    pfn_font_delete               font_delete;
+    pfn_font_measure_text         font_measure_text;
+    pfn_font_get_metrics          font_get_metrics;
+
+    /* Per-character font fallback (OPTIONAL; absence leaves fallback_ok = 0 so
+     * draw_text_fallback reports Err and the non-fallback path is unaffected). */
+    pfn_fontmgr_ref_default                  fontmgr_ref_default;
+    pfn_fontmgr_unref                        fontmgr_unref;
+    pfn_fontmgr_match_family_style_character fontmgr_match_character;
+    pfn_typeface_unichar_to_glyph            typeface_unichar_to_glyph;
+    pfn_typeface_get_family_name             typeface_get_family_name;
+    pfn_string_get_c_str                     string_get_c_str;
+    pfn_string_get_size                      string_get_size;
+    pfn_string_destructor                    string_destructor;
+    pfn_font_set_typeface                    font_set_typeface;
+    pfn_font_unichar_to_glyph                font_unichar_to_glyph;
+    pfn_font_get_widths_bounds               font_get_widths_bounds;
+    int fallback_ok;  /* 1 iff every fontmgr-fallback symbol resolved */
+
+    pfn_path_new           path_new;
+    pfn_path_delete        path_delete;
+    pfn_path_move_to       path_move_to;
+    pfn_path_line_to       path_line_to;
+    pfn_path_quad_to       path_quad_to;
+    pfn_path_cubic_to      path_cubic_to;
+    pfn_path_arc_to        path_arc_to;
+    pfn_path_close         path_close;
+    pfn_path_set_filltype  path_set_filltype;
+    pfn_canvas_draw_path   canvas_draw_path;
+
+    /* Path effects (dashing) — OPTIONAL; absence makes draw_dashed_line Err. */
+    pfn_path_effect_create_dash path_effect_create_dash;
+    pfn_path_effect_unref       path_effect_unref;
+    pfn_paint_set_path_effect   paint_set_path_effect;
+
+    /* Ganesh GL backend (OPTIONAL; absence disables only the GPU rung). */
+    pfn_gr_glinterface_assemble_gl       gr_glinterface_assemble_gl;
+    pfn_gr_glinterface_create_native     gr_glinterface_create_native;
+    pfn_gr_glinterface_unref             gr_glinterface_unref;
+    pfn_gr_direct_context_make_gl        gr_direct_context_make_gl;
+    pfn_gr_recording_context_unref       gr_recording_context_unref;
+    pfn_gr_direct_context_flush          gr_direct_context_flush;
+    pfn_gr_direct_context_flush_and_submit gr_direct_context_flush_and_submit;
+    pfn_gr_backendrendertarget_new_gl    gr_backendrendertarget_new_gl;
+    pfn_gr_backendrendertarget_delete    gr_backendrendertarget_delete;
+    pfn_surface_new_backend_render_target surface_new_backend_render_target;
+    int gpu_gl_ok;   /* 1 iff every required GPU-GL symbol resolved */
+
+    /* Ganesh Metal backend + offscreen GPU surface + readback (OPTIONAL;
+     * absence disables only the Metal rung). gr_backendrendertarget_new_metal
+     * wraps an on-screen drawable's texture; offscreen uses surface_new_render_target. */
+    pfn_gr_direct_context_make_metal     gr_direct_context_make_metal;
+    pfn_surface_new_render_target        surface_new_render_target;
+    pfn_gr_backendrendertarget_new_metal gr_backendrendertarget_new_metal;
+    pfn_surface_read_pixels              surface_read_pixels;
+    int gpu_metal_ok;  /* 1 iff offscreen GPU-Metal/readback symbols resolved */
+    int gpu_metal_window_ok;  /* 1 iff on-screen drawable-wrap symbols also resolved */
+
+    /* Positioned-glyph rendering for shaped text (OPTIONAL; absence disables
+     * only shaping — the non-shaped text path is untouched). */
+    pfn_typeface_create_from_file        typeface_create_from_file;
+    pfn_textblob_builder_new             textblob_builder_new;
+    pfn_textblob_builder_delete          textblob_builder_delete;
+    pfn_textblob_builder_alloc_run_pos   textblob_builder_alloc_run_pos;
+    pfn_textblob_builder_make            textblob_builder_make;
+    pfn_textblob_unref                   textblob_unref;
+    pfn_canvas_draw_text_blob            canvas_draw_text_blob;
+    int glyph_render_ok;  /* 1 iff every textblob/typeface-from-file symbol resolved */
 } RxSkia;
 
 /* Lazily dlopen()s libSkiaSharp and resolves the table on first call; returns

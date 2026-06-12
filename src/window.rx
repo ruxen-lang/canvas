@@ -24,7 +24,7 @@ class Window
   ## `present` blits to. Tests and CI never call `show`.
   def self.open(title: String, width: Int, height: Int) -> Result[Window, String]
     if !Rxc.valid_dimensions(width, height)
-      return Err(String.from("canvas: invalid window size #{width}x#{height}"))
+      return Err("canvas: invalid window size #{width}x#{height}")
     end
     let canvas = Canvas.create(width, height)?
     Ok(Window.new(canvas, title, width, height, false))
@@ -42,14 +42,54 @@ class Window
     if self.windowed
       return Ok(nil)
     end
-    let t = String.from("#{self.title}")
+    let t = "#{self.title}"
     let code = self.canvas.show_window(t)
     if code == 0
       self.windowed = true
       Ok(nil)
     else
-      Err(String.from("canvas: show failed with status #{code}"))
+      Err("canvas: show failed with status #{code}")
     end
+  end
+
+  ## Put a real OS window on screen for this canvas, backed by the GPU when it
+  ## can be created (docs/GPU.md). Backend-selection ladder (top rung first):
+  ## on Apple, **on-screen Metal** (SDL_WINDOW_METAL + CAMetalLayer + a per-frame
+  ## drawable surface); then the **GL window** (SDL_WINDOW_OPENGL + Ganesh GL);
+  ## then the **raster** window blit. On ANY failure at a rung it falls through to
+  ## the next, and a fully headless / no-display host lands on raster (or stays
+  ## headless) — drawing always works and never produces wrong pixels. After a
+  ## successful GPU `show_gpu`, `canvas.gpu_active?` is true and `present` presents
+  ## the GPU frame (Metal drawable present / GL buffer swap) instead of the raster
+  ## blit; `canvas.gpu_backend_kind` reports which (2 Metal / 1 GL).
+  def var show_gpu -> Result[nil, String]
+    self.show_gpu_scaled(1)
+  end
+
+  ## `show_gpu` opening the on-screen window at `scale` × the design (logical)
+  ## size, so a 320×360 UI can appear in a 640×720-point window — while the
+  ## design→backing content scale (canvas L1) still fills it crisply at native
+  ## density. This is the crisp replacement for `show_scaled`: an app draws at
+  ## design coordinates and gets a `scale`-sized window with native-resolution
+  ## text/shapes, no per-app coordinate scaling. Ladder: on-screen Metal → GL
+  ## window → raster (the raster rung uses the same `scale`).
+  def var show_gpu_scaled(scale: Int) -> Result[nil, String]
+    if self.windowed
+      return Ok(nil)
+    end
+    # Rung 1: on-screen Metal (Apple). Needs SDL + a display + Ganesh Metal.
+    if self.canvas.raw.enable_gpu_windowed_raw(scale) == 0
+      self.windowed = true
+      return Ok(nil)
+    end
+    # Rung 2: GL window. enable_gpu_windowed tore any partial Metal window back
+    # down on failure, so this is a clean attempt.
+    if self.canvas.raw.enable_gpu_raw(scale) == 0
+      self.windowed = true
+      return Ok(nil)
+    end
+    # Rung 3: raster window blit at the same scale (or clean headless failure).
+    self.show_scaled(scale)
   end
 
   ## `show` at an explicit integer zoom (1-8; 0 = auto): the OS window
@@ -61,26 +101,63 @@ class Window
     end
     # interpolation copy: `self.title.clone` mis-reads the field through
     # self (compiler bug family); building a fresh String works
-    let t = String.from("#{self.title}")
+    let t = "#{self.title}"
     let code = self.canvas.show_window_scaled(t, scale)
     if code == 0
       self.windowed = true
       Ok(nil)
     else
       # 6 = SDL unavailable / no display, 1 = bad args (see sdl_window.c)
-      Err(String.from("canvas: show failed with status #{code}"))
+      Err("canvas: show failed with status #{code}")
     end
   end
 
-  ## Blit the canvas to the OS window (call after `end_frame`). Errs when
-  ## the window is not shown.
+  ## Present the canvas to the OS window (call after `end_frame`). Routes by the
+  ## active backend: on-screen **Metal** presents the frame's CAMetalLayer drawable;
+  ## **GL** swaps the back buffer; **raster** blits the framebuffer. The frame was
+  ## already flushed/submitted in `end_frame`. Errs when the window is not shown.
   def var present -> Result[nil, String]
-    let code = self.canvas.raw.window_present
+    let code = if self.canvas.raw.window_is_metal == 1
+      self.canvas.raw.window_metal_present
+    elsif self.canvas.gpu_active?
+      self.canvas.raw.window_gl_present
+    else
+      self.canvas.raw.window_present
+    end
     if code == 0
       Ok(nil)
     else
-      Err(String.from("canvas: present failed with status #{code}"))
+      Err("canvas: present failed with status #{code}")
     end
+  end
+
+  ## Render one full frame: `begin_frame`, run the block on this window's
+  ## `&var Canvas`, `end_frame`, then `present` (only when the window is on
+  ## screen — headless windows skip the present, since drawing + readback work
+  ## without an OS window). The four-call paint dance every render loop does
+  ## today collapses to:
+  ##
+  ##   window.frame do |c: &var Canvas|
+  ##     match c.clear(bg) ... end
+  ##     match c.draw_rect(r, fg) ... end
+  ##   end
+  ##
+  ## The block draws on the borrowed canvas. Any error short-circuits to `Err`
+  ## with the failing stage's message: a failed `begin_frame` means the block
+  ## never runs; a failed `end_frame` or `present` propagates after it. A block
+  ## is REQUIRED — a blockless call is `Err("frame requires a block")`, never a
+  ## silent empty frame.
+  def var frame(&block: Fn[(&var Canvas) -> nil]) -> Result[nil, String]
+    if !block_defined?
+      return Err("canvas: frame requires a block")
+    end
+    self.canvas.begin_frame()?
+    yield(&var self.canvas)
+    self.canvas.end_frame()?
+    if self.windowed
+      self.present()?
+    end
+    Ok(nil)
   end
 
   ## Drain pending OS input into the event queue without popping any;
@@ -90,12 +167,82 @@ class Window
     self.canvas.raw.window_pump
   end
 
-  ## Take the OS window off screen (idempotent; the canvas stays fully
-  ## usable headless). Call when handling `Event.CloseRequested`.
+  ## Take THIS window off screen (idempotent; the canvas stays fully usable
+  ## headless, and any OTHER open windows are unaffected). Call when handling
+  ## `Event.CloseRequested`. Multi-window safe: routes through the per-host
+  ## teardown so only this window is destroyed.
   def var hide -> nil
     if self.windowed
-      let _ = RawHost.window_destroy
+      let _ = self.canvas.raw.window_destroy_for
       self.windowed = false
+    end
+  end
+
+  ## ---- desktop window management (Phase-1.5) ----
+  ##
+  ## Each setter controls THIS window (resolved per-window in the C shim by the
+  ## owning host). `Ok(nil)` on success; `Err` when the window is not on screen
+  ## (nothing to control) or when SDL / the entry point is unavailable. On a
+  ## fullscreen / maximize / minimize / restore transition SDL fires a window
+  ## event that the pump turns into `Event.Resize` (re-creating the GPU surface at
+  ## the new backing size), so callers handle the size change through the normal
+  ## event stream — the setters do not return the new size.
+
+  ## Toggle borderless desktop fullscreen on/off (`SDL_WINDOW_FULLSCREEN_DESKTOP`
+  ## — the window fills the desktop with no display-mode switch, the modern
+  ## default; instant alt-tab, no resolution flicker). A following `Event.Resize`
+  ## delivers the new drawable size.
+  def var set_fullscreen(on: Bool) -> Result[nil, String]
+    let flag = if on
+      1
+    else
+      0
+    end
+    self.window_mgmt_result(self.canvas.raw.window_set_fullscreen(flag), "set_fullscreen")
+  end
+
+  ## Maximize this window (fill the work area, keeping the title bar). A following
+  ## `Event.Resize` delivers the new size.
+  def var maximize -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_maximize, "maximize")
+  end
+
+  ## Minimize this window to the taskbar/dock. While minimized, `present` is a
+  ## no-op (the drawable is occluded), so the render loop costs nothing; `restore`
+  ## brings it back. No `Event.Resize` fires on minimize (the design size is
+  ## unchanged — only visibility changed).
+  def var minimize -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_minimize, "minimize")
+  end
+
+  ## Restore this window from minimized/maximized back to its normal size. A
+  ## following `Event.Resize` re-establishes the drawable size + content scale.
+  def var restore -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_restore, "restore")
+  end
+
+  ## Set the minimum size (logical points, both >= 0) the user may resize this
+  ## window to. `Err` for a negative dimension, no window, or no SDL.
+  def var set_min_size(w: Int, h: Int) -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_set_min_size(w, h), "set_min_size")
+  end
+
+  ## Set the maximum size (logical points, both >= 0) the user may resize this
+  ## window to. `Err` for a negative dimension, no window, or no SDL.
+  def var set_max_size(w: Int, h: Int) -> Result[nil, String]
+    self.window_mgmt_result(self.canvas.raw.window_set_max_size(w, h), "set_max_size")
+  end
+
+  ## Map a window-management status code to a Result. Distinguishes the bad-args
+  ## case (negative size / invalid) from the no-window / no-SDL case so the error
+  ## message is actionable.
+  def window_mgmt_result(code: Int, op: String) -> Result[nil, String]
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_bad_args(code)
+      Err("canvas: #{op} failed: invalid argument")
+    else
+      Err("canvas: #{op} failed (window not shown / no SDL)")
     end
   end
 
@@ -104,9 +251,317 @@ class Window
     self.canvas.raw.sleep_ms_raw(ms)
   end
 
+  ## The engine's monotonic clock in NANOSECONDS (docs/decisions/frame-pacing.md).
+  ## Never jumps backward (NTP/DST-immune), so a frame delta is always >= 0; the
+  ## epoch is fixed-but-unspecified for the process, so only DIFFERENCES are
+  ## meaningful — which is all an animation/frame timebase needs. This is the real
+  ## timebase L2's animation ticker drives against, replacing the blind `sleep_ms`.
+  def ticks_ns -> Int
+    self.canvas.raw.ticks_ns_raw
+  end
+
+  ## The engine's monotonic clock in MILLISECONDS — `ticks_ns / 1_000_000`, the
+  ## convenience most loops want. Same monotonic, difference-only timebase.
+  def ticks_ms -> Int
+    self.canvas.raw.ticks_ns_raw / 1000000
+  end
+
+  ## Pace this frame to an ABSOLUTE monotonic target tick (`target_ns`, in the
+  ## `ticks_ns` timebase). Capture `start = ticks_ns` at the top of the frame, do
+  ## the frame's work + `present`, then `wait_frame(start + interval_ns)`. Sleeps
+  ## the remainder when the frame finished early; returns immediately when it
+  ## overran (pacing fills slack, it never ADDS latency to a late frame). The
+  ## absolute target self-corrects: advance `target += interval` each frame and
+  ## early/late frames converge back onto the grid without drift.
+  ##
+  ## On the on-screen Metal/GL backends the present already blocks on vsync, so
+  ## this is a no-op-by-design there (the frame is already paced); it is the
+  ## software clock for the raster / headless path and the one uniform pacing seam
+  ## L2 calls regardless of backend. Does NOT build a timer/callback loop — that
+  ## is L2's animation loop to own; this is just the frame-boundary wait.
+  def wait_frame(target_ns: Int) -> nil
+    self.canvas.raw.wait_until_ns_raw(target_ns)
+  end
+
+  ## The desktop display's refresh rate in Hz (docs/decisions/frame-pacing.md) —
+  ## a HINT for choosing the pacing interval (`1_000_000_000 / hz` ns), not a
+  ## pacing mechanism (that is `wait_frame`). `Ok(hz)` when SDL + a display are
+  ## available; `Err` when headless / no SDL / the rate is unspecified — the
+  ## caller then picks a fallback (typically 60) rather than dividing by a bogus 0.
+  def self.refresh_rate -> Result[Int, String]
+    let hz = RawHost.refresh_rate
+    if hz > 0
+      Ok(hz)
+    else
+      Err("canvas: refresh_rate unavailable (no SDL / no display)")
+    end
+  end
+
+  ## The refresh rate in Hz of the display THIS window is currently on — the
+  ## multi-monitor upgrade of the static `Window.refresh_rate` (which always reads
+  ## display 0). When the window is dragged to a second monitor with a different
+  ## rate (e.g. a 144 Hz panel), this reports THAT display's rate, so an app paces
+  ## to the monitor the window actually lives on. `Ok(hz)` when the window is on
+  ## screen and SDL can read its display mode; `Err` when the window is not shown
+  ## (nothing to query — use the static `Window.refresh_rate` for a display-0 hint
+  ## before showing) or SDL / the rate is unavailable. The forked test harness opens
+  ## no real window, so it Errs there (the pin asserts that contract); the live
+  ## per-monitor behavior is proven on a real multi-display desktop.
+  def refresh_rate -> Result[Int, String]
+    let hz = self.canvas.raw.window_refresh_rate
+    if hz > 0
+      Ok(hz)
+    else
+      Err("canvas: refresh_rate unavailable (window not shown / no SDL / no display)")
+    end
+  end
+
+  ## The system clipboard's text (E2 desktop services), via SDL's clipboard —
+  ## works without an on-screen window. `Ok(text)` (the text may be the empty
+  ## string when the clipboard holds no text — still a valid `Ok`), or `Err` when
+  ## SDL / the clipboard is unavailable (no SDL installed, or a headless host
+  ## without a clipboard backend). Process-global, so it is a class method.
+  def self.clipboard_text -> Result[String, String]
+    if RawHost.clipboard_available == 1
+      Ok(RawHost.clipboard_get)
+    else
+      Err("canvas: clipboard unavailable (no SDL / no clipboard backend)")
+    end
+  end
+
+  ## Set the system clipboard text (E2 desktop services), via SDL's clipboard.
+  ## `Ok(nil)` on success, `Err` when SDL / the clipboard is unavailable.
+  ## Process-global, so it is a class method.
+  def self.set_clipboard_text(text: String) -> Result[nil, String]
+    let code = RawHost.clipboard_set(&text)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_clipboard_text failed (no SDL / no clipboard backend)")
+    end
+  end
+
+  ## Set the mouse cursor to a stock system cursor (E2 desktop services), via
+  ## `SDL_CreateSystemCursor`. `kind` is a small int enum (use the `Window.cursor_*`
+  ## constants): 0 arrow, 1 ibeam (text), 2 hand (link), 3 crosshair, 4 resize-h
+  ## (↔), 5 resize-v (↕). Stock cursors are cached per process, so changing the
+  ## cursor every hover is cheap. `Ok(nil)` on success; `Err` for an out-of-range
+  ## kind or when SDL / a real cursor backend is unavailable (e.g. a headless host
+  ## — the cursor is then simply not changed, never a crash). Cursor state is
+  ## process-global, so this is a class method.
+  def self.set_cursor(kind: Int) -> Result[nil, String]
+    let code = RawHost.set_cursor(kind)
+    if code == 0
+      Ok(nil)
+    elsif Rxc.is_bad_args(code)
+      Err("canvas: set_cursor failed: unknown cursor kind #{kind}")
+    else
+      Err("canvas: set_cursor failed (no SDL / no cursor backend)")
+    end
+  end
+
+  ## True when stock system cursors are usable here (SDL loaded + a real video
+  ## backend). False on a headless host (the dummy driver has no cursor backend).
+  ## A capability probe so callers can skip cursor changes when unavailable.
+  def self.cursors_available? -> Bool
+    RawHost.cursor_available == 1
+  end
+
+  ## ---- native file dialogs (Phase 2, macOS) ----
+  ##
+  ## NSOpenPanel / NSSavePanel via the objc runtime through `dlopen` — no new link
+  ## dependency (the same pattern the Metal device path uses). The panels are MODAL
+  ## and run on the main thread; the engine is single-threaded on main, so these are
+  ## direct synchronous calls that return once the user confirms or cancels.
+  ##
+  ## HONEST-SCOPE: Cocoa is unsafe after `fork()`-without-`exec()` (the same
+  ## constraint as Metal/CF), and the test harness forks per case, so under the
+  ## harness these are gated OFF and return `Err` — the headless contract the pin
+  ## asserts. The live modal (which needs a real click) is proven by the manual
+  ## `examples/file_dialog_verify.c`, not by any automated test.
+
+  ## Show a modal "Open file" dialog and return the chosen file's path. `Ok(path)`
+  ## when the user picks a file; `Err` when they cancel, or when file dialogs are
+  ## unavailable (headless / not macOS / the forked harness). Process-global modal,
+  ## so a class method.
+  def self.open_file_dialog -> Result[String, String]
+    if RawHost.file_dialog_available != 1
+      return Err("canvas: file dialogs unavailable (headless / not macOS)")
+    end
+    let path = RawHost.open_file_dialog
+    if path == ""
+      Err("canvas: open file dialog cancelled")
+    else
+      Ok(path)
+    end
+  end
+
+  ## Show a modal "Save file" dialog (pre-filling the name field with
+  ## `default_name`) and return the chosen save path. `Ok(path)` when the user
+  ## confirms a location; `Err` on cancel or when file dialogs are unavailable.
+  ## Process-global modal, so a class method.
+  def self.save_file_dialog(default_name: String) -> Result[String, String]
+    if RawHost.file_dialog_available != 1
+      return Err("canvas: file dialogs unavailable (headless / not macOS)")
+    end
+    let path = RawHost.save_file_dialog(&default_name)
+    if path == ""
+      Err("canvas: save file dialog cancelled")
+    else
+      Ok(path)
+    end
+  end
+
+  ## True when native file dialogs can run here (objc + AppKit reachable, not under
+  ## the forked test harness). A capability probe so callers can hide a "browse…"
+  ## button on a host without dialogs.
+  def self.file_dialogs_available? -> Bool
+    RawHost.file_dialog_available == 1
+  end
+
+  ## --- Accessibility bridge (Phase 3, docs/decisions/accessibility.md) ---
+  ## L2 (quiver) describes its a11y tree to L1 as a FLAT list of nodes; L1 stores
+  ## it (the intake below — engine-side, headless) and exposes it to macOS
+  ## NSAccessibility (the live window touches — fork-gated). Tree updates are
+  ## wholesale re-push: `clear_a11y_tree` then `push_a11y_node` per node.
+
+  ## True when the live macOS a11y bridge can run here (objc + AppKit reachable,
+  ## not under the forked harness). a11y is a live-window-only capability; false
+  ## headless, so callers degrade cleanly. The engine-side intake works regardless.
+  def self.a11y_available? -> Bool
+    RawHost.a11y_available == 1
+  end
+
+  ## Set the application's accessibility title/label (the window-level a11y
+  ## exposure). `Ok(nil)` on success; `Err` headless / not macOS / forked harness.
+  def self.set_a11y_title(title: String) -> Result[nil, String]
+    let code = RawHost.set_a11y_title(&title)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_a11y_title unavailable (headless / not macOS)")
+    end
+  end
+
+  ## Expose the engine-side a11y tree (the nodes pushed via `push_a11y_node`) to
+  ## macOS as NSAccessibility CHILD elements on THIS window's content view, so
+  ## VoiceOver enumerates the app's controls. Call after staging the tree and
+  ## showing the window; it replaces the child array wholesale (Tier-1 re-push).
+  ## `Ok(nil)` on success; `Err` headless / forked / no reachable live window.
+  ## The exposure is the Metal-window path (the real macOS backend); a pure-raster
+  ## window's NSWindow access is the documented remainder, so this Errs there.
+  def var sync_a11y_children -> Result[nil, String]
+    let code = self.canvas.raw.window_sync_a11y_children
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: sync_a11y_children unavailable (headless / no live window)")
+    end
+  end
+
+  ## Point VoiceOver's focus at the stored a11y node with L2 id `id` (its built
+  ## child element becomes the window's focused UI element). Call after
+  ## `sync_a11y_children` built the elements. `Ok(nil)` on success; `Err` when no
+  ## node has that id, there is no live window, or headless.
+  def var set_a11y_focus(id: Int) -> Result[nil, String]
+    let code = self.canvas.raw.window_set_a11y_focus(id)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: set_a11y_focus unavailable (no such node / headless / no window)")
+    end
+  end
+
+  ## Push (append or replace by `id`) one accessibility node into the engine's
+  ## a11y tree: `role` is a stable int (0 group / 1 button / 2 static-text /
+  ## 3 image / 4 heading / 5 link — `Window.a11y_role_*`), `label` the spoken
+  ## label, `(x, y, w, h)` the element frame in window points. `Ok(nil)` on
+  ## success; `Err` when the tree is full. Engine-side, so it works headless (the
+  ## macOS exposure of these nodes as child elements is the staged remainder).
+  def self.push_a11y_node(id: Int, role: Int, label: String, x: Float32, y: Float32, w: Float32, h: Float32) -> Result[nil, String]
+    let code = RawHost.push_a11y_node(id, role, &label, x as Float, y as Float, w as Float, h as Float)
+    if code == 0
+      Ok(nil)
+    else
+      Err("canvas: a11y tree full")
+    end
+  end
+
+  ## Drop all accessibility nodes (the start of a wholesale re-push).
+  def self.clear_a11y_tree -> nil
+    let _ = RawHost.clear_a11y_tree
+    nil
+  end
+
+  ## The number of accessibility nodes currently stored.
+  def self.a11y_node_count -> Int
+    RawHost.a11y_node_count
+  end
+
+  ## The role of the n-th stored a11y node (0-based), or -1 if out of range.
+  def self.a11y_node_role(n: Int) -> Int
+    RawHost.a11y_node_role(n)
+  end
+
+  ## The label of the n-th stored a11y node (0-based), or "" if out of range.
+  def self.a11y_node_label(n: Int) -> String
+    RawHost.a11y_node_label(n)
+  end
+
+  ## Accessibility role constants for `push_a11y_node`.
+  def self.a11y_role_group -> Int
+    0
+  end
+
+  def self.a11y_role_button -> Int
+    1
+  end
+
+  def self.a11y_role_static_text -> Int
+    2
+  end
+
+  def self.a11y_role_image -> Int
+    3
+  end
+
+  def self.a11y_role_heading -> Int
+    4
+  end
+
+  def self.a11y_role_link -> Int
+    5
+  end
+
+  ## Stock cursor-kind constants for `set_cursor` (see its doc), so call sites read
+  ## `Window.set_cursor(Window.cursor_ibeam)` rather than a bare `1`.
+  def self.cursor_arrow -> Int
+    0
+  end
+
+  def self.cursor_ibeam -> Int
+    1
+  end
+
+  def self.cursor_hand -> Int
+    2
+  end
+
+  def self.cursor_crosshair -> Int
+    3
+  end
+
+  def self.cursor_resize_h -> Int
+    4
+  end
+
+  def self.cursor_resize_v -> Int
+    5
+  end
+
   ## Pop the next pending event, or `nil` when the queue is empty.
   ## Event-kind tags match the C shim: 0 PointerMove, 1 PointerDown,
-  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested.
+  ## 2 PointerUp, 3 KeyDown, 4 Resize, 5 CloseRequested, 6 Scroll, 7 TextInput.
   def var poll_event -> Event?
     if self.windowed
       let _ = self.canvas.raw.window_pump
@@ -115,40 +570,154 @@ class Window
     if kind < 0
       return nil
     end
-    let ia = self.canvas.raw.event_ai
-    let ib = self.canvas.raw.event_bi
+    # Coordinate payloads come back as doubles (sub-pixel); KeyDown/TextInput
+    # carry an integer keycode/codepoint, read from the Int accessor so a large
+    # keycode is never rounded through Float32.
+    let fa = self.canvas.raw.event_a as Float32
+    let fb = self.canvas.raw.event_b as Float32
+    let ki = self.canvas.raw.event_ai
     let ev: Event = if kind == 0
-      Event.PointerMove(ia, ib)
+      Event.PointerMove(fa, fb)
     elsif kind == 1
-      Event.PointerDown(ia, ib)
+      Event.PointerDown(fa, fb)
     elsif kind == 2
-      Event.PointerUp(ia, ib)
+      Event.PointerUp(fa, fb)
     elsif kind == 3
-      Event.KeyDown(ia)
+      Event.KeyDown(ki)
     elsif kind == 4
-      Event.Resize(ia, ib)
+      Event.Resize(fa, fb)
+    elsif kind == 6
+      Event.Scroll(fa, fb)
+    elsif kind == 7
+      Event.TextInput(ki)
+    elsif kind == 8
+      # IME composition: start = event_ai, length = event_bi. The marked text
+      # string is read separately via `composition_text` (the side-channel).
+      Event.TextEditing(ki, self.canvas.raw.event_bi)
+    elsif kind == 9
+      # File drop: no coords (SDL gives none). The dropped PATH is read separately
+      # via `dropped_file_path` (the owned-path side-channel).
+      Event.FileDrop
     else
       Event.CloseRequested
     end
     ev
   end
+
+  ## The PATH of the file just dropped — read this immediately after polling an
+  ## `Event.FileDrop`. The string is a side-channel the C ring carries (an OWNED
+  ## heap copy made at pump time, so SDL's own string was freed immediately and
+  ## never dangles, and a long path is NOT truncated). Returns the empty string for
+  ## any non-FileDrop event. A multi-file drop produces several `Event.FileDrop`
+  ## events — poll each and read its path in turn (the path is replaced on the next
+  ## poll, so read it before polling again).
+  def var dropped_file_path -> String
+    self.canvas.raw.event_drop_path
+  end
+
+  ## The IME marked (composition) text of the event JUST returned by `poll_event`
+  ## — read this immediately after polling an `Event.TextEditing`. The string is a
+  ## side-channel the C ring carries alongside the `(start, length)` ints (the ring
+  ## copies it at poll time, so it is never a dangling SDL pointer). Returns the
+  ## empty string for any non-TextEditing event (or when the composition was
+  ## cleared). Apps render this inline (often underlined) until the matching
+  ## `TextInput` commits.
+  def var composition_text -> String
+    self.canvas.raw.event_text
+  end
+
+  ## The keyboard MODIFIER state for the `Event.KeyDown` JUST returned by
+  ## `poll_event` — read this immediately after polling a `KeyDown`. Returns a
+  ## bitmask of the `Window.mod_*` constants (shift / ctrl / alt / gui), e.g.
+  ## `(mods & Window.mod_shift) != 0` tells you Shift was held. The mask is a
+  ## side-channel the ring carries alongside the bare keycode (the `KeyDown(Int)`
+  ## payload is unchanged), so quiver's selection API (Shift+Arrow extends the
+  ## selection, Ctrl/Cmd+A selects all) can read modifiers without a payload
+  ## change. Returns 0 for an unmodified key and for any non-KeyDown event. Left
+  ## and right variants of each modifier are folded into one bit.
+  def var key_modifiers -> Int
+    self.canvas.raw.event_mods
+  end
+
+  ## Modifier-mask constants for `key_modifiers` (see its doc): test with
+  ## `(mods & Window.mod_shift) != 0`. `mod_gui` is Cmd on macOS / Super on Linux /
+  ## Win on Windows. Stable small bits, mirrored from `RX_MOD_*` in the C shim.
+  def self.mod_shift -> Int
+    1
+  end
+
+  def self.mod_ctrl -> Int
+    2
+  end
+
+  def self.mod_alt -> Int
+    4
+  end
+
+  def self.mod_gui -> Int
+    8
+  end
   ## Inject an event into the queue. This is the hook the platform pump
   ## (SDL later) and the pin tests use to feed the stream.
   def var push_event(event: Event) -> Result[nil, String]
     let code = match event
-      Event.PointerMove(x, y) -> self.canvas.raw.push_event_i_raw(0, x, y)
-      Event.PointerDown(x, y) -> self.canvas.raw.push_event_i_raw(1, x, y)
-      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_i_raw(2, x, y)
+      Event.PointerMove(x, y) -> self.canvas.raw.push_event_d_raw(0, x as Float, y as Float)
+      Event.PointerDown(x, y) -> self.canvas.raw.push_event_d_raw(1, x as Float, y as Float)
+      Event.PointerUp(x, y)   -> self.canvas.raw.push_event_d_raw(2, x as Float, y as Float)
       Event.KeyDown(k)        -> self.canvas.raw.push_event_i_raw(3, k, 0)
-      Event.Resize(w, h)      -> self.canvas.raw.push_event_i_raw(4, w, h)
+      Event.Resize(w, h)      -> self.canvas.raw.push_event_d_raw(4, w as Float, h as Float)
       Event.CloseRequested    -> self.canvas.raw.push_event_i_raw(5, 0, 0)
+      Event.Scroll(dx, dy)    -> self.canvas.raw.push_event_d_raw(6, dx as Float, dy as Float)
+      Event.TextInput(cp)     -> self.canvas.raw.push_event_i_raw(7, cp, 0)
+      # An Event value carries only (start, length); the marked text is a separate
+      # side-channel, so injecting an Event.TextEditing pushes an EMPTY marked text.
+      # Tests that need real marked text use `push_composition` (below), which
+      # carries the string through the dedicated text seam.
+      Event.TextEditing(s, l) -> self.canvas.raw.push_event_text_raw(8, s, l, &"")
+      # FileDrop carries no payload in the Event value; the path is a side-channel,
+      # so injecting one pushes an EMPTY path. Tests that need a real path use
+      # `push_file_drop` (below), which carries it through the dedicated seam.
+      Event.FileDrop -> self.canvas.raw.push_event_text_raw(9, 0, 0, &"")
     end
     if Rxc.is_ok(code)
       Ok(nil)
     elsif Rxc.is_queue_full(code)
-      Err(String.from("canvas: push_event failed: event queue is full"))
+      Err("canvas: push_event failed: event queue is full")
     else
-      Err(String.from("canvas: push_event failed: invalid arguments"))
+      Err("canvas: push_event failed: invalid arguments")
+    end
+  end
+
+  ## Inject an IME COMPOSITION (TextEditing) event carrying the marked `text`
+  ## plus the composition cursor `start` and selection `length`. This is the hook
+  ## the SDL pump uses for `SDL_TEXTEDITING` and the one tests use to feed marked
+  ## text (the plain `push_event` can't carry the string). The text is copied into
+  ## the ring, so no caller buffer needs to outlive the call. Poll it back as
+  ## `Event.TextEditing(start, length)` + `composition_text`.
+  def var push_composition(text: String, start: Int, length: Int) -> Result[nil, String]
+    let code = self.canvas.raw.push_event_text_raw(8, start, length, &text)
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err("canvas: push_composition failed: event queue is full")
+    else
+      Err("canvas: push_composition failed: invalid arguments")
+    end
+  end
+
+  ## Inject a FILE-DROP (`Event.FileDrop`) event carrying the dropped `path`. This
+  ## is the hook the SDL pump uses for `SDL_DROPFILE` and the one tests use to feed
+  ## a path (the plain `push_event` can't carry the string). The path is copied
+  ## into the ring (an owned heap copy, no truncation), so no caller buffer needs to
+  ## outlive the call. Poll it back as `Event.FileDrop` + `dropped_file_path`.
+  def var push_file_drop(path: String) -> Result[nil, String]
+    let code = self.canvas.raw.push_event_text_raw(9, 0, 0, &path)
+    if Rxc.is_ok(code)
+      Ok(nil)
+    elsif Rxc.is_queue_full(code)
+      Err("canvas: push_file_drop failed: event queue is full")
+    else
+      Err("canvas: push_file_drop failed: invalid arguments")
     end
   end
 end

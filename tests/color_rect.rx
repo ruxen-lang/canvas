@@ -52,6 +52,17 @@ Tester.describe("Rect") do |t: &var Tester|
     t.expect(a.intersects(&b)).to_eq(false)
   end
 
+  t.it("overlaps is an alias for intersects (same body, both names)") do
+    let a: Rect = Rect.new(0.0f32, 0.0f32, 10.0f32, 10.0f32)
+    let b: Rect = Rect.new(5.0f32, 5.0f32, 10.0f32, 10.0f32)
+    let c: Rect = Rect.new(20.0f32, 20.0f32, 5.0f32, 5.0f32)
+    # The alias name resolves to the canonical method — both agree everywhere.
+    t.expect(a.overlaps(&b)).to_eq(a.intersects(&b))
+    t.expect(a.overlaps(&c)).to_eq(a.intersects(&c))
+    t.expect(a.overlaps(&b)).to_eq(true)
+    t.expect(a.overlaps(&c)).to_eq(false)
+  end
+
   t.it("is_empty for zero or negative extents") do
     let zero_w: Rect = Rect.new(0.0f32, 0.0f32, 0.0f32, 5.0f32)
     let normal: Rect = Rect.new(0.0f32, 0.0f32, 5.0f32, 5.0f32)

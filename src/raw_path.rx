@@ -1,0 +1,19 @@
+## INTERNAL — raw handle over a Skia path builder (an `sk_path` pointer).
+## Use `Path2D`; this is the step-2 `lib` declaration (docs/FFI.md). The handle
+## owns the path and frees it on `drop`. Builder ops require the Skia backend;
+## with no library they return RXC_ERR_NO_SKIA and the handle is null.
+class RawPath
+  lib "runtime/skia_shim.c"
+    def self.alloc_raw as "ruxen_canvas_path_new" -> RawPath
+    def is_null as "ruxen_canvas_path_is_null"(self) -> Bool
+    def move_to_raw as "ruxen_canvas_path_move_to"(self, x: Float, y: Float) -> Int
+    def line_to_raw as "ruxen_canvas_path_line_to"(self, x: Float, y: Float) -> Int
+    def quad_to_raw as "ruxen_canvas_path_quad_to"(self, cx: Float, cy: Float, x: Float, y: Float) -> Int
+    def cubic_to_raw as "ruxen_canvas_path_cubic_to"(self, c1x: Float, c1y: Float, c2x: Float, c2y: Float, x: Float, y: Float) -> Int
+    def arc_to_raw as "ruxen_canvas_path_arc_to"(self, rx: Float, ry: Float, x_axis_rotate: Float, large_arc: Int, sweep: Int, x: Float, y: Float) -> Int
+    def close_raw as "ruxen_canvas_path_close"(self) -> Int
+    def set_fill_type_raw as "ruxen_canvas_path_set_fill_type"(self, even_odd: Int) -> Int
+    def ptr as "ruxen_canvas_path_ptr"(self) -> Int
+    def drop as "ruxen_canvas_path_drop"(self) -> nil
+  end
+end

@@ -1,0 +1,161 @@
+# Pin tests for desktop window management (docs/ROADMAP.md Phase-1.5):
+# Window#set_fullscreen / maximize / minimize / restore / set_min_size /
+# set_max_size, plus the pump's MINIMIZED/MAXIMIZED/RESTORED/DISPLAY_CHANGED
+# window-event handling.
+#
+# The forked test harness opens NO real OS window (CoreFoundation/AppKit are
+# unsafe post-fork — see runtime/sdl_window.c rx_window_allowed), so a headless
+# Window has no live slot: every setter must Err cleanly (never crash). The live
+# behaviour (the window actually goes fullscreen / minimizes) is proven by
+# examples/window_mgmt_verify.c on a real display. The minimized-present contract
+# and the subtype->Resize logic ARE exercised headless via the window-event seam.
+
+Tester.describe("Window management") do |t: &var Tester|
+  t.it("setters Err cleanly when the window is not on screen") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # No show() in the harness -> no live slot -> each setter Errs (not a crash).
+    var fs_failed = false
+    match w.set_fullscreen(true)
+      Ok(_)  -> nil
+      Err(_) -> fs_failed = true
+    end
+    t.expect(fs_failed).to_eq(true)
+
+    var max_failed = false
+    match w.maximize
+      Ok(_)  -> nil
+      Err(_) -> max_failed = true
+    end
+    t.expect(max_failed).to_eq(true)
+
+    var min_failed = false
+    match w.minimize
+      Ok(_)  -> nil
+      Err(_) -> min_failed = true
+    end
+    t.expect(min_failed).to_eq(true)
+
+    var res_failed = false
+    match w.restore
+      Ok(_)  -> nil
+      Err(_) -> res_failed = true
+    end
+    t.expect(res_failed).to_eq(true)
+  end
+
+  t.it("set_min_size / set_max_size Err with no window") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    var min_failed = false
+    match w.set_min_size(100, 80)
+      Ok(_)  -> nil
+      Err(_) -> min_failed = true
+    end
+    t.expect(min_failed).to_eq(true)
+
+    var max_failed = false
+    match w.set_max_size(800, 600)
+      Ok(_)  -> nil
+      Err(_) -> max_failed = true
+    end
+    t.expect(max_failed).to_eq(true)
+  end
+
+  t.it("set_min_size rejects a negative dimension with a bad-args code") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # bad-args (code 1) is checked in the shim BEFORE the slot lookup, so a
+    # negative size is rejected as invalid regardless of window state — distinct
+    # from the no-window present error (code 5).
+    t.expect(w.canvas.raw.window_set_min_size(-1, 80)).to_eq(1)
+    var failed = false
+    match w.set_min_size(-1, 80)
+      Ok(_)  -> nil
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+  end
+
+  t.it("set_max_size rejects a negative dimension with a bad-args code") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    t.expect(w.canvas.raw.window_set_max_size(800, -5)).to_eq(1)
+    var failed = false
+    match w.set_max_size(800, -5)
+      Ok(_)  -> nil
+      Err(_) -> failed = true
+    end
+    t.expect(failed).to_eq(true)
+  end
+
+  t.it("MINIMIZED sets the minimized flag (present becomes a no-op)") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # subtype 6 = SDL_WINDOWEVENT_MINIMIZED. The seam returns the resulting flag.
+    let flag = w.canvas.raw.window_pump_test_window_event(6, 200, 150)
+    t.expect(flag).to_eq(1)
+    # MINIMIZED emits NO Resize (design size unchanged) — the ring stays empty.
+    match w.poll_event
+      nil -> t.expect(true).to_eq(true)
+      _   -> panic!("MINIMIZED should not emit an event")
+    end
+  end
+
+  t.it("RESTORED clears minimized and emits a Resize in design coords") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # subtype 8 = SDL_WINDOWEVENT_RESTORED.
+    let flag = w.canvas.raw.window_pump_test_window_event(8, 200, 150)
+    t.expect(flag).to_eq(0)
+    match w.poll_event
+      Some(Event.Resize(rw, rh)) ->
+        t.expect(rw as Int).to_eq(200)
+        t.expect(rh as Int).to_eq(150)
+      _ -> panic!("RESTORED should emit Event.Resize(200,150)")
+    end
+  end
+
+  t.it("DISPLAY_CHANGED emits a Resize so L2 re-derives content scale") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # subtype 18 = SDL_WINDOWEVENT_DISPLAY_CHANGED (DPI / monitor move). Carries
+    # the unchanged design size — the content scale changed, not the design size.
+    let flag = w.canvas.raw.window_pump_test_window_event(18, 200, 150)
+    t.expect(flag).to_eq(0)
+    match w.poll_event
+      Some(Event.Resize(rw, rh)) ->
+        t.expect(rw as Int).to_eq(200)
+        t.expect(rh as Int).to_eq(150)
+      _ -> panic!("DISPLAY_CHANGED should emit Event.Resize")
+    end
+  end
+
+  t.it("MAXIMIZED clears minimized and emits a Resize") do
+    var w = match Window.open("mgmt", 200, 150)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    # subtype 7 = SDL_WINDOWEVENT_MAXIMIZED.
+    let flag = w.canvas.raw.window_pump_test_window_event(7, 200, 150)
+    t.expect(flag).to_eq(0)
+    match w.poll_event
+      Some(Event.Resize(_, _)) -> t.expect(true).to_eq(true)
+      _ -> panic!("MAXIMIZED should emit Event.Resize")
+    end
+  end
+end

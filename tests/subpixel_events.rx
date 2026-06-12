@@ -1,0 +1,41 @@
+# Pin: event coordinates are Float32 and SUB-PIXEL precision survives the
+# push -> C double ring -> poll round-trip exactly. This is the capability the
+# Int->Float32 payload revert (ruxen Q28/Q31 fixed) exists to deliver: the
+# pump maps window points -> design coords by a fractional show factor, so
+# fractional coordinates are real data, not rounding noise.
+
+Tester.describe("sub-pixel event coordinates") do |t: &var Tester|
+  t.it("PointerMove(2.5, 3.25) round-trips exactly through the queue") do
+    var w = match Window.open("subpx", 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.PointerMove(2.5f32, 3.25f32))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerMove(x, y)) -> ok = x == 2.5f32 && y == 3.25f32
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+
+  t.it("whole-pixel Int literals still construct and compare (coercion intact)") do
+    var w = match Window.open("subpx2", 16, 16)
+      Ok(v)  -> v
+      Err(_) -> panic!("Window.open failed")
+    end
+    match w.push_event(Event.PointerDown(7, 9))
+      Ok(_)  -> nil
+      Err(_) -> panic!("push_event failed")
+    end
+    var ok = false
+    match w.poll_event
+      Some(Event.PointerDown(x, y)) -> ok = x == 7 && y == 9
+      _ -> ok = false
+    end
+    t.expect(ok).to_eq(true)
+  end
+end

@@ -6,13 +6,25 @@ how Skia is brought in, the integration model, and how to advance the binding.
 
 ## How Skia is brought in: fetch, don't vendor, don't link
 
-- **Binary:** `libSkiaSharp.so`, the prebuilt native library from the NuGet
-  package `SkiaSharp.NativeAssets.Linux`. It exports Skia's flat **`sk_*` C
-  API** (812 functions) — no C++ at the boundary.
-- **Fetched, not committed:** `runtime/fetch_skia.sh` downloads a pinned
-  package version, verifies the SHA-256 of both the package and the extracted
-  `.so`, and installs it to `$HOME/.cache/ruxen-canvas/libSkiaSharp.so`
-  (override the cache dir with `$RUXEN_CANVAS_CACHE`). The `.so` is ~11 MB and
+- **Binary (host-aware):** the prebuilt native library exporting Skia's flat
+  **`sk_*` C API** — no C++ at the boundary.
+  - **Linux** → `libSkiaSharp.so` from `SkiaSharp.NativeAssets.Linux`
+    (`runtimes/<linux-RID>/native/`).
+  - **macOS** → `libSkiaSharp.dylib` from `SkiaSharp.NativeAssets.macOS`
+    (`runtimes/osx/native/`), a **single universal** Mach-O covering arm64 +
+    x86_64. This build has `SK_METAL=1` (links `Metal.framework`), so the Metal
+    backend is real on it — unlike the Linux `.so` (see `docs/GPU.md`).
+  - **macOS also** → `libHarfBuzzSharp.dylib` from
+    `HarfBuzzSharp.NativeAssets.macOS` (HarfBuzz's flat `hb_*` C API), fetched +
+    SHA-pinned by the same script for **text shaping** (kerning / ligatures /
+    RTL) — libSkiaSharp has no SkShaper, so HarfBuzz shapes and Skia's
+    `sk_textblob_*` renders (see `docs/SHAPING.md`). A miss is non-fatal:
+    shaping just reports unavailable.
+- **Fetched, not committed:** `runtime/fetch_skia.sh` is host-aware (selects the
+  package by `uname -s`), downloads a pinned version, verifies the SHA-256 of
+  **both** the package and the extracted binary, and installs it to
+  `$HOME/.cache/ruxen-canvas/libSkiaSharp.{so,dylib}` (basename per platform;
+  override the cache dir with `$RUXEN_CANVAS_CACHE`). The binary is ~11–15 MB and
   is never checked into this public repo — only the tiny C-API header
   (`runtime/skia/skia_capi.h`) is committed.
 - **dlopen, not link:** `runtime/skia_shim.c` `dlopen()`s the library and
@@ -34,12 +46,13 @@ runtime/fetch_skia.sh          # once; idempotent, re-runs are a no-op
 ruxen test                     # the shim finds the .so via the cache path
 ```
 
-The shim looks for the library in this order:
+The shim looks for the library in this order (each cache location tries both the
+`.dylib` and `.so` basenames, native name first per platform):
 
-1. `$RUXEN_CANVAS_SKIA` — explicit absolute path to a `libSkiaSharp.so`
-2. `$RUXEN_CANVAS_CACHE/libSkiaSharp.so`
-3. `$HOME/.cache/ruxen-canvas/libSkiaSharp.so` (where `fetch_skia.sh` installs)
-4. `libSkiaSharp.so` via the system loader (`LD_LIBRARY_PATH`, ldconfig)
+1. `$RUXEN_CANVAS_SKIA` — explicit absolute path to the `.so` / `.dylib`
+2. `$RUXEN_CANVAS_CACHE/libSkiaSharp.{dylib,so}`
+3. `$HOME/.cache/ruxen-canvas/libSkiaSharp.{dylib,so}` (where `fetch_skia.sh` installs)
+4. `libSkiaSharp.{dylib,so}` via the system loader (`LD_LIBRARY_PATH` / `DYLD_*`, ldconfig)
 
 If none resolve, `rx_skia()->available` is 0 and the shim falls back to its
 deterministic **software raster** backend — the build never breaks for lack of

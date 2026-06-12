@@ -1,0 +1,108 @@
+# Pin tests for Canvas#save_layer_blur (docs/ROADMAP.md Phase-1 E1): an offscreen
+# layer whose contents are Gaussian-blurred (sk_imagefilter_new_blur) when restore
+# composites them down. The general blur primitive, generalizing the rrect drop
+# shadow. Skia-only — a clean Err when absent. The decisive proof of blur: a
+# HARD-edged rect drawn inside the layer spreads ink BEYOND its hard edge after
+# restore, so a pixel just outside the rect is no longer pure background.
+
+Tester.describe("Canvas.save_layer_blur") do |t: &var Tester|
+  t.it("blurs layer content: ink spreads past a hard edge") do
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    let res = c.save_layer_blur(3.0f32)
+    if active
+      let _count = match res
+        Ok(v)  -> v
+        Err(e) -> panic!("save_layer_blur failed: #{e}")
+      end
+      # A hard-edged white rect at x∈[10,22], y∈[10,22] inside the blur layer.
+      match c.draw_rect(Rect.new(10.0f32, 10.0f32, 12.0f32, 12.0f32), Color.rgb(255u8, 255u8, 255u8))
+        Ok(_)  -> nil
+        Err(_) -> panic!("draw_rect failed")
+      end
+      match c.restore
+        Ok(_)  -> nil
+        Err(_) -> panic!("restore failed")
+      end
+      match c.end_frame
+        Ok(_)  -> nil
+        Err(_) -> panic!("end_frame failed")
+      end
+      let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+      # (7,16) is 3px OUTSIDE the hard left edge (x=10). With blur, ink spread
+      # there → not pure black. Without blur it would be exactly black.
+      t.expect(c.read_pixel(7, 16) != black).to_eq(true)
+      # The center is still strongly inked (blur dims it but it stays bright).
+      t.expect(c.read_pixel(16, 16) != black).to_eq(true)
+    else
+      # No Skia: a blurred layer can't be faked — must be a clean Err.
+      var failed = false
+      match res
+        Ok(_)  -> nil
+        Err(_) -> failed = true
+      end
+      t.expect(failed).to_eq(true)
+    end
+  end
+
+  t.it("a hard rect WITHOUT the blur layer leaves the same outside pixel black") do
+    # Control: the same geometry drawn with NO blur layer keeps (7,16) pure black,
+    # proving the spread above is the blur, not the rect itself.
+    var c = match Canvas.create(32, 32)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    match c.clear(Color.rgb(0u8, 0u8, 0u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("clear failed")
+    end
+    let active = c.skia_active?
+    match c.draw_rect(Rect.new(10.0f32, 10.0f32, 12.0f32, 12.0f32), Color.rgb(255u8, 255u8, 255u8))
+      Ok(_)  -> nil
+      Err(_) -> panic!("draw_rect failed")
+    end
+    match c.end_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("end_frame failed")
+    end
+    let black = Color.rgb(0u8, 0u8, 0u8).to_argb as Int
+    if active
+      t.expect(c.read_pixel(7, 16)).to_eq(black)   # hard edge: outside stays black
+    else
+      t.expect(true).to_eq(true)
+    end
+  end
+
+  t.it("rejects a non-positive blur sigma") do
+    var c = match Canvas.create(8, 8)
+      Ok(v)  -> v
+      Err(_) -> panic!("create failed")
+    end
+    match c.begin_frame
+      Ok(_)  -> nil
+      Err(_) -> panic!("begin_frame failed")
+    end
+    var bad = false
+    match c.save_layer_blur(0.0f32)
+      Ok(_)  -> bad = false
+      Err(_) -> bad = true
+    end
+    let _ = c.end_frame
+    t.expect(bad).to_eq(true)
+  end
+end
