@@ -536,10 +536,129 @@ zero-ambiguity discipline: each item is `[x]`-with-pin/proof or filed-with-reaso
       the corrected `ruxen test <stem>` convention note (the prior `tests/<file>.rx`
       form was stale — the filter is the file STEM).
 
+## Phase 4 — the platform matrix, desktop half (Linux verified, Windows seamed)
+
+The pass that takes canvas from "macOS-only-verified" to a real desktop matrix:
+**Linux verified locally on a native arm64 container**, **Windows seamed +
+CI-deferred**, and **CI written** for all three. Same zero-ambiguity discipline:
+each item is `[x]`-with-proof or filed-with-reason. macOS stays the home platform —
+nothing here regressed the macOS suite (still 234 green at every commit).
+
+### Part 1 — Linux, VERIFIED locally (arm64 container) ✅
+
+- [x] **Compile hygiene.** Audit verdict: the SDL/GL/raster core + every Apple path
+      (Metal / objc / NSAccessibility / file dialogs) is already portable — it is
+      `void*` + `dlopen` + function-pointer casts with NO Apple headers, so it
+      COMPILES on Linux and resolves to a clean "unavailable" at runtime (the
+      capability probes report false). The one genuinely Apple-only `#include`
+      (`mach-o/dyld.h`) was already `#if defined(__APPLE__)`-guarded. Two real
+      Linux-only compile fixes the GCC build surfaced (clang on macOS doesn't warn):
+      (1) `-Wmisleading-indentation` on three multi-`if`-per-line statements in
+      `rx_a11y_internal_node` (split one-per-line); (2) `examples/soak_verify.c`'s
+      `mach/mach.h` RSS sampler gained a `#ifdef __linux__` `/proc/self/statm` arm.
+      The GPU ladder on Linux is GL → raster (no Metal rung — `gpu_metal_available?`
+      false, falls through).
+- [x] **Linux Skia + HarfBuzz blobs (linux-arm64 + linux-x64), SHA-pinned.**
+      `fetch_skia.sh` is host-aware: under `uname=Linux` it selects the
+      `linux-<arch>` RID and SHA-verifies the extracted `.so`. linux-arm64
+      libSkiaSharp.so + libHarfBuzzSharp.so are now pinned (fetched + hashed);
+      linux-x64 too (Skia x64 was already pinned; HarfBuzz x64 added). HarfBuzz on
+      Linux is now wired (was macOS-only) so the shaping pins run on-platform.
+- [x] **ICU on Linux — version-suffixed symbols across split sonames.** macOS's
+      libicucore exports BARE `ubrk_*`/`ubidi_*` from one dyld-cache handle; Linux
+      exports VERSION-SUFFIXED symbols (`ubrk_open_72`) from VERSIONED sonames
+      (`libicuuc.so.72`), and may SPLIT `ubidi_*` into `libicui18n.so.72`. The loader
+      now DISCOVERS the major once (probe `libicuuc.so.<N>` for `ubrk_open_<N>`,
+      majors 66..80), binds every symbol with that matching suffix, and opens the
+      companion `libicui18n.so.<N>` so `ubidi_*` resolves from either library. A miss
+      keeps `icu_available? false` + the greedy-wrap fallback (probe honesty). macOS
+      bare-name path unchanged. **Verdict: segmentation + bidi run on Linux** (the
+      container's `canvas_segmentation` / `canvas_bidi` pins are green on ICU 72).
+- [x] **The full-stack container proof — `Dockerfile.linux-verify` +
+      `scripts/linux_verify.sh`.** A debian-bookworm arm64 image (rust, clang, ICU,
+      SDL2, **libfontconfig1**, curl/unzip) bind-mounts ruxen + canvas read-only,
+      builds ruxen from source (`install.sh --from-source`, stdlib embedded), stages
+      the install, fetches the Linux blobs, compiles the shim warnings-clean on GCC,
+      and runs the FULL canvas pin suite headless (raster + dummy SDL). **The
+      container suite result IS the Linux verification** (cached in
+      `tmp/test-cache/linux-verify-*.log`). Linux-only failures it surfaced and the
+      fixes made:
+      - **`libfontconfig1` missing → Skia inactive.** The Linux `libSkiaSharp.so`
+        links `libfontconfig.so.1` (system-font enumeration; the macOS dylib uses
+        Core Text and has no such dep). Without it `dlopen(libSkiaSharp.so)` fails
+        silently, `skia_available? false`, and every Skia pixel pin took its clean
+        no-Skia branch — a SILENT pass that proved nothing. Fix: add `libfontconfig1`
+        to the image + CI deps (pulls `libfreetype6`). With it, Skia is ACTIVE on
+        Linux and the pixel pins assert real Skia output. **This is a Linux-ONLY
+        runtime requirement — a shipped Linux app must depend on fontconfig.**
+      - **read-only mount vs `ruxen test` build dir / cargo target.** The script
+        copies the ro-mounted sources to writable `/tmp` trees for the cargo build
+        and the test build (the host trees stay ro + unmutated).
+- [x] **ROADMAP capability matrix (below).** Per-OS: what's available where.
+
+### Part 2 — Windows, seamed + CI-deferred (EXPERIMENTAL — no local run) ✅ (seam)
+
+- [x] **`LoadLibrary`/`GetProcAddress` seam (`runtime/rx_dlopen.h`).** A single
+      `#ifdef _WIN32` wrapper — `rx_dlopen`/`rx_dlsym`/`rx_dlclose` mapping to
+      `LoadLibraryA`/`GetProcAddress`/`FreeLibrary` on Windows, `dlopen`/`dlsym`/
+      `dlclose` on POSIX — replaced every direct `dl*` call site in `skia_shim.c`
+      (33) and `sdl_window.c` (15) mechanically. POSIX `RTLD_*` flags are carried
+      through on POSIX and defined as `0`-and-ignored on Windows. Windows basenames
+      wired: `SDL2.dll` / `libSkiaSharp.dll` / `libHarfBuzzSharp.dll`. The seam is
+      INERT on macOS/Linux (the `#else` arm), so it compiles + the suite stays green
+      here.
+- [x] **Windows Skia + HarfBuzz blobs (win-x64 + win-arm64), SHA-pinned.**
+      `fetch_skia.sh` gains the `win-<arch>` RID (the `.Win32` NuGet package); both
+      package + member SHAs pinned (fetched + hashed from any host — you can pin a
+      blob you can't run). EXPERIMENTAL: compiles-untested-until-CI. **Do NOT claim
+      Windows works** until the windows-latest CI job (allowed-failure, compile-only)
+      is green and promoted past compile-only.
+
+### Part 3 — CI (`.github/workflows/ci.yml`) ✅ (written, push-time-proven)
+
+- [x] **Three-OS matrix.** `macos-latest` (full suite + `scripts/check.sh` gate),
+      `ubuntu-latest` (NATIVE — runs the SAME `scripts/linux_verify.sh` the container
+      runs, no Docker; x64 covered here, arm64 covered by the local container),
+      `windows-latest` (allowed-failure, compile-only with `clang-cl`). Every job
+      builds ruxen from a sibling source checkout (never `ruxen upgrade`), caches
+      cargo, fetches the per-OS SHA-pinned blobs, and runs the suite. **HONEST SCOPE:
+      CI is PUSH-TIME-PROVEN** — it can't run from the dev host; the Linux job's
+      logic is verified locally via the container and the macOS job mirrors the local
+      `check.sh`, but the exact GitHub-runner environment + the Windows job are proven
+      only when this lands and the runners execute it.
+
+### Per-platform capability matrix
+
+What each capability does on each desktop OS (✅ works / ⛔ unavailable-clean-Err /
+EXP experimental-untested). "unavailable-clean" = the capability probe reports false
+and the op returns a clean `Err`, never a crash or a silent lie.
+
+| Capability                         | macOS (arm64/x64)     | Linux (arm64 verified, x64 CI) | Windows (EXPERIMENTAL) |
+|------------------------------------|-----------------------|--------------------------------|------------------------|
+| Software raster (clear/rect/path)  | ✅                    | ✅                             | EXP                    |
+| Skia 2D (shapes/text/gradients…)   | ✅                    | ✅ (needs `libfontconfig1`)    | EXP                    |
+| HarfBuzz shaping (kerning/ligs)    | ✅                    | ✅                             | EXP                    |
+| ICU segmentation (grapheme/line)   | ✅ (libicucore, bare) | ✅ (libicuuc.so.NN, suffixed)  | EXP                    |
+| ICU bidi (RTL reorder)             | ✅                    | ✅ (libicuuc/libicui18n.so.NN) | EXP                    |
+| Font fallback (CJK/emoji)          | ✅ (Core Text)        | ✅ (fontconfig/freetype)       | EXP                    |
+| GPU backend                        | ✅ Metal (offscreen + on-screen) ; GL avail | GL → raster (no Metal rung) | EXP (no GPU yet) |
+| SDL window / input / clipboard     | ✅                    | ✅ (SDL2 + dummy headless)     | EXP (`SDL2.dll`)       |
+| Mouse cursors                      | ✅                    | ✅ (real video backend)        | EXP                    |
+| File dialogs (open/save)           | ✅ NSOpen/SavePanel   | ⛔ (GTK backend filed)         | ⛔ (IFileDialog filed) |
+| Accessibility (a11y tree → OS)     | ✅ NSAccessibility    | ⛔ (AT-SPI backend filed)      | ⛔ (UIA backend filed) |
+| Frame pacing / refresh rate        | ✅                    | ✅                             | EXP                    |
+
+**Filed remainders (per-OS, not blocking):** Linux/Windows native file dialogs (GTK
+`GtkFileChooser` / `IFileDialog`), Linux/Windows a11y bridges (AT-SPI / UIA), and the
+Windows GPU path are later platform-matrix items — the capability probes report false
+off-macOS today, so callers degrade cleanly. Linux x64 + Windows are CI-deferred
+(arm64 Linux is the locally-verified rung).
+
 ## Later cycles
 
 - Full canvas surface: `draw_path`, `draw_image`, transforms, clips, layers.
-- Platform matrix: macOS/Windows/Linux → Android/iOS → web (WASM + canvas).
+- Platform matrix: ✅ desktop (macOS/Linux verified, Windows seamed — Phase 4) →
+  Android/iOS → web (WASM + canvas).
 
 ## Remaining — tracked checklist
 

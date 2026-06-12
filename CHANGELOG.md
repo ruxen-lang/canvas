@@ -7,6 +7,34 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Phase 4 — the desktop platform matrix (Linux verified, Windows seamed).**
+  Takes canvas from macOS-only-verified to a real desktop matrix.
+  - **Linux verified on a native arm64 container.** `Dockerfile.linux-verify` +
+    `scripts/linux_verify.sh` build ruxen from source, fetch the SHA-pinned Linux
+    Skia/HarfBuzz blobs, compile the shim warnings-clean on GCC, and run the FULL
+    pin suite headless — the container suite result is the Linux verification.
+  - **`fetch_skia.sh` is now fully host-aware** with `linux-arm64` + `linux-x64`
+    (+ `win-x64`/`win-arm64`) RIDs, all SHA-pinned; HarfBuzz fetches on Linux too
+    (was macOS-only).
+  - **ICU-on-Linux loader** — discovers the ICU major from versioned sonames
+    (`libicuuc.so.<N>`), binds version-suffixed symbols (`ubrk_open_74`), and opens
+    the companion `libicui18n.so.<N>` so `ubidi_*` resolves whether a distro keeps
+    it in libicuuc or splits it out. macOS bare-name path unchanged.
+  - **Windows seam (`runtime/rx_dlopen.h`)** — a `#ifdef _WIN32`
+    LoadLibrary/GetProcAddress wrapper replaced every direct `dlopen`/`dlsym` call
+    site; Windows basenames (`SDL2.dll`/`libSkiaSharp.dll`/`libHarfBuzzSharp.dll`)
+    + Windows blob pins. EXPERIMENTAL — compiles-untested-until-CI.
+  - **CI (`.github/workflows/ci.yml`)** — macos (full + check.sh), ubuntu (native,
+    runs the same `linux_verify.sh`), windows (allowed-failure, compile-only).
+  - Linux-only fixes the container surfaced: GCC `-Wmisleading-indentation` (three
+    multi-`if`-per-line statements split); the HarfBuzz loader only probed `.dylib`
+    in the cache, so the Linux `.so` was never found and shaping stayed silently
+    off (now host-aware basenames like the Skia loader); `examples/soak_verify.c`
+    RSS via `/proc/self/statm` on Linux; the shaping/bidi pins moved off the
+    hardcoded macOS `Arial.ttf` to a committed portable fixture
+    (`tests/fixtures/LiberationSans.ttf`, SIL OFL). Linux runtime requirements
+    surfaced + documented: `libfontconfig1` (Skia's `dlopen` fails without it →
+    Skia inactive) and a CJK system font (`fonts-noto-cjk`) for the fallback pin.
 - **Packaging — `docs/decisions/packaging.md` + `scripts/bundle_libs.sh` + an
   executable-relative dylib loader (Prod-hardening).** A shipped `.app` can now
   carry `libSkiaSharp` / `libHarfBuzzSharp` in `Contents/Frameworks/` and run with

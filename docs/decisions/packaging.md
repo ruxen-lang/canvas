@@ -106,3 +106,34 @@ itself is dual MIT/Apache-2.0 (`LICENSE-MIT` / `LICENSE-APACHE`).
   `rx_exe_relative_dir()` that gets `/proc/self/exe` (Linux) /
   `GetModuleFileName` (Windows) arms when those platforms land. SDL2 stays a
   system/Homebrew dependency for now (zlib-licensed, trivially bundlable later).
+
+## Per-OS packaging notes (Phase 4 — desktop platform matrix)
+
+The fetch + SHA-pin + dlopen model is now host-aware across macOS / Linux /
+Windows (`fetch_skia.sh` selects the RID; the shim's basename arrays cover
+`.dylib`/`.so`/`.dll`). Two OS-specific packaging facts a shipper must know:
+
+- **Linux — `libSkiaSharp.so` has a SYSTEM runtime dependency on
+  `libfontconfig.so.1`** (it uses fontconfig for system-font enumeration; the
+  macOS universal dylib uses Core Text and has no such dep). Without fontconfig
+  on the target, `dlopen(libSkiaSharp.so)` fails and Skia is silently inactive
+  (`skia_available? false`, clean software-raster fallback). A shipped Linux app
+  must therefore depend on the distro's fontconfig package (and, for non-Latin
+  text, a font with the needed coverage — e.g. `fonts-noto-cjk` for CJK fallback;
+  the engine resolves CJK/emoji via Skia's fontmgr, which reads the system font
+  set). The Phase-4 Linux verification environment (`Dockerfile.linux-verify`,
+  the `ubuntu-latest` CI job) installs `libfontconfig1` + `fonts-noto-cjk` for
+  exactly this reason. `libfreetype6` arrives transitively.
+- **Windows — EXPERIMENTAL.** The blobs are SHA-pinned (`win-x64` / `win-arm64`
+  `libSkiaSharp.dll` / `libHarfBuzzSharp.dll`) and the loader has a
+  LoadLibrary/GetProcAddress seam (`runtime/rx_dlopen.h`), but the path is
+  compiles-untested-until-CI. The Windows DLLs additionally need the VC++ runtime
+  present on the target (standard for the SkiaSharp build); the bundling story
+  (DLLs beside the `.exe`, `GetModuleFileName` exe-relative probe) is the filed
+  remainder above, to be finished when the Windows CI job is promoted past
+  compile-only.
+- **The exe-relative bundling probe stays macOS-only** for now
+  (`_NSGetExecutablePath`); the Linux `/proc/self/exe` and Windows
+  `GetModuleFileName` arms remain the filed remainder. On Linux/Windows today the
+  blobs are found via `$RUXEN_CANVAS_CACHE` / `$HOME/.cache/ruxen-canvas` / the
+  system loader path, not an exe-relative bundle dir.
