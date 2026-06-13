@@ -163,13 +163,12 @@ jobs:
         # is the EXPECTED state until the seam is proven — it surfaces drift early.
         run: |
           set -x
-          # No /Fo: clang-cl mis-parses /Fo with a directory or a mixed-separator
-          # path (llvm/llvm-project#87304) — a single /Fo<dir> with two inputs fell
-          # through to a link (LNK1181), and a per-file /Fo"$RUNNER_TEMP/x.obj" was
-          # miscounted as "multiple source files" because of the embedded '/'. With
-          # /c (compile-only, no link) the .obj files just land in the checkout dir,
-          # which is fine for an ephemeral CI run — we only care that they compile.
-          clang-cl /c /W3 \
+          # /Zs = "syntax check only" (clang-cl maps it to -fsyntax-only, the same
+          # check the Linux/macOS gate uses): no object files, no link. We only need
+          # to prove the TUs compile — and /Zs sidesteps clang-cl's /Fo/-/c path
+          # quirks that otherwise mis-invoked the linker (LNK1181 on a phantom
+          # 'C:\.obj'). No /Fo is needed because nothing is written.
+          clang-cl /Zs /W3 \
             canvas/runtime/skia_shim.c \
             canvas/runtime/sdl_window.c \
           || { echo "Windows compile failed (EXPERIMENTAL — expected until proven)"; exit 1; }
