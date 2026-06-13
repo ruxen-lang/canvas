@@ -4679,10 +4679,14 @@ int64_t ruxen_canvas_event_bi(int64_t self) {
 void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
     (void)self;
     if (ms <= 0) return;
+#if defined(_WIN32)
+    Sleep((DWORD)ms);   /* <windows.h> via rx_dlopen.h; ms granularity matches */
+#else
     struct timespec ts;
     ts.tv_sec  = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000L;
     nanosleep(&ts, NULL);
+#endif
 }
 
 /* Monotonic nanosecond clock for the engine timebase (docs/decisions/
@@ -4693,9 +4697,25 @@ void ruxen_canvas_sleep_ms(int64_t self, int64_t ms) {
  * ignored (the clock is process-wide, like sleep_ms). */
 int64_t ruxen_canvas_ticks_ns(int64_t self) {
     (void)self;
+#if defined(_WIN32)
+    /* QueryPerformanceCounter is the monotonic high-resolution timebase on
+     * Windows (the CLOCK_MONOTONIC analogue). Convert ticks->ns via the fixed
+     * process-wide frequency, splitting whole/fractional seconds so the
+     * multiply never overflows int64 (count * 1e9 would wrap in ~9s otherwise).
+     * The frequency is a constant for the process, so caching it across a
+     * benign first-call race is safe. */
+    static LARGE_INTEGER freq;   /* zero-initialized; one-shot fill below */
+    if (freq.QuadPart == 0 && !QueryPerformanceFrequency(&freq)) return 0;
+    LARGE_INTEGER c;
+    if (!QueryPerformanceCounter(&c)) return 0;
+    int64_t whole = c.QuadPart / freq.QuadPart;
+    int64_t rem   = c.QuadPart % freq.QuadPart;
+    return whole * 1000000000LL + (rem * 1000000000LL) / freq.QuadPart;
+#else
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+#endif
 }
 
 /* Paced-present wait to an ABSOLUTE monotonic target tick (docs/decisions/
@@ -4710,6 +4730,20 @@ int64_t ruxen_canvas_ticks_ns(int64_t self) {
  * this is a no-op-by-design there; it is the software clock for raster/headless. */
 void ruxen_canvas_wait_until_ns(int64_t self, int64_t target_ns) {
     (void)self;
+#if defined(_WIN32)
+    /* Windows Sleep is coarse (default timer granularity ~15ms) and may over-
+     * OR under-shoot, so we loop against the monotonic clock: sleep off the
+     * bulk in ms chunks leaving a ~1ms tail, then spin (Sleep(0) yields) until
+     * past the boundary. This preserves the pacing contract — we never return
+     * BEFORE target — at the cost of a brief sub-millisecond spin. */
+    for (;;) {
+        int64_t remaining = target_ns - ruxen_canvas_ticks_ns(0);
+        if (remaining <= 0) return;
+        int64_t ms = remaining / 1000000LL;
+        if (ms > 1) Sleep((DWORD)(ms - 1));   /* leave ~1ms tail to spin off */
+        else        Sleep(0);                 /* yield, then re-check */
+    }
+#else
     int64_t now = ruxen_canvas_ticks_ns(0);
     int64_t remaining = target_ns - now;
     if (remaining <= 0) return;
@@ -4717,4 +4751,5 @@ void ruxen_canvas_wait_until_ns(int64_t self, int64_t target_ns) {
     ts.tv_sec  = (time_t)(remaining / 1000000000LL);
     ts.tv_nsec = (long)(remaining % 1000000000LL);
     nanosleep(&ts, NULL);
+#endif
 }
