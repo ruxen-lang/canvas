@@ -26,15 +26,14 @@
 # host that authored it (no CI runners locally); the Linux job's logic IS verified
 # locally via the container, and the macOS job mirrors the local `scripts/check.sh`,
 # but the Windows job and the exact GitHub-runner environment are proven only when
-# this lands on a branch and the runners execute it.
+# this opens a pull request (or lands on master) and the runners execute it.
 
 name: ci
 
 on:
   push:
-    branches: ["**"]
+    branches: ["master"]
   pull_request:
-  workflow_dispatch:
 
 # The ruxen source lives in a sibling repo; each job checks it out alongside canvas.
 # Override RUXEN_REPO / RUXEN_REF via repo variables if the org/branch differs.
@@ -157,6 +156,13 @@ jobs:
 
       - name: Compile the C shim with clang-cl (MSVC ABI)
         shell: bash
+        # Git Bash (MSYS2) rewrites args that look like POSIX paths, mangling the
+        # MSVC-style /flags: /Zs became 'C:\Program Files\Git\Zs', /c became 'C:'
+        # — so clang-cl never saw them and fell through to a bogus link (LNK1181).
+        # Disable that conversion so the /flags reach clang-cl verbatim.
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+          MSYS_NO_PATHCONV: "1"
         # COMPILE-FIRST: prove the LoadLibrary/GetProcAddress seam + the win basenames
         # compile under the MSVC toolchain. We syntax-check both TUs; we do NOT yet
         # link or run the suite (that needs the ruxen toolchain built for Windows,
@@ -164,9 +170,13 @@ jobs:
         # is the EXPECTED state until the seam is proven — it surfaces drift early.
         run: |
           set -x
-          clang-cl /c /W3 \
+          # /Zs = "syntax check only" (clang-cl maps it to -fsyntax-only, the same
+          # check the Linux/macOS gate uses): no object files, no link. We only need
+          # to prove the TUs compile — and /Zs sidesteps clang-cl's /Fo/-/c path
+          # quirks that otherwise mis-invoked the linker (LNK1181 on a phantom
+          # 'C:\.obj'). No /Fo is needed because nothing is written.
+          clang-cl /Zs /W3 \
             canvas/runtime/skia_shim.c \
             canvas/runtime/sdl_window.c \
-            /Fo"$RUNNER_TEMP/" \
           || { echo "Windows compile failed (EXPERIMENTAL — expected until proven)"; exit 1; }
           echo "Windows shim compiled (compile-only milestone)."

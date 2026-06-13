@@ -447,6 +447,20 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   callers since `measure_text` switched to the real borrowed-`&String` path
   (confirmed sound by the ruxen Q29 audit).
 
+### Fixed
+- **Windows compile (EXPERIMENTAL job) — the frame-pacing primitives now build
+  under clang-cl/MSVC.** `ruxen_canvas_sleep_ms`, `ruxen_canvas_ticks_ns`, and
+  `ruxen_canvas_wait_until_ns` called POSIX `nanosleep`/`clock_gettime`/
+  `CLOCK_MONOTONIC`, which MSVC's `<time.h>` does not declare — clang-cl rejected
+  them as implicit-function-declaration errors and the compile-only Windows job
+  failed. Each now has a `#if defined(_WIN32)` branch built on `<windows.h>`
+  (already in the TU via `rx_dlopen.h`): `Sleep` for the millisecond sleep, and
+  `QueryPerformanceCounter`/`QueryPerformanceFrequency` as the `CLOCK_MONOTONIC`
+  analogue (whole/fractional-second split so the ticks→ns multiply never
+  overflows int64). `wait_until_ns` loops the coarse `Sleep` against the
+  monotonic clock so it still never returns before the target. POSIX path
+  unchanged.
+
 ### Added
 - **Multi-window support — N independent on-screen windows per process**
   (`docs/MULTIWINDOW.md`). `Window.open` can now create and track multiple live
