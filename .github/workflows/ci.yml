@@ -26,15 +26,14 @@
 # host that authored it (no CI runners locally); the Linux job's logic IS verified
 # locally via the container, and the macOS job mirrors the local `scripts/check.sh`,
 # but the Windows job and the exact GitHub-runner environment are proven only when
-# this lands on a branch and the runners execute it.
+# this opens a pull request (or lands on master) and the runners execute it.
 
 name: ci
 
 on:
   push:
-    branches: ["**"]
+    branches: ["master"]
   pull_request:
-  workflow_dispatch:
 
 # The ruxen source lives in a sibling repo; each job checks it out alongside canvas.
 # Override RUXEN_REPO / RUXEN_REF via repo variables if the org/branch differs.

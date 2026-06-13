@@ -1356,8 +1356,14 @@ static int rx_clipboard_init(void) {
     if (!s_GetClipboardText || !s_SetClipboardText) return 0;
     if (getenv("RUXEN_TEST_FORMAT") && !getenv("RUXEN_CANVAS_WINDOW")) {
         /* fork-safe headless: dummy video driver (only takes effect if video is
-         * not already inited — harmless if a real window already set it up). */
+         * not already inited — harmless if a real window already set it up).
+         * setenv is POSIX; MSVC has _putenv_s (always overwrites), so the
+         * getenv guard reproduces setenv's overwrite=0 "only if unset". */
+#if defined(_WIN32)
+        if (!getenv("SDL_VIDEODRIVER")) _putenv_s("SDL_VIDEODRIVER", "dummy");
+#else
         setenv("SDL_VIDEODRIVER", "dummy", 0);
+#endif
     }
     if (s_Init(SDL_INIT_VIDEO) != 0) return 0;
     return 1;
