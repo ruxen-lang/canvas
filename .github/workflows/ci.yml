@@ -163,12 +163,14 @@ jobs:
         # is the EXPECTED state until the seam is proven — it surfaces drift early.
         run: |
           set -x
-          # clang-cl always treats /Fo as a FILENAME, never a directory
-          # (llvm/llvm-project#87304), unlike cl.exe — so a single /Fo<dir> with
-          # multiple inputs mis-parses and falls through to a link (LNK1181).
-          # Compile each TU separately with an explicit per-file object path.
-          for src in skia_shim sdl_window; do
-            clang-cl /c /W3 "canvas/runtime/$src.c" /Fo"$RUNNER_TEMP/$src.obj" \
-              || { echo "Windows compile failed (EXPERIMENTAL — expected until proven)"; exit 1; }
-          done
+          # No /Fo: clang-cl mis-parses /Fo with a directory or a mixed-separator
+          # path (llvm/llvm-project#87304) — a single /Fo<dir> with two inputs fell
+          # through to a link (LNK1181), and a per-file /Fo"$RUNNER_TEMP/x.obj" was
+          # miscounted as "multiple source files" because of the embedded '/'. With
+          # /c (compile-only, no link) the .obj files just land in the checkout dir,
+          # which is fine for an ephemeral CI run — we only care that they compile.
+          clang-cl /c /W3 \
+            canvas/runtime/skia_shim.c \
+            canvas/runtime/sdl_window.c \
+          || { echo "Windows compile failed (EXPERIMENTAL — expected until proven)"; exit 1; }
           echo "Windows shim compiled (compile-only milestone)."
