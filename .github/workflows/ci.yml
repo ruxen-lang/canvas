@@ -156,6 +156,13 @@ jobs:
 
       - name: Compile the C shim with clang-cl (MSVC ABI)
         shell: bash
+        # Git Bash (MSYS2) rewrites args that look like POSIX paths, mangling the
+        # MSVC-style /flags: /Zs became 'C:\Program Files\Git\Zs', /c became 'C:'
+        # — so clang-cl never saw them and fell through to a bogus link (LNK1181).
+        # Disable that conversion so the /flags reach clang-cl verbatim.
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+          MSYS_NO_PATHCONV: "1"
         # COMPILE-FIRST: prove the LoadLibrary/GetProcAddress seam + the win basenames
         # compile under the MSVC toolchain. We syntax-check both TUs; we do NOT yet
         # link or run the suite (that needs the ruxen toolchain built for Windows,
