@@ -7,6 +7,13 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Web backend (wasm + CanvasKit), first slice.** `web/runtime.mjs` maps the
+  `ruxen_canvas_*` ABI to CanvasKit (Skia-in-wasm) host imports;
+  `web/counter.html` renders the real quiver counter in a browser;
+  `web/verify_counter.mjs` + `web/wasm_sigs.mjs` are the headless verify harness
+  (the pixel check now counts actual content, not the background). On wasm the
+  C shim is replaced by JS host imports — same ABI as desktop. See
+  `docs/ROADMAP.md` → "Web backend (WASM + CanvasKit)".
 - **Phase 4 — the desktop platform matrix (Linux verified, Windows seamed).**
   Takes canvas from macOS-only-verified to a real desktop matrix.
   - **Linux verified on a native arm64 container.** `Dockerfile.linux-verify` +

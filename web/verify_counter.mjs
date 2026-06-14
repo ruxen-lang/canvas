@@ -40,6 +40,7 @@ Object.assign(env, {
   ruxen_sharedsync_new: (inner) => { const id = boxId++; box.set(id, inner); return id; }, // ->i32
   ruxen_sharedsync_get: (s) => box.get(N2(s)) ?? 0n,                                 // ->i64 (inner mutex handle)
   ruxen_puts: (ptr) => { const s = readCounterStr(ptr); if (s) console.log("[puts]", s); },
+  ruxen_wasm_panic: (ptr) => { console.error("RUXEN PANIC:", readCounterStr(ptr)); },
   // Formatter (string interpolation) — stubbed: static text still renders;
   // interpolated dyn_text is empty for now (real fmt wiring is a follow-up).
   Formatter_new: () => 0n,
@@ -86,14 +87,17 @@ if (!surface) { console.log("no surface created — render() didn't open a canva
 const info = { width: 200, height: 96, colorType: CanvasKit.ColorType.RGBA_8888,
   alphaType: CanvasKit.AlphaType.Unpremul, colorSpace: CanvasKit.ColorSpace.SRGB };
 const px = surface.getCanvas().readPixels(0, 0, info); // Uint8Array 200*96*4
-let nonZero = 0, distinct = new Set();
+let nonWhite = 0, distinct = new Set();
 for (let i = 0; i < px.length; i += 4) {
   const k = px[i] << 16 | px[i + 1] << 8 | px[i + 2];
-  if (px[i] || px[i + 1] || px[i + 2]) nonZero++;
+  // content = anything that isn't the (near-white) background. Counting
+  // "non-black" was a false positive: a white bg is non-black on every pixel.
+  if (!(px[i] > 240 && px[i + 1] > 240 && px[i + 2] > 240)) nonWhite++;
   distinct.add(k);
 }
-console.log(`drawn: ${nonZero} non-black px of ${200 * 96}, ${distinct.size} distinct colors`);
-console.log(distinct.size > 1 && nonZero > 0
-  ? "✓ quiver painted a UI to the surface (shapes rendered)"
-  : "✗ nothing drew");
-process.exit(distinct.size > 1 ? 0 : 1);
+const ok = nonWhite > 100 && distinct.size > 2; // real widgets, not a stray pixel
+console.log(`drawn: ${nonWhite} non-white (content) px of ${200 * 96}, ${distinct.size} distinct colors`);
+console.log(ok
+  ? "✓ quiver painted a UI to the surface (widgets rendered)"
+  : "✗ frame is essentially empty (background only)");
+process.exit(ok ? 0 : 1);

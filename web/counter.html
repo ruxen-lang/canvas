@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>quiver counter — wasm + CanvasKit</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 2rem; color: #222; background:#fafafa; }
+    h3 { margin-bottom: .25rem; }
+    #surface { border: 1px solid #888; image-rendering: pixelated;
+               width: 600px; height: 288px; /* 200x96 scaled 3x for visibility */ }
+    code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+    #status { margin-top: .75rem; font-weight: 600; }
+    .ok { color: #137333; } .err { color: #c5221f; }
+  </style>
+</head>
+<body>
+  <h3>quiver counter → wasm → CanvasKit</h3>
+  <p>The real <code>quiver/examples/counter</code> app compiled to
+     <code>wasm32-unknown-unknown</code>. Its <code>ruxen_canvas_*</code> draws are
+     wasm host imports backed by CanvasKit; <code>State</code> runs on JS-box
+     mutex/sharedsync stubs. This is a one-shot <code>render()</code> of the first
+     frame (live click handling is the next milestone).</p>
+  <canvas id="surface" width="200" height="96"></canvas>
+  <p id="status">loading…</p>
+
+  <script src="./node_modules/canvaskit-wasm/bin/canvaskit.js"></script>
+  <script type="module">
+    import { makeCanvasImports } from "./runtime.mjs";
+    import { importSignatures, zeroFor } from "./wasm_sigs.mjs";
+    const status = document.getElementById("status");
+    const fail = (m, e) => { status.textContent = "error: " + m; status.className = "err"; if (e) console.error(e); };
+    try {
+      const CanvasKit = await CanvasKitInit({ locateFile: (f) => "./node_modules/canvaskit-wasm/bin/" + f });
+
+      // Font for draw_text (served alongside this page).
+      const fontData = await (await fetch("./LiberationSans.ttf")).arrayBuffer();
+      const typeface = CanvasKit.Typeface.MakeFreeTypeFaceFromData(fontData);
+      const font = new CanvasKit.Font(typeface, 16);
+
+      // Surface bound to the on-page <canvas>.
+      const el = document.getElementById("surface");
+      const makeSurface = () => {
+        const s = CanvasKit.MakeCanvasSurface(el);
+        if (!s) throw new Error("MakeCanvasSurface returned null");
+        return s;
+      };
+      const { env, hosts, setMemory } = makeCanvasImports(CanvasKit, makeSurface, { font });
+
+      // Functional single-threaded Mutex/SharedSync as JS boxes so quiver's
+      // State (SharedSync[Mutex[T]]) stores/retrieves values. Handle widths
+      // follow the wasm sigs: handles are i32 (Number), values i64 (BigInt).
+      const box = new Map(); let boxId = 1;
+      const N2 = (x) => (typeof x === "bigint" ? Number(x) : x);
+      Object.assign(env, {
+        ruxen_mutex_new: (v) => { const id = boxId++; box.set(id, v); return id; },
+        ruxen_mutex_lock: (m) => N2(m),
+        ruxen_mutex_guard_get: (g) => box.get(N2(g)) ?? 0n,
+        ruxen_mutex_guard_set: (g, v) => { box.set(N2(g), v); },
+        ruxen_mutex_guard_drop: () => {},
+        ruxen_sharedsync_new: (inner) => { const id = boxId++; box.set(id, inner); return id; },
+        ruxen_sharedsync_get: (s) => box.get(N2(s)) ?? 0n,
+        ruxen_puts: () => {},
+        Formatter_new: () => 0n, Formatter_write_str: () => {}, Formatter_buffer: () => 0n,
+      });
+
+      const bytes = new Uint8Array(await (await fetch("./demo/counter.wasm")).arrayBuffer());
+      const wasmModule = new WebAssembly.Module(bytes);
+
+      // Every remaining import → a noop returning the correct zero for its
+      // result type (sig-driven: i64→0n, i32/f32/f64→0, void→undefined).
+      const sigs = importSignatures(bytes);
+      for (const i of WebAssembly.Module.imports(wasmModule)) {
+        if (i.module === "env" && i.kind === "function" && !(i.name in env)) {
+          const z = zeroFor(sigs.get(i.name)?.results);
+          env[i.name] = () => z;
+        }
+      }
+
+      const instance = await WebAssembly.instantiate(wasmModule, { env });
+      setMemory(instance.exports.memory);
+      const rc = Number(instance.exports.render());
+      // The CanvasKit surface drew straight to the <canvas> element on end_frame.
+      status.textContent = rc === 1
+        ? "ok — quiver counter rendered one frame via CanvasKit (render() = 1)"
+        : "render() returned " + rc + " (no frame)";
+      status.className = rc === 1 ? "ok" : "err";
+    } catch (e) {
+      fail(e.message, e);
+    }
+  </script>
+</body>
+</html>

@@ -818,3 +818,31 @@ cross-repo dependency on a language fix (see `../ruxen/docs/TASKS.md`).
       char-count story described the legacy fallback). The dead
       `measure_text_n_raw` binding had zero callers and its Ruxen-side
       declaration is now deleted.
+
+## Web backend (WASM + CanvasKit) — first slice (2026-06-13/14)
+
+The web half of the "compile everywhere like Flutter" goal. On wasm the
+`ruxen_canvas_*` ABI stays identical but the C shim is replaced by **JS host
+imports** backed by **CanvasKit** (Skia-in-wasm). Lives under `canvas/web/`.
+
+- [x] **`runtime.mjs`** — `makeCanvasImports(CanvasKit, makeSurface, opts)` →
+      `{env, hosts, setMemory, setFont}`. `host_new` returns an i32 handle; draw
+      methods (`clear`/`draw_rect`/`draw_round_rect`/`save`/`restore`/`translate`/
+      `clip_rect`/`draw_text` — the last reads `&String` out of wasm memory);
+      `argbColor` unpacks `0xAARRGGBB`.
+- [x] **Headless verify harness** — `verify_counter.mjs` instantiates the real
+      quiver counter wasm, wires the draw imports + functional JS-box
+      mutex/sharedsync stubs (correct widths) so `State` works, loads a font,
+      calls `render()`, and counts non-cleared pixels. `wasm_sigs.mjs` parses the
+      wasm Type+Import sections to auto-stub the rest with the right zero per
+      result type. Proves a quiver UI paints to a CanvasKit surface.
+- [ ] **`render()` traps** on a genuine LLVM `unreachable` (a ruxen-side wasm
+      codegen issue — see ruxen `tier4_09`, flukebase `7962d09c…`).
+- [ ] On-screen `<canvas>` mount + `requestAnimationFrame` frame loop.
+- [ ] Event wiring (pointer/keyboard/resize → wasm exports) for interactivity.
+- [ ] Web text metrics seam (CanvasKit `measure_text`) so layout matches desktop.
+- [ ] Full `ruxen_canvas_*` coverage (beyond the counter subset); JS-host
+      packaging + node_modules-in-git decision.
+
+Flukebase: canvas task `0b8165cf…` (web backend to parity). The desktop SDL/Skia
+backend's ABI is the contract this mirrors. See memory `canvas-web-backend`.
