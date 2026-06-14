@@ -1,0 +1,13 @@
+{
+  "name": "canvas-web",
+  "private": true,
+  "type": "module",
+  "description": "Canvas web backend (wasm + CanvasKit). See ../docs/WEB_BACKEND.md.",
+  "scripts": {
+    "verify": "node verify.mjs",
+    "serve": "python3 -m http.server 8080"
+  },
+  "dependencies": {
+    "canvaskit-wasm": "0.39.1"
+  }
+}

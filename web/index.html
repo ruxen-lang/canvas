@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Ruxen canvas — web backend (wasm + CanvasKit)</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 2rem; color: #222; }
+    canvas { border: 1px solid #888; image-rendering: pixelated; }
+    code { background: #f0f0f0; padding: 0 .25em; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <h3>Ruxen → wasm → CanvasKit</h3>
+  <p>This frame was drawn by <code>web/demo/draw.rx</code> compiled to
+     <code>wasm32-unknown-unknown</code>. Its <code>ruxen_canvas_*</code> calls are
+     wasm host imports implemented by <code>runtime.mjs</code> against CanvasKit.</p>
+  <canvas id="surface" width="200" height="150"></canvas>
+  <p id="status">loading…</p>
+
+  <!-- CanvasKit's loader exposes the global CanvasKitInit. Served over http
+       (e.g. `python3 -m http.server` from canvas/web), open /index.html. -->
+  <script src="./node_modules/canvaskit-wasm/bin/canvaskit.js"></script>
+  <script type="module">
+    import { makeCanvasImports } from "./runtime.mjs";
+    const status = document.getElementById("status");
+    try {
+      const CanvasKit = await CanvasKitInit({
+        locateFile: (f) => "./node_modules/canvaskit-wasm/bin/" + f,
+      });
+      const el = document.getElementById("surface");
+      // Browser surface bound to the on-page <canvas>. makeSurface ignores w/h
+      // here (the element sizes the surface) — the runtime core is unchanged.
+      const makeSurface = () => {
+        const s = CanvasKit.MakeCanvasSurface(el);
+        if (!s) throw new Error("MakeCanvasSurface returned null");
+        return s;
+      };
+      const { env } = makeCanvasImports(CanvasKit, makeSurface);
+      const bytes = await (await fetch("./demo/draw.wasm")).arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(bytes, { env });
+      instance.exports.render();
+      status.textContent = "ok — drew one frame via CanvasKit";
+    } catch (e) {
+      status.textContent = "error: " + e.message;
+      console.error(e);
+    }
+  </script>
+</body>
+</html>

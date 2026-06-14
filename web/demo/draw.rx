@@ -1,0 +1,22 @@
+## Canvas web backend — first slice (docs/WEB_BACKEND.md). A standalone wasm
+## module whose draw calls are HOST IMPORTS (env.ruxen_canvas_*): the JS runtime
+## (web/runtime.mjs) implements them against CanvasKit. `render` draws one frame
+## — clear a dark background, then a red rectangle — and returns the host handle
+## so the host can snapshot/present that surface. Symbol names match the real
+## canvas C shim so this runtime carries straight over to the full package.
+lib "env"
+  def host_new as "ruxen_canvas_host_new"(width: Int, height: Int) -> Int
+  def begin_frame as "ruxen_canvas_begin_frame"(host: Int) -> Int
+  def clear as "ruxen_canvas_clear"(host: Int, r: Int, g: Int, b: Int, a: Int) -> Int
+  def draw_rect as "ruxen_canvas_draw_rect"(host: Int, x: Float, y: Float, w: Float, h: Float, r: Int, g: Int, b: Int, a: Int) -> Int
+  def end_frame as "ruxen_canvas_end_frame"(host: Int) -> Int
+end
+
+def render -> Int
+  let host = host_new(200, 150)
+  begin_frame(host)
+  clear(host, 20, 20, 30, 255)
+  draw_rect(host, 40.0, 30.0, 120.0, 90.0, 220, 80, 60, 255)
+  end_frame(host)
+  host
+end
