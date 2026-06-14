@@ -45,7 +45,9 @@ export function makeCanvasImports(CanvasKit, makeSurface, opts = {}) {
       paint.setAntiAlias(true);
       const handle = nextHandle++;
       hosts.set(handle, { surface, canvas, paint });
-      return BigInt(handle);
+      // Real canvas FFI: host_new returns a RawHost (class → pointer → wasm i32),
+      // so return a plain Number, not BigInt. The handle is a small int index.
+      return handle;
     },
     // Frame start — nothing to do for a retained surface yet.
     ruxen_canvas_begin_frame(_h) {

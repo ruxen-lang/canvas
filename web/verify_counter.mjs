@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import CanvasKitInit from "canvaskit-wasm";
 import { makeCanvasImports } from "./runtime.mjs";
+import { importSignatures, zeroFor } from "./wasm_sigs.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, "../..");
@@ -25,32 +26,45 @@ const makeSurface = (w, h) => CanvasKit.MakeSurface(w || 200, h || 96);
 const { env, hosts, setMemory } = makeCanvasImports(CanvasKit, makeSurface, { font });
 
 // Functional single-threaded Mutex/SharedSync as JS boxes (keyed by handle), so
-// quiver's State (SharedSync[Mutex[T]]) actually stores/retrieves values.
+// quiver's State (SharedSync[Mutex[T]]) actually stores/retrieves values. Handle
+// widths follow the wasm sigs: mutex/sharedsync handles are i32 (Number), the
+// stored value is i64 (BigInt).
 const box = new Map(); let boxId = 1;
-const B = (x) => (typeof x === "bigint" ? Number(x) : x);
+const N2 = (x) => (typeof x === "bigint" ? Number(x) : x);
 Object.assign(env, {
-  ruxen_mutex_new: (v) => { const id = boxId++; box.set(id, v); return BigInt(id); },
-  ruxen_mutex_lock: (m) => m,                     // guard handle == mutex handle
-  ruxen_mutex_guard_get: (g) => box.get(B(g)) ?? 0n,
-  ruxen_mutex_guard_set: (g, v) => { box.set(B(g), v); return 0n; },
-  ruxen_mutex_guard_drop: () => 0n,
-  ruxen_sharedsync_new: (inner) => inner,         // transparent wrapper
-  ruxen_sharedsync_get: (s) => s,
-  ruxen_puts: () => 0n,
-  ruxen_env_init: () => 0n,
+  ruxen_mutex_new: (v) => { const id = boxId++; box.set(id, v); return id; },        // ->i32
+  ruxen_mutex_lock: (m) => N2(m),                                                    // guard==mutex (->i32)
+  ruxen_mutex_guard_get: (g) => box.get(N2(g)) ?? 0n,                                // ->i64
+  ruxen_mutex_guard_set: (g, v) => { box.set(N2(g), v); },                           // ->void
+  ruxen_mutex_guard_drop: () => {},                                                  // ->void
+  ruxen_sharedsync_new: (inner) => { const id = boxId++; box.set(id, inner); return id; }, // ->i32
+  ruxen_sharedsync_get: (s) => box.get(N2(s)) ?? 0n,                                 // ->i64 (inner mutex handle)
+  ruxen_puts: (ptr) => { const s = readCounterStr(ptr); if (s) console.log("[puts]", s); },
+  // Formatter (string interpolation) — stubbed: static text still renders;
+  // interpolated dyn_text is empty for now (real fmt wiring is a follow-up).
+  Formatter_new: () => 0n,
+  Formatter_write_str: () => {},
+  Formatter_buffer: () => 0n,
 });
 
-// Any remaining import → noop. Return type must match the wasm signature:
-// Bool→i32 and Float→f64 imports want a plain Number; Int(i64)/ptr want BigInt.
-const i32ret = new Set([
-  "ruxen_canvas_host_is_null", "ruxen_canvas_gpu_active", "ruxen_canvas_window_is_metal",
-]);
-const f64ret = new Set(["ruxen_canvas_event_a", "ruxen_canvas_event_b"]);
+// Read a NUL-terminated UTF-8 string from wasm memory (for puts debug).
+let mem = null;
+const readCounterStr = (ptr) => {
+  const p = N2(ptr) >>> 0;
+  if (!mem || !p) return "";
+  const u = new Uint8Array(mem.buffer, p); let e = 0; while (u[e]) e++;
+  return new TextDecoder().decode(u.subarray(0, e));
+};
+
+// Every remaining import → a noop returning the correct zero for its result
+// type (sig-driven: i64→0n, i32/f32/f64→0, void→undefined). No more guessing.
+const sigs = importSignatures(readFileSync(wasmPath));
 let stubbed = [];
 for (const i of WebAssembly.Module.imports(wasmModule)) {
   if (i.module === "env" && i.kind === "function" && !(i.name in env)) {
     stubbed.push(i.name);
-    env[i.name] = i32ret.has(i.name) ? () => 0 : f64ret.has(i.name) ? () => 0.0 : () => 0n;
+    const z = zeroFor(sigs.get(i.name)?.results);
+    env[i.name] = () => z;
   }
 }
 
@@ -58,6 +72,7 @@ for (const i of WebAssembly.Module.imports(wasmModule)) {
 // bytes overload which gives { module, instance }).
 const instance = await WebAssembly.instantiate(wasmModule, { env });
 setMemory(instance.exports.memory);
+mem = instance.exports.memory; // for the puts debug reader
 
 console.log("calling render()…  (noop-stubbed:", stubbed.join(", "), ")");
 let rc;
