@@ -20,3 +20,7 @@ type = "library"
 # (docs/FFI.md).
 [system_libs]
 libs = []
+# macOS native-widget backend (runtime/cocoa.m) needs AppKit; Cocoa is a system
+# framework (always present — nothing to install). Native builds link it
+# automatically; wasm / non-macOS targets ignore it.
+frameworks = ["Cocoa"]

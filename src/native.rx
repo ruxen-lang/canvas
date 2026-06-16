@@ -1,0 +1,33 @@
+## Native OS widget backends — one class per OS, same method names, so the L2
+## framework selects a backend by OS (the device OS by default). Shipped WITH
+## canvas (L1, the platform/FFI layer): the per-OS shim (`runtime/cocoa.m`, …) and
+## the system frameworks it needs (`[system_libs] frameworks`) ride in-tree, so a
+## native build wires everything up out of the box — nothing to install (AppKit,
+## Win32, GTK are part of their OS).
+##
+## Today: macOS (AppKit). Windows (Win32) and Linux (GTK) classes land the same
+## way — a sibling `runtime/<os>.c|m` + a class with the SAME method names — so
+## quiver's `run_native` only picks `MacOS` / `Windows` / `Linux` by OS.
+##
+## Off the native OS (e.g. wasm) the `.m` is never compiled and these become
+## undefined host imports a web app simply never calls.
+
+## macOS / AppKit backend. Each method is a flat C-ABI call into `runtime/cocoa.m`
+## (the `as "cocoa_*"` mints the symbol). The Cocoa framework is declared in
+## `Ruxen.toml [system_libs] frameworks` and links automatically on macOS.
+##
+## Lifecycle: `window_open` → quiver mounts widgets (`create`/`set_*`/`add_subview`)
+## → `show` → loop on `pump` (one event per call; returns the node id of a control
+## that fired, -1 for nothing, -2 when the window closed).
+class MacOS
+  lib "runtime/cocoa.m"
+    def self.window_open as "cocoa_window_open"(title: &String, w: Int, h: Int) -> nil
+    def self.create as "cocoa_create"(id: Int, kind: Int) -> nil
+    def self.set_text as "cocoa_set_text"(id: Int, text: &String) -> nil
+    def self.set_frame as "cocoa_set_frame"(id: Int, x: Int, y: Int, w: Int, h: Int) -> nil
+    def self.set_state as "cocoa_set_state"(id: Int, value: Int) -> nil
+    def self.add_subview as "cocoa_add_subview"(parent: Int, child: Int) -> nil
+    def self.show as "cocoa_show" -> nil
+    def self.pump as "cocoa_pump" -> Int
+  end
+end

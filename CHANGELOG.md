@@ -7,6 +7,18 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Native OS widget backend — macOS / AppKit (`MacOS` class).** `src/native.rx`
+  exposes a `MacOS` class (`window_open`/`create`/`set_text`/`set_frame`/
+  `set_state`/`add_subview`/`show`/`pump`) over a `runtime/cocoa.m` Objective-C
+  AppKit shim, so quiver can render an app as REAL `NSTextField`/`NSButton`/
+  `NSSlider`/`NSPopUpButton` widgets (the OS owns text editing, caret, scroll,
+  focus, IME). One class per OS, same method names — Windows (Win32) / Linux
+  (GTK) join the same way. **Ships with everything:** the shim is in-tree and the
+  system framework is declared in `[system_libs] frameworks = ["Cocoa"]`, so a
+  native build links it out of the box (Cocoa is part of macOS — nothing to
+  install). Event loop is poll-based (`pump` returns the node that fired); the C
+  shim retains views (MRC) and uses a window delegate for close. wasm/web builds
+  skip the `.m` entirely.
 - **Web backend (wasm + CanvasKit), first slice.** `web/runtime.mjs` maps the
   `ruxen_canvas_*` ABI to CanvasKit (Skia-in-wasm) host imports;
   `web/counter.html` renders the real quiver counter in a browser;
